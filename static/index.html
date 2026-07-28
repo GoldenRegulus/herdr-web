@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Herdr Web</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css" />
+    <link rel="stylesheet" href="{{HERDR_WEB_BASE_PATH}}static/style.css" />
+    <script>window.herdrWebBasePath = "{{HERDR_WEB_BASE_PATH}}";</script>
+  </head>
+  <body>
+    <main>
+      <section id="picker" aria-labelledby="title">
+        <h1 id="title">Herdr</h1>
+        <p class="muted">Select a running session on this Jupyter host.</p>
+        <div id="backends" class="backends" aria-live="polite"></div>
+        <p id="picker-error" class="error" hidden></p>
+        <button id="refresh" type="button">Refresh</button>
+      </section>
+      <div id="web-toasts" aria-live="polite" aria-atomic="true"></div>
+      <section id="terminal-view" hidden>
+        <header>
+          <strong id="backend-name"></strong>
+          <button id="back" type="button">Back to sessions</button>
+        </header>
+        <aside id="telemetry" aria-live="polite">
+          <span id="connection-indicator" data-state="connecting"></span>
+          <span id="connection-status">Connecting…</span>
+          <span id="terminal-progress" hidden>
+            <progress id="progress-value" max="100" value="0"></progress>
+            <span id="progress-text">0%</span>
+          </span>
+          <span id="fps">-- FPS</span>
+        </aside>
+        <div id="terminal" aria-label="Herdr terminal"></div>
+      </section>
+    </main>
+
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
+    <script src="{{HERDR_WEB_BASE_PATH}}static/app.js"></script>
+  </body>
+</html>

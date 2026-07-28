@@ -1,0 +1,4 @@
+__pycache__/
+*.py[cod]
+herdr-web.log
+herdr-web.pid
