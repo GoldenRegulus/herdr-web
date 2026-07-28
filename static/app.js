@@ -23,25 +23,29 @@
   let resizeQueued = false;
   let outputQueued = [];
   let outputAnimationFrame;
+  let receivedFrames = 0;
+  const MAX_CLIPBOARD_IMAGE_BYTES = 16 * 1024 * 1024;
+  const clipboardImageExtensions = {
+    'image/png': 'png',
+    'image/jpeg': 'jpg',
+    'image/gif': 'gif',
+    'image/webp': 'webp',
+    'image/bmp': 'bmp',
+  };
 
   function setStatus(message, state = 'connecting') {
     status.textContent = message;
     connectionIndicator.dataset.state = state;
   }
 
-  function runFpsMeter() {
-    let frames = 0;
-    let sampleStarted = performance.now();
-    const sample = (now) => {
-      frames += 1;
-      if (now - sampleStarted >= 1000) {
-        fps.textContent = `${Math.round((frames * 1000) / (now - sampleStarted))} FPS`;
-        frames = 0;
-        sampleStarted = now;
-      }
-      requestAnimationFrame(sample);
-    };
-    requestAnimationFrame(sample);
+  function startTransportRateMeter() {
+    window.setInterval(() => {
+      // Count bridge frames, not browser repaint frames. The server suppresses
+      // unchanged Herdr frames and the bridge caps changed-frame delivery at
+      // 60 Hz, so this is the actual screen-update transport rate.
+      fps.textContent = `${receivedFrames} FPS`;
+      receivedFrames = 0;
+    }, 1000);
   }
 
   async function requestBrowserNotificationPermission() {
@@ -111,6 +115,31 @@
     }
   }
 
+  function clipboardImageFromPaste(event) {
+    const items = [...(event.clipboardData?.items || [])];
+    const item = items.find((candidate) => clipboardImageExtensions[candidate.type]);
+    if (!item) return undefined;
+    const file = item.getAsFile();
+    if (!file) return undefined;
+    return { file, extension: clipboardImageExtensions[item.type] };
+  }
+
+  async function sendClipboardImage(image) {
+    if (socket?.readyState !== WebSocket.OPEN) {
+      showBrowserToast('Image paste needs a WebSocket connection');
+      return;
+    }
+    if (image.file.size <= 0 || image.file.size > MAX_CLIPBOARD_IMAGE_BYTES) {
+      showBrowserToast('Image must be smaller than 16 MiB');
+      return;
+    }
+    const bytes = await image.file.arrayBuffer();
+    socket.send(JSON.stringify({
+      type: 'clipboard-image', extension: image.extension, size: bytes.byteLength,
+    }));
+    socket.send(bytes);
+  }
+
   function handleOsc9(message) {
     // OSC 9;4;<state>;<percent> is the Windows Terminal progress convention.
     // Herdr's terminal toast is OSC 9;<message>, so it remains separate.
@@ -168,6 +197,7 @@
   }
 
   function queueTerminalOutput(bytes) {
+    receivedFrames += 1;
     outputQueued.push(bytes);
     if (outputAnimationFrame) return;
     // Coalesce network bursts at the display refresh boundary. xterm still
@@ -310,7 +340,7 @@
     socket.onmessage = (event) => {
       if (typeof event.data === 'string') {
         const message = JSON.parse(event.data);
-        if (message.type === 'error') setStatus(message.message, 'disconnected');
+        if (message.type === 'error') showBrowserToast(message.message);
         return;
       }
       queueTerminalOutput(new Uint8Array(event.data));
@@ -349,6 +379,33 @@
     // xterm hands us its sanitized payload without rendering control bytes.
     terminal.parser.registerOscHandler(9, handleOsc9);
     terminal.parser.registerOscHandler(52, handleOsc52);
+    terminal.attachCustomKeyEventHandler((event) => {
+      if (event.type !== 'keydown') return true;
+      if (event.key === 'Enter' && event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey) {
+        // Pi requires the CSI-u Shift+Enter sequence (ESC [ 13 ; 2 u) to
+        // distinguish a newline from plain Enter, which submits the prompt.
+        event.preventDefault();
+        sendInput('\x1b[13;2u');
+        return false;
+      }
+      if (!event.metaKey) return true;
+      const commandKey = { ArrowLeft: '\x01', ArrowRight: '\x05', Backspace: '\x15' }[event.key];
+      if (!commandKey) return true;
+      // Match standard macOS Terminal/iTerm editing: Cmd+Left/Right send
+      // Ctrl-A/Ctrl-E; Cmd+Backspace sends Ctrl-U (kill to line start).
+      event.preventDefault();
+      sendInput(commandKey);
+      return false;
+    });
+    // Keep right-click available for Herdr/xterm mouse handling instead of
+    // opening the browser context menu over the terminal.
+    terminal.element.addEventListener('contextmenu', (event) => event.preventDefault());
+    terminal.element.addEventListener('paste', (event) => {
+      const image = clipboardImageFromPaste(event);
+      if (!image) return;
+      event.preventDefault();
+      void sendClipboardImage(image).catch(() => showBrowserToast('Could not read clipboard image'));
+    }, true);
     fitAddon.fit();
     terminal.focus();
 
@@ -423,6 +480,6 @@
   document.querySelector('#refresh').addEventListener('click', () => loadBackends(false));
   document.querySelector('#back').addEventListener('click', () => showPicker());
   window.addEventListener('popstate', restoreUrlSelection);
-  runFpsMeter();
+  startTransportRateMeter();
   restoreUrlSelection();
 })();

@@ -13,6 +13,7 @@ import signal
 import socket
 import struct
 import termios
+import tempfile
 import secrets
 from dataclasses import dataclass, field
 from typing import Final
@@ -25,7 +26,9 @@ from fastapi.staticfiles import StaticFiles
 APP_DIR: Final = Path(__file__).resolve().parent.parent
 STATIC_DIR: Final = APP_DIR / "static"
 MAX_TERMINAL_DIMENSION: Final = 500
+MAX_CLIPBOARD_IMAGE_BYTES: Final = 16 * 1024 * 1024
 DISPLAY_FRAME_INTERVAL: Final = 1 / 60
+IMAGE_EXTENSIONS: Final = frozenset({"png", "jpg", "jpeg", "gif", "webp", "bmp"})
 
 app = FastAPI(title="herdr-web", docs_url=None, redoc_url=None)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
@@ -170,6 +173,32 @@ def write_pty(master_fd: int, data: bytes) -> None:
         remaining = remaining[written:]
 
 
+def stage_clipboard_image(extension: str, data: bytes) -> Path:
+    if extension not in IMAGE_EXTENSIONS:
+        raise ValueError("unsupported clipboard image format")
+    if not data or len(data) > MAX_CLIPBOARD_IMAGE_BYTES:
+        raise ValueError("clipboard image exceeds Herdr's 16 MiB limit")
+    directory = Path(tempfile.gettempdir()) / "herdr-web-images"
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd, raw_path = tempfile.mkstemp(prefix="image-", suffix=f".{extension}", dir=directory)
+    path = Path(raw_path)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as image:
+            image.write(data)
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+    return path
+
+
+async def remove_staged_image_later(path: Path) -> None:
+    # The client synchronously reads the path after its bracketed-paste event;
+    # retain it briefly for that handoff, then remove this bridge-owned file.
+    await asyncio.sleep(30)
+    path.unlink(missing_ok=True)
+
+
 def start_client(backend: Backend, cols: int, rows: int) -> PtyClient:
     """Run Herdr's existing terminal client in a PTY.
 
@@ -193,6 +222,9 @@ def start_client(backend: Backend, cols: int, rows: int) -> PtyClient:
         # Make the normal Herdr client write clipboard updates as OSC 52 to
         # this PTY, where the browser can apply them to its real clipboard.
         environment["SSH_TTY"] = "herdr-web"
+        # Reuse Herdr's existing Unix remote-client file-drop path for browser
+        # clipboard images. The web bridge stages the file and pastes its path.
+        environment["HERDR_REMOTE_KEYBINDINGS"] = "server"
         os.execvpe(binary, [binary, "client"], environment)
 
     client = PtyClient(pid, master_fd)
@@ -379,12 +411,36 @@ async def terminal(websocket: WebSocket, backend_id: str) -> None:
                     return
 
         async def browser_to_pty() -> None:
+            pending_image: tuple[str, int] | None = None
             while True:
                 message = await websocket.receive()
                 if message["type"] == "websocket.disconnect":
                     return
                 if message.get("bytes") is not None:
-                    write_pty(client.master_fd, message["bytes"])
+                    data = message["bytes"]
+                    if pending_image is None:
+                        write_pty(client.master_fd, data)
+                        continue
+                    extension, expected_size = pending_image
+                    pending_image = None
+                    if len(data) != expected_size:
+                        await websocket.send_json(
+                            {"type": "error", "message": "clipboard image upload was truncated"}
+                        )
+                        continue
+                    try:
+                        path = stage_clipboard_image(extension, data)
+                        # Herdr's remote client recognizes an absolute image
+                        # path inside bracketed paste and emits ClipboardImage.
+                        write_pty(
+                            client.master_fd,
+                            b"\x1b[200~" + os.fsencode(path) + b"\x1b[201~",
+                        )
+                        asyncio.create_task(remove_staged_image_later(path))
+                    except (OSError, ValueError) as error:
+                        await websocket.send_json(
+                            {"type": "error", "message": f"clipboard image rejected: {error}"}
+                        )
                     continue
                 text = message.get("text")
                 if text is None:
@@ -396,6 +452,19 @@ async def terminal(websocket: WebSocket, backend_id: str) -> None:
                 control = json.loads(text)
                 if control.get("type") == "resize":
                     client.resize(int(control["cols"]), int(control["rows"]))
+                elif control.get("type") == "clipboard-image":
+                    extension = str(control.get("extension", "")).lower()
+                    size = control.get("size")
+                    if extension not in IMAGE_EXTENSIONS or not isinstance(size, int):
+                        await websocket.send_json(
+                            {"type": "error", "message": "invalid clipboard image header"}
+                        )
+                    elif size <= 0 or size > MAX_CLIPBOARD_IMAGE_BYTES:
+                        await websocket.send_json(
+                            {"type": "error", "message": "clipboard image exceeds Herdr's 16 MiB limit"}
+                        )
+                    else:
+                        pending_image = (extension, size)
 
         reader = asyncio.create_task(read_pty())
         sender = asyncio.create_task(send_changed_frames())
