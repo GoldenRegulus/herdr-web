@@ -1,4 +1,21 @@
 __pycache__/
 *.py[cod]
-herdr-web.log
-herdr-web.pid
+
+# Local environments and test/tool caches
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.playwright-cli/
+
+# Runtime output
+*.log
+*.pid
+nohup.out
+
+# OS metadata
+.DS_Store

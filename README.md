@@ -16,6 +16,16 @@ server-owned TUI layout, colors, keyboard behavior, mouse protocol, panes, and
 session capabilities as a terminal client. The browser is only a terminal
 emulator.
 
+## Install
+
+Requires Python 3.10 or later and an installed `herdr` client:
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -r requirements.txt
+```
+
 ## Run beside Jupyter
 
 Run this as the same Unix user that owns the Herdr server and sockets:
