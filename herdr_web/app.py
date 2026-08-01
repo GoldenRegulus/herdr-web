@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import base64
 import fcntl
+import logging
 import os
 from pathlib import Path
 import pty
@@ -30,6 +31,7 @@ MAX_TERMINAL_DIMENSION: Final = 500
 MAX_CLIPBOARD_IMAGE_BYTES: Final = 16 * 1024 * 1024
 DISPLAY_FRAME_INTERVAL: Final = 1 / 60
 IMAGE_EXTENSIONS: Final = frozenset({"png", "jpg", "jpeg", "gif", "webp", "bmp"})
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="herdr-web", docs_url=None, redoc_url=None)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
@@ -447,6 +449,11 @@ async def terminal(websocket: WebSocket, backend_id: str) -> None:
             while True:
                 message = await websocket.receive()
                 if message["type"] == "websocket.disconnect":
+                    logger.info(
+                        "websocket client disconnected backend=%s code=%s",
+                        backend.label,
+                        message.get("code"),
+                    )
                     return
                 if message.get("bytes") is not None:
                     data = message["bytes"]
@@ -510,8 +517,10 @@ async def terminal(websocket: WebSocket, backend_id: str) -> None:
         await asyncio.gather(reader, *pending, return_exceptions=True)
         for task in done:
             task.result()
-    except (WebSocketDisconnect, asyncio.TimeoutError):
-        pass
+    except WebSocketDisconnect as error:
+        logger.info("websocket disconnected backend=%s code=%s", backend.label, error.code)
+    except asyncio.TimeoutError:
+        logger.info("websocket initial resize timed out backend=%s", backend.label)
     except RuntimeError as error:
         await websocket.send_json({"type": "error", "message": str(error)})
     finally:

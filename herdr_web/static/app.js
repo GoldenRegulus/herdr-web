@@ -16,6 +16,9 @@
   let sessionId;
   let socket;
   let connectTimer;
+  let reconnectTimer;
+  let reconnectStableTimer;
+  let reconnectAttempts = 0;
   let httpFallbackStarting = false;
   let terminal;
   let fitAddon;
@@ -219,6 +222,11 @@
 
   function showPicker(updateUrl = true, refresh = true) {
     clearTimeout(connectTimer);
+    clearTimeout(reconnectTimer);
+    clearTimeout(reconnectStableTimer);
+    reconnectTimer = undefined;
+    reconnectStableTimer = undefined;
+    reconnectAttempts = 0;
     socket?.close();
     socket = undefined;
     httpFallbackStarting = false;
@@ -304,6 +312,10 @@
 
   async function startHttpFallback(backend) {
     if (sessionId || httpFallbackStarting) return;
+    clearTimeout(reconnectTimer);
+    clearTimeout(reconnectStableTimer);
+    reconnectTimer = undefined;
+    reconnectStableTimer = undefined;
     httpFallbackStarting = true;
     socket?.close();
     socket = undefined;
@@ -324,20 +336,43 @@
     }
   }
 
+  function scheduleWebSocketReconnect(backend) {
+    if (
+      reconnectTimer || sessionId || httpFallbackStarting || !terminal
+      || selectedBackendId() !== backend.id
+    ) return;
+    const delay = Math.min(1000 * (2 ** reconnectAttempts), 10_000);
+    reconnectAttempts += 1;
+    setStatus(`Reconnecting in ${Math.ceil(delay / 1000)}s…`);
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = undefined;
+      startWebSocket(backend);
+    }, delay);
+  }
+
   function startWebSocket(backend) {
     let opened = false;
-    socket = new WebSocket(wsUrl(backend.id));
-    socket.binaryType = 'arraybuffer';
+    const nextSocket = new WebSocket(wsUrl(backend.id));
+    socket = nextSocket;
+    nextSocket.binaryType = 'arraybuffer';
     connectTimer = setTimeout(() => {
       if (!opened) startHttpFallback(backend);
     }, 2000);
-    socket.onopen = () => {
+    nextSocket.onopen = () => {
+      if (socket !== nextSocket) {
+        nextSocket.close();
+        return;
+      }
       opened = true;
       clearTimeout(connectTimer);
+      clearTimeout(reconnectStableTimer);
+      reconnectStableTimer = setTimeout(() => {
+        if (socket === nextSocket) reconnectAttempts = 0;
+      }, 30_000);
       setStatus('Connected', 'connected');
       sendResize();
     };
-    socket.onmessage = (event) => {
+    nextSocket.onmessage = (event) => {
       if (typeof event.data === 'string') {
         const message = JSON.parse(event.data);
         if (message.type === 'error') showBrowserToast(message.message);
@@ -345,17 +380,26 @@
       }
       queueTerminalOutput(new Uint8Array(event.data));
     };
-    socket.onclose = () => {
+    nextSocket.onclose = () => {
+      if (socket !== nextSocket) return;
       clearTimeout(connectTimer);
-      if (!opened && !sessionId) startHttpFallback(backend);
-      else if (opened && !sessionId) setStatus('Disconnected', 'disconnected');
+      clearTimeout(reconnectStableTimer);
+      reconnectStableTimer = undefined;
+      socket = undefined;
+      if (!opened && !sessionId && !httpFallbackStarting) startHttpFallback(backend);
+      else if (opened && !sessionId) scheduleWebSocketReconnect(backend);
     };
-    socket.onerror = () => {
-      // onclose starts the HTTP fallback when the upgrade is unavailable.
+    nextSocket.onerror = () => {
+      // onclose starts the fallback or reconnect sequence.
     };
   }
 
   function attach(backend) {
+    clearTimeout(reconnectTimer);
+    clearTimeout(reconnectStableTimer);
+    reconnectTimer = undefined;
+    reconnectStableTimer = undefined;
+    reconnectAttempts = 0;
     httpFallbackStarting = false;
     terminalProgress.hidden = true;
     picker.hidden = true;
