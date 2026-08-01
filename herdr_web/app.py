@@ -356,9 +356,9 @@ def main() -> None:
     )
     parser.add_argument(
         "--port",
-        default=8766,
+        default=8765,
         type=int,
-        help="port to bind (default: 8766)",
+        help="port to bind (default: 8765)",
     )
     arguments = parser.parse_args()
     if not 1 <= arguments.port <= 65535:

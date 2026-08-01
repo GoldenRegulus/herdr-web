@@ -44,28 +44,28 @@ herdr-web --help
 Run this as the same Unix user that owns the Herdr server and sockets:
 
 ```bash
-uv run herdr-web --host 127.0.0.1 --port 8766
+uv run herdr-web --host 127.0.0.1 --port 8765
 ```
 
 Open the service at:
 
 ```text
-http://127.0.0.1:8766/
+http://127.0.0.1:8765/
 ```
 
 To allow direct access from the local network, bind all interfaces:
 
 ```bash
-uv run herdr-web --host 0.0.0.0 --port 8766
+uv run herdr-web --host 0.0.0.0 --port 8765
 ```
 
-Then open `http://192.168.1.1:8766/` from a client that can reach that host.
+Then open `http://192.168.1.1:8765/` from a client that can reach that host.
 Replace `192.168.1.1` with the host's real LAN address.
 
 To bind only one interface, use that address instead:
 
 ```bash
-uv run herdr-web --host 192.168.1.1 --port 8766
+uv run herdr-web --host 192.168.1.1 --port 8765
 ```
 
 The default bind address is `127.0.0.1` for safety. The service has no separate
@@ -80,19 +80,20 @@ Jupyter server runs on the same host, bind to `0.0.0.0` when you need both LAN
 access and the Jupyter proxy:
 
 ```bash
-uv run herdr-web --host 0.0.0.0 --port 8766
+uv run herdr-web --host 0.0.0.0 --port 8765
 ```
 
 Open it through Jupyter Server Proxy:
 
 ```text
-https://JUPYTER_HOST/USER_BASE/proxy/8766/
+https://JUPYTER_HOST/USER_BASE/proxy/8765/
 ```
 
 For example, a JupyterHub user server commonly uses:
 
 ```text
-https://hub.example.org/user/alice/proxy/8766/
+https://hub.example.org/user/alice/proxy/8765/
+```
 
 If only Jupyter access is needed, bind to `127.0.0.1` instead. A process bound
 only to `192.168.1.1` accepts direct connections to that address, but a proxy
@@ -118,7 +119,7 @@ The HTTP fallback supports terminal text input but not binary image uploads.
 | Option or variable | Purpose |
 | --- | --- |
 | `--host HOST` | Interface to bind. Defaults to `127.0.0.1`. |
-| `--port PORT` | Port to bind. Defaults to `8766`. |
+| `--port PORT` | Port to bind. Defaults to `8765`. |
 | `HERDR_BINARY` | Absolute path to the Herdr binary used for the local client. Defaults to `herdr` on `PATH`. |
 | `HERDR_WEB_CONFIG_DIR` | Herdr configuration directory to scan. Defaults to `~/.config/herdr`, respecting `XDG_CONFIG_HOME`. |
 
