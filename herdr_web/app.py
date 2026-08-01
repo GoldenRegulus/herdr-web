@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import base64
 import fcntl
@@ -23,8 +24,8 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from fastapi.staticfiles import StaticFiles
 
-APP_DIR: Final = Path(__file__).resolve().parent.parent
-STATIC_DIR: Final = APP_DIR / "static"
+PACKAGE_DIR: Final = Path(__file__).resolve().parent
+STATIC_DIR: Final = PACKAGE_DIR / "static"
 MAX_TERMINAL_DIMENSION: Final = 500
 MAX_CLIPBOARD_IMAGE_BYTES: Final = 16 * 1024 * 1024
 DISPLAY_FRAME_INTERVAL: Final = 1 / 60
@@ -346,6 +347,28 @@ async def delete_session(session_id: str) -> dict[str, bool]:
     return {"ok": True}
 
 
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Run the Herdr Web browser terminal")
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="interface to bind (default: 127.0.0.1)",
+    )
+    parser.add_argument(
+        "--port",
+        default=8766,
+        type=int,
+        help="port to bind (default: 8766)",
+    )
+    arguments = parser.parse_args()
+    if not 1 <= arguments.port <= 65535:
+        parser.error("--port must be between 1 and 65535")
+
+    import uvicorn
+
+    uvicorn.run(app, host=arguments.host, port=arguments.port)
+
+
 @app.websocket("/ws/{backend_id}")
 async def terminal(websocket: WebSocket, backend_id: str) -> None:
     backends = discover_backends()
@@ -485,3 +508,7 @@ async def terminal(websocket: WebSocket, backend_id: str) -> None:
     finally:
         if client is not None:
             client.close()
+
+
+if __name__ == "__main__":
+    main()
