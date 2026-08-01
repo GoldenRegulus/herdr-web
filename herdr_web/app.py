@@ -211,8 +211,17 @@ def start_client(backend: Backend, cols: int, rows: int) -> PtyClient:
     pid, master_fd = pty.fork()
     if pid == 0:
         environment = os.environ.copy()
-        environment.pop("HERDR_SOCKET_PATH", None)
-        environment.pop("HERDR_SESSION", None)
+        # The bridge can run inside Herdr. Do not make its child client look
+        # like a nested launch or bind it to the parent's pane.
+        for variable in (
+            "HERDR_ENV",
+            "HERDR_SOCKET_PATH",
+            "HERDR_SESSION",
+            "HERDR_TAB_ID",
+            "HERDR_WORKSPACE_ID",
+            "HERDR_PANE_ID",
+        ):
+            environment.pop(variable, None)
         environment["HERDR_CLIENT_SOCKET_PATH"] = str(backend.socket_path)
         environment["HERDR_RENDER_ENCODING"] = "terminal-ansi"
         environment.setdefault("TERM", "xterm-256color")

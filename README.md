@@ -41,7 +41,9 @@ herdr-web --help
 
 ## Run directly
 
-Run this as the same Unix user that owns the Herdr server and sockets:
+Run this as the same Unix user that owns the Herdr server and sockets. You can
+start it from inside a Herdr terminal; the web client connects as a separate
+client:
 
 ```bash
 uv run herdr-web --host 127.0.0.1 --port 8765
