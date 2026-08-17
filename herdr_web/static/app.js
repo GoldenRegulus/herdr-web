@@ -241,8 +241,11 @@
   }
 
   function wsUrl(backendId) {
+    const url = new URL(
+      `${appBasePath()}ws/${encodeURIComponent(backendId)}`, location.href,
+    );
     const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    return `${scheme}//${location.host}${appBasePath().replace(/\/$/, '')}/ws/${encodeURIComponent(backendId)}`;
+    return url.toString();
   }
 
   function queueTerminalOutput(bytes) {
