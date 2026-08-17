@@ -75,6 +75,14 @@ header {
   top: .45rem;
   z-index: 3;
 }
+#telemetry[data-state="disconnected"] {
+  cursor: pointer;
+}
+#telemetry[data-state="disconnected"] #connection-indicator,
+#telemetry[data-state="disconnected"] #connection-status,
+#telemetry[data-state="disconnected"] #fps {
+  cursor: pointer;
+}
 #connection-indicator { background: #e5c07b; border-radius: 50%; height: .55rem; width: .55rem; }
 #connection-indicator[data-state="connected"] { background: #98c379; box-shadow: 0 0 7px #98c379; }
 #connection-indicator[data-state="disconnected"] { background: #e06c75; }

@@ -6,6 +6,7 @@
   const status = document.querySelector('#connection-status');
   const connectionIndicator = document.querySelector('#connection-indicator');
   const fps = document.querySelector('#fps');
+  const telemetry = document.querySelector('#telemetry');
   const terminalProgress = document.querySelector('#terminal-progress');
   const progressValue = document.querySelector('#progress-value');
   const progressText = document.querySelector('#progress-text');
@@ -14,10 +15,12 @@
   const backendName = document.querySelector('#backend-name');
 
   let sessionId;
+  let currentBackend;
   let socket;
   let connectTimer;
   let reconnectTimer;
   let reconnectStableTimer;
+  let reconnectReloadTimer;
   let reconnectAttempts = 0;
   let httpFallbackStarting = false;
   let terminal;
@@ -39,6 +42,49 @@
   function setStatus(message, state = 'connecting') {
     status.textContent = message;
     connectionIndicator.dataset.state = state;
+    telemetry.dataset.state = state;
+    telemetry.title = state === 'disconnected' ? 'Disconnected. Click to reconnect.' : '';
+    if (state !== 'disconnected') {
+      clearTimeout(reconnectReloadTimer);
+      reconnectReloadTimer = undefined;
+    }
+  }
+
+  function clearReconnectState() {
+    clearTimeout(reconnectTimer);
+    clearTimeout(reconnectStableTimer);
+    clearTimeout(reconnectReloadTimer);
+    reconnectTimer = undefined;
+    reconnectStableTimer = undefined;
+    reconnectReloadTimer = undefined;
+  }
+
+  function scheduleReconnectPageReload() {
+    clearTimeout(reconnectReloadTimer);
+    reconnectReloadTimer = setTimeout(() => {
+      if (connectionIndicator.dataset.state === 'connected') return;
+      if (!terminal || !currentBackend) return;
+      location.reload();
+    }, 7_000);
+  }
+
+  function attemptReconnect() {
+    if (!terminal || !currentBackend || connectionIndicator.dataset.state !== 'disconnected') return;
+    clearReconnectState();
+    clearTimeout(connectTimer);
+    connectTimer = undefined;
+    socket?.close();
+    socket = undefined;
+    if (sessionId) {
+      const oldSessionId = sessionId;
+      sessionId = undefined;
+      fetch(apiUrl(`sessions/${oldSessionId}`), { method: 'DELETE' }).catch(() => {});
+    }
+    httpFallbackStarting = false;
+    reconnectAttempts = 0;
+    setStatus('Reconnecting…');
+    scheduleReconnectPageReload();
+    startWebSocket(currentBackend);
   }
 
   function startTransportRateMeter() {
@@ -224,14 +270,18 @@
     clearTimeout(connectTimer);
     clearTimeout(reconnectTimer);
     clearTimeout(reconnectStableTimer);
+    clearTimeout(reconnectReloadTimer);
+    connectTimer = undefined;
     reconnectTimer = undefined;
     reconnectStableTimer = undefined;
+    reconnectReloadTimer = undefined;
     reconnectAttempts = 0;
     socket?.close();
     socket = undefined;
     httpFallbackStarting = false;
     if (sessionId) fetch(apiUrl(`sessions/${sessionId}`), { method: 'DELETE' });
     sessionId = undefined;
+    currentBackend = undefined;
     resizeObserver?.disconnect();
     resizeObserver = undefined;
     terminal?.dispose();
@@ -397,9 +447,12 @@
   function attach(backend) {
     clearTimeout(reconnectTimer);
     clearTimeout(reconnectStableTimer);
+    clearTimeout(reconnectReloadTimer);
     reconnectTimer = undefined;
     reconnectStableTimer = undefined;
+    reconnectReloadTimer = undefined;
     reconnectAttempts = 0;
+    currentBackend = backend;
     httpFallbackStarting = false;
     terminalProgress.hidden = true;
     picker.hidden = true;
@@ -523,6 +576,7 @@
 
   document.querySelector('#refresh').addEventListener('click', () => loadBackends(false));
   document.querySelector('#back').addEventListener('click', () => showPicker());
+  telemetry.addEventListener('click', attemptReconnect);
   window.addEventListener('popstate', restoreUrlSelection);
   startTransportRateMeter();
   restoreUrlSelection();
