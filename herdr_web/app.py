@@ -249,7 +249,7 @@ async def index(request: Request) -> HTMLResponse:
     # jupyter-server-proxy removes /proxy/<port> before forwarding, but passes
     # it here so generated browser asset/API URLs retain the required prefix.
     prefix = request.headers.get("x-forwarded-prefix", "").rstrip("/")
-    base_path = f"{prefix}/" if prefix else "/"
+    base_path = f"{prefix}/" if prefix else "./"
     document = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
     return HTMLResponse(document.replace("{{HERDR_WEB_BASE_PATH}}", base_path))
 
