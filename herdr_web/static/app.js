@@ -1,4 +1,11 @@
-(() => {
+import { InputByteBuffer } from './input-buffer.js';
+import './vendor/xterm.js';
+import './vendor/xterm-addon-fit.js';
+
+const { Terminal } = globalThis;
+const { FitAddon } = globalThis.FitAddon;
+
+(async () => {
   const picker = document.querySelector('#picker');
   const terminalView = document.querySelector('#terminal-view');
   const backendList = document.querySelector('#backends');
@@ -7,9 +14,6 @@
   const connectionIndicator = document.querySelector('#connection-indicator');
   const fps = document.querySelector('#fps');
   const telemetry = document.querySelector('#telemetry');
-  const terminalProgress = document.querySelector('#terminal-progress');
-  const progressValue = document.querySelector('#progress-value');
-  const progressText = document.querySelector('#progress-text');
   const toastHost = document.querySelector('#web-toasts');
   const terminalHost = document.querySelector('#terminal');
   const backendName = document.querySelector('#backend-name');
@@ -27,9 +31,20 @@
   let fitAddon;
   let resizeObserver;
   let resizeQueued = false;
-  let outputQueued = [];
-  let outputAnimationFrame;
   let receivedFrames = 0;
+  let outputFlow;
+  let inputDrainTimer;
+  let httpInputInFlight = false;
+  let httpInputReady = false;
+  let lastUserInputAt = -Infinity;
+  const inputEncoder = new TextEncoder();
+  const inputBuffer = new InputByteBuffer(inputEncoder);
+  const inputOperations = [];
+  const INPUT_BATCH_BYTES = 16 * 1024;
+  const INPUT_WEBSOCKET_HIGH_WATER_BYTES = 32 * 1024;
+  const OUTPUT_ACK_BATCH_BYTES = 64 * 1024;
+  const OUTPUT_ACK_DELAY_MS = 10;
+  const INTERACTIVE_OUTPUT_GRACE_MS = 250;
   const MAX_CLIPBOARD_IMAGE_BYTES = 16 * 1024 * 1024;
   const clipboardImageExtensions = {
     'image/png': 'png',
@@ -39,12 +54,20 @@
     'image/bmp': 'bmp',
   };
 
+  const terminalFontFamily = '"Herdr MesloLGS NF", monospace';
+  await Promise.all([
+    document.fonts.load('normal 400 14px "Herdr MesloLGS NF"'),
+    document.fonts.load('normal 700 14px "Herdr MesloLGS NF"'),
+    document.fonts.load('italic 400 14px "Herdr MesloLGS NF"'),
+    document.fonts.load('italic 700 14px "Herdr MesloLGS NF"'),
+  ]);
+
   function setStatus(message, state = 'connecting') {
     status.textContent = message;
     connectionIndicator.dataset.state = state;
     telemetry.dataset.state = state;
     telemetry.title = state === 'disconnected' ? 'Disconnected. Click to reconnect.' : '';
-    if (state !== 'disconnected') {
+    if (state === 'connected') {
       clearTimeout(reconnectReloadTimer);
       reconnectReloadTimer = undefined;
     }
@@ -89,21 +112,10 @@
 
   function startTransportRateMeter() {
     window.setInterval(() => {
-      // Count bridge frames, not browser repaint frames. The server suppresses
-      // unchanged Herdr frames and the bridge caps changed-frame delivery at
-      // 60 Hz, so this is the actual screen-update transport rate.
+      // Count terminal update messages, not browser canvas repaints.
       fps.textContent = `${receivedFrames} FPS`;
       receivedFrames = 0;
     }, 1000);
-  }
-
-  async function requestBrowserNotificationPermission() {
-    if (!('Notification' in window) || Notification.permission !== 'default') return;
-    try {
-      await Notification.requestPermission();
-    } catch (_) {
-      // In-app toasts remain available when the browser denies this API.
-    }
   }
 
   function showBrowserToast(message) {
@@ -154,16 +166,6 @@
     return true;
   }
 
-  function showBrowserNotification(message) {
-    if (!('Notification' in window) || Notification.permission !== 'granted') return;
-    const [title, body] = message.split(/: (.+)/, 2);
-    try {
-      new Notification(title || 'Herdr', { body: body || '' });
-    } catch (_) {
-      // Some embedded browsers expose Notification but reject construction.
-    }
-  }
-
   function clipboardImageFromPaste(event) {
     const items = [...(event.clipboardData?.items || [])];
     const item = items.find((candidate) => clipboardImageExtensions[candidate.type]);
@@ -174,7 +176,7 @@
   }
 
   async function sendClipboardImage(image) {
-    if (socket?.readyState !== WebSocket.OPEN) {
+    if (socket?.readyState !== WebSocket.OPEN || !outputFlow?.attached) {
       showBrowserToast('Image paste needs a WebSocket connection');
       return;
     }
@@ -182,39 +184,25 @@
       showBrowserToast('Image must be smaller than 16 MiB');
       return;
     }
-    const bytes = await image.file.arrayBuffer();
-    socket.send(JSON.stringify({
-      type: 'clipboard-image', extension: image.extension, size: bytes.byteLength,
-    }));
-    socket.send(bytes);
-  }
 
-  function handleOsc9(message) {
-    // OSC 9;4;<state>;<percent> is the Windows Terminal progress convention.
-    // Herdr's terminal toast is OSC 9;<message>, so it remains separate.
-    const progress = /^4;([0-4]);(?:([0-9]{1,3}))?$/.exec(message);
-    if (!progress) {
-      showBrowserToast(message);
-      showBrowserNotification(message);
-      return true;
+    // Record the byte position now. Input typed after this paste remains after
+    // the image even if reading the browser File takes time.
+    const operation = {
+      offset: inputBuffer.enqueuedBytes,
+      extension: image.extension,
+      ready: false,
+    };
+    inputOperations.push(operation);
+    scheduleInputDrain();
+    try {
+      operation.bytes = await image.file.arrayBuffer();
+    } catch (error) {
+      operation.error = error;
+      throw error;
+    } finally {
+      operation.ready = true;
+      scheduleInputDrain();
     }
-    const state = Number(progress[1]);
-    if (state === 0) {
-      terminalProgress.hidden = true;
-      return true;
-    }
-    const names = ['clear', 'normal', 'error', 'paused', 'indeterminate'];
-    terminalProgress.hidden = false;
-    terminalProgress.dataset.state = names[state];
-    if (state === 4) {
-      progressValue.removeAttribute('value');
-      progressText.textContent = 'Working';
-    } else {
-      const value = Math.min(100, Number(progress[2] || 0));
-      progressValue.value = value;
-      progressText.textContent = `${value}%`;
-    }
-    return true;
   }
 
   function selectedBackendId() {
@@ -240,33 +228,175 @@
     return `${appBasePath()}api/${path}`;
   }
 
+  async function fetchWithTimeout(url, options = {}, timeout = 10_000) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeout);
+    try {
+      return await fetch(url, { ...options, signal: controller.signal });
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   function wsUrl(backendId) {
     const url = new URL(
       `${appBasePath()}ws/${encodeURIComponent(backendId)}`, location.href,
     );
-    const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
     return url.toString();
   }
 
-  function queueTerminalOutput(bytes) {
+  function clearOutputFlow(flow = outputFlow) {
+    if (!flow) return;
+    clearTimeout(flow.ackTimer);
+    flow.ackTimer = undefined;
+    if (outputFlow === flow) outputFlow = undefined;
+  }
+
+  function sendOutputAcknowledgement(flow) {
+    clearTimeout(flow.ackTimer);
+    flow.ackTimer = undefined;
+    if (
+      flow !== outputFlow || flow.socket.readyState !== WebSocket.OPEN
+      || flow.parsedBytes <= flow.acknowledgedBytes
+    ) return;
+    flow.socket.send(JSON.stringify({ type: 'output-ack', bytes: flow.parsedBytes }));
+    flow.acknowledgedBytes = flow.parsedBytes;
+  }
+
+  function noteParsedOutput(flow, length) {
+    if (flow !== outputFlow) return;
+    flow.parsedBytes += length;
+    if (flow.parsedBytes - flow.acknowledgedBytes >= OUTPUT_ACK_BATCH_BYTES) {
+      sendOutputAcknowledgement(flow);
+    } else if (flow.ackTimer === undefined) {
+      flow.ackTimer = setTimeout(
+        () => sendOutputAcknowledgement(flow), OUTPUT_ACK_DELAY_MS,
+      );
+    }
+  }
+
+  function queueTerminalOutput(bytes, flow) {
     receivedFrames += 1;
-    outputQueued.push(bytes);
-    if (outputAnimationFrame) return;
-    // Coalesce network bursts at the display refresh boundary. xterm still
-    // receives every byte in order, while the browser renders at most once per
-    // animation frame (normally 60 Hz).
-    outputAnimationFrame = requestAnimationFrame(() => {
-      outputAnimationFrame = undefined;
-      const total = outputQueued.reduce((size, chunk) => size + chunk.length, 0);
-      const joined = new Uint8Array(total);
-      let offset = 0;
-      for (const chunk of outputQueued) {
-        joined.set(chunk, offset);
-        offset += chunk.length;
+    const activeTerminal = terminal;
+    if (!activeTerminal) return;
+    const inputPending = navigator.scheduling?.isInputPending?.({ includeContinuous: true });
+    if (
+      flow && !flow.pendingTerminalWrites && !inputPending
+      && performance.now() - lastUserInputAt >= INTERACTIVE_OUTPUT_GRACE_MS
+      && activeTerminal._core?.writeSync
+    ) {
+      // WebSocket messages are ordered, non-reentrant tasks. Parse each
+      // coalesced PTY chunk now so stale animation frames cannot build up in
+      // xterm.js's asynchronous write queue. Use xterm's scheduled path while
+      // the user interacts, so large output does not make input feel heavy.
+      activeTerminal._core.writeSync(bytes);
+      noteParsedOutput(flow, bytes.length);
+      return;
+    }
+    if (flow) flow.pendingTerminalWrites += 1;
+    activeTerminal.write(bytes, () => {
+      if (flow) flow.pendingTerminalWrites -= 1;
+      if (terminal !== activeTerminal) return;
+      if (flow) noteParsedOutput(flow, bytes.length);
+      else {
+        httpInputReady = true;
+        scheduleInputDrain();
       }
-      outputQueued = [];
-      terminal?.write(joined);
     });
+  }
+
+  function inputBytesBeforeOperation() {
+    if (!inputOperations.length) return inputBuffer.length;
+    return Math.max(0, inputOperations[0].offset - inputBuffer.consumedBytes);
+  }
+
+  function scheduleInputDrain(delay = 0) {
+    if (inputDrainTimer !== undefined) return;
+    inputDrainTimer = setTimeout(() => {
+      inputDrainTimer = undefined;
+      drainInput();
+    }, delay);
+  }
+
+  function discardInputOperations(message) {
+    if (!inputOperations.length) return;
+    inputOperations.length = 0;
+    showBrowserToast(message);
+  }
+
+  function drainWebSocketInput(activeSocket, flow) {
+    if (!flow.inputReady) return;
+    while (
+      flow === outputFlow && flow.attached && activeSocket === socket
+      && activeSocket.readyState === WebSocket.OPEN
+      && activeSocket.bufferedAmount < INPUT_WEBSOCKET_HIGH_WATER_BYTES
+    ) {
+      const beforeOperation = inputBytesBeforeOperation();
+      if (beforeOperation > 0) {
+        const bytes = inputBuffer.peek(Math.min(INPUT_BATCH_BYTES, beforeOperation));
+        activeSocket.send(bytes);
+        inputBuffer.consume(bytes.length);
+        continue;
+      }
+
+      const operation = inputOperations[0];
+      if (!operation) break;
+      if (!operation.ready) return;
+      inputOperations.shift();
+      if (operation.error) continue;
+      activeSocket.send(JSON.stringify({
+        type: 'clipboard-image',
+        extension: operation.extension,
+        size: operation.bytes.byteLength,
+      }));
+      activeSocket.send(operation.bytes);
+    }
+
+    if (inputBuffer.length || inputOperations.length) scheduleInputDrain(8);
+  }
+
+  function abandonHttpSession(session, message) {
+    if (sessionId !== session) return;
+    sessionId = undefined;
+    httpInputReady = false;
+    setStatus(message, 'disconnected');
+    fetch(apiUrl(`sessions/${session}`), { method: 'DELETE' }).catch(() => {});
+  }
+
+  function drainHttpInput() {
+    if (!sessionId || !httpInputReady || httpInputInFlight || !inputBuffer.length) return;
+    const beforeOperation = inputBytesBeforeOperation();
+    if (beforeOperation <= 0) return;
+    const length = Math.min(INPUT_BATCH_BYTES, beforeOperation);
+    const dataBase64 = bytesToBase64(inputBuffer.peek(length));
+    const session = sessionId;
+    httpInputInFlight = true;
+    void fetchWithTimeout(apiUrl(`sessions/${session}/input`), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ data_base64: dataBase64 }),
+    }, 30_000).then((response) => {
+      if (!response.ok) throw new Error(`terminal input failed (${response.status})`);
+      if (sessionId === session) inputBuffer.consume(length);
+    }).catch((error) => {
+      abandonHttpSession(session, error.message);
+    }).finally(() => {
+      httpInputInFlight = false;
+      if (sessionId === session && connectionIndicator.dataset.state !== 'disconnected') {
+        scheduleInputDrain();
+      }
+    });
+  }
+
+  function drainInput() {
+    const activeSocket = socket;
+    const flow = outputFlow;
+    if (activeSocket?.readyState === WebSocket.OPEN && flow?.socket === activeSocket) {
+      drainWebSocketInput(activeSocket, flow);
+      return;
+    }
+    drainHttpInput();
   }
 
   function showPicker(updateUrl = true, refresh = true) {
@@ -281,6 +411,13 @@
     reconnectAttempts = 0;
     socket?.close();
     socket = undefined;
+    clearOutputFlow();
+    clearTimeout(inputDrainTimer);
+    inputDrainTimer = undefined;
+    inputBuffer.clear();
+    inputOperations.length = 0;
+    httpInputInFlight = false;
+    httpInputReady = false;
     httpFallbackStarting = false;
     if (sessionId) fetch(apiUrl(`sessions/${sessionId}`), { method: 'DELETE' });
     sessionId = undefined;
@@ -289,6 +426,7 @@
     resizeObserver = undefined;
     terminal?.dispose();
     terminal = undefined;
+    fitAddon = undefined;
     terminalHost.replaceChildren();
     terminalView.hidden = true;
     picker.hidden = false;
@@ -312,52 +450,55 @@
   }
 
   function sendResize() {
-    if (!terminal || resizeQueued) return;
+    if (!terminal || !fitAddon || resizeQueued) return;
+    const activeTerminal = terminal;
+    const activeFitAddon = fitAddon;
     resizeQueued = true;
     requestAnimationFrame(() => {
       resizeQueued = false;
-      fitAddon.fit();
-      const resize = { type: 'resize', cols: terminal.cols, rows: terminal.rows };
+      if (terminal !== activeTerminal || fitAddon !== activeFitAddon) return;
+      activeFitAddon.fit();
+      const resize = { type: 'resize', cols: activeTerminal.cols, rows: activeTerminal.rows };
       if (socket?.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify(resize));
       } else if (sessionId) {
-        fetch(apiUrl(`sessions/${sessionId}/resize`), {
+        const session = sessionId;
+        fetchWithTimeout(apiUrl(`sessions/${session}/resize`), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(resize),
-        }).catch(() => { setStatus('Disconnected', 'disconnected'); });
+        }).catch(() => abandonHttpSession(session, 'Disconnected'));
       }
     });
   }
 
   function sendInput(data) {
-    const bytes = new TextEncoder().encode(data);
-    if (socket?.readyState === WebSocket.OPEN) {
-      socket.send(bytes);
-      return;
+    try {
+      inputBuffer.append(data);
+      // Drain in the input event task. A zero-delay timer can starve behind a
+      // continuous stream of WebSocket output events.
+      drainInput();
+    } catch (error) {
+      showBrowserToast(error.message);
     }
-    if (!sessionId) return;
-    fetch(apiUrl(`sessions/${sessionId}/input`), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ data_base64: bytesToBase64(bytes) }),
-    }).catch(() => { setStatus('Disconnected', 'disconnected'); });
   }
 
   async function readTerminal(session) {
     while (sessionId === session) {
       try {
-        const response = await fetch(apiUrl(`sessions/${session}/read`), { cache: 'no-store' });
+        const response = await fetchWithTimeout(
+          apiUrl(`sessions/${session}/read`), { cache: 'no-store' }
+        );
         if (!response.ok) throw new Error(`terminal read failed (${response.status})`);
         const message = await response.json();
+        if (sessionId !== session) return;
         if (message.data_base64) queueTerminalOutput(base64ToBytes(message.data_base64));
         if (message.closed) {
-          setStatus('Disconnected', 'disconnected');
-          sessionId = undefined;
+          abandonHttpSession(session, 'Disconnected');
           return;
         }
       } catch (error) {
-        setStatus(error.message, 'disconnected');
+        abandonHttpSession(session, error.message);
         return;
       }
     }
@@ -370,21 +511,31 @@
     reconnectTimer = undefined;
     reconnectStableTimer = undefined;
     httpFallbackStarting = true;
+    httpInputReady = false;
     socket?.close();
     socket = undefined;
+    clearOutputFlow();
+    discardInputOperations('Image paste was canceled because WebSocket is unavailable');
     setStatus('Connecting (HTTP fallback)…');
     try {
-      const response = await fetch(apiUrl('sessions'), {
+      const response = await fetchWithTimeout(apiUrl('sessions'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ backend_id: backend.id, cols: terminal.cols, rows: terminal.rows }),
       });
       if (!response.ok) throw new Error((await response.json()).detail || 'Could not attach');
       const session = await response.json();
+      if (!terminal || currentBackend?.id !== backend.id || !httpFallbackStarting) {
+        fetch(apiUrl(`sessions/${session.id}`), { method: 'DELETE' }).catch(() => {});
+        return;
+      }
       sessionId = session.id;
+      httpFallbackStarting = false;
       setStatus('Connected (HTTP fallback)', 'connected');
       readTerminal(session.id);
     } catch (error) {
+      if (currentBackend?.id !== backend.id || !httpFallbackStarting) return;
+      httpFallbackStarting = false;
       setStatus(error.message, 'disconnected');
     }
   }
@@ -405,11 +556,24 @@
 
   function startWebSocket(backend) {
     let opened = false;
+    let attached = false;
     const nextSocket = new WebSocket(wsUrl(backend.id));
+    const flow = {
+      socket: nextSocket,
+      attached: false,
+      inputReady: false,
+      parsedBytes: 0,
+      acknowledgedBytes: 0,
+      ackTimer: undefined,
+      pendingTerminalWrites: 0,
+    };
+    clearOutputFlow();
+    outputFlow = flow;
     socket = nextSocket;
     nextSocket.binaryType = 'arraybuffer';
+    clearTimeout(connectTimer);
     connectTimer = setTimeout(() => {
-      if (!opened) startHttpFallback(backend);
+      if (socket === nextSocket && !opened) startHttpFallback(backend);
     }, 2000);
     nextSocket.onopen = () => {
       if (socket !== nextSocket) {
@@ -418,29 +582,51 @@
       }
       opened = true;
       clearTimeout(connectTimer);
-      clearTimeout(reconnectStableTimer);
-      reconnectStableTimer = setTimeout(() => {
-        if (socket === nextSocket) reconnectAttempts = 0;
-      }, 30_000);
-      setStatus('Connected', 'connected');
-      sendResize();
+      setStatus('Attaching…');
+      fitAddon.fit();
+      nextSocket.send(JSON.stringify({
+        type: 'resize', cols: terminal.cols, rows: terminal.rows, output_ack: true,
+      }));
+      connectTimer = setTimeout(() => {
+        if (socket === nextSocket && !attached) startHttpFallback(backend);
+      }, 3000);
     };
     nextSocket.onmessage = (event) => {
+      if (socket !== nextSocket) return;
       if (typeof event.data === 'string') {
         const message = JSON.parse(event.data);
-        if (message.type === 'error') showBrowserToast(message.message);
+        if (message.type === 'attached') {
+          attached = true;
+          flow.attached = true;
+          clearTimeout(connectTimer);
+          connectTimer = undefined;
+          clearTimeout(reconnectStableTimer);
+          reconnectStableTimer = setTimeout(() => {
+            if (socket === nextSocket) reconnectAttempts = 0;
+          }, 30_000);
+          setStatus('Connected', 'connected');
+          scheduleInputDrain();
+        } else if (message.type === 'ping') {
+          nextSocket.send(JSON.stringify({ type: 'pong' }));
+        } else if (message.type === 'error') {
+          showBrowserToast(message.message);
+        }
         return;
       }
-      queueTerminalOutput(new Uint8Array(event.data));
+      flow.inputReady = true;
+      queueTerminalOutput(new Uint8Array(event.data), flow);
+      scheduleInputDrain();
     };
     nextSocket.onclose = () => {
       if (socket !== nextSocket) return;
       clearTimeout(connectTimer);
       clearTimeout(reconnectStableTimer);
+      connectTimer = undefined;
       reconnectStableTimer = undefined;
       socket = undefined;
+      clearOutputFlow(flow);
       if (!opened && !sessionId && !httpFallbackStarting) startHttpFallback(backend);
-      else if (opened && !sessionId) scheduleWebSocketReconnect(backend);
+      else if ((opened || attached) && !sessionId) scheduleWebSocketReconnect(backend);
     };
     nextSocket.onerror = () => {
       // onclose starts the fallback or reconnect sequence.
@@ -455,9 +641,15 @@
     reconnectStableTimer = undefined;
     reconnectReloadTimer = undefined;
     reconnectAttempts = 0;
+    receivedFrames = 0;
+    clearTimeout(inputDrainTimer);
+    inputDrainTimer = undefined;
+    inputBuffer.clear();
+    inputOperations.length = 0;
+    httpInputInFlight = false;
+    httpInputReady = false;
     currentBackend = backend;
     httpFallbackStarting = false;
-    terminalProgress.hidden = true;
     picker.hidden = true;
     terminalView.hidden = false;
     backendName.textContent = backend.label;
@@ -466,18 +658,16 @@
 
     terminal = new Terminal({
       cursorBlink: true,
-      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+      customGlyphs: true,
+      fontFamily: terminalFontFamily,
       fontSize: 14,
+      logLevel: 'error',
       scrollback: 20_000,
       theme: { background: '#101216', foreground: '#d8dee9', cursor: '#eceff4' },
-      allowProposedApi: false,
     });
-    fitAddon = new FitAddon.FitAddon();
+    fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
     terminal.open(terminalHost);
-    // The bridge asks Herdr's terminal-notification path to emit OSC 9.
-    // xterm hands us its sanitized payload without rendering control bytes.
-    terminal.parser.registerOscHandler(9, handleOsc9);
     terminal.parser.registerOscHandler(52, handleOsc52);
     terminal.attachCustomKeyEventHandler((event) => {
       if (event.type !== 'keydown') return true;
@@ -497,8 +687,12 @@
       sendInput(commandKey);
       return false;
     });
-    // Keep right-click available for Herdr/xterm mouse handling instead of
-    // opening the browser context menu over the terminal.
+    const markUserInput = () => { lastUserInputAt = performance.now(); };
+    terminal.element.addEventListener('keydown', markUserInput, true);
+    terminal.element.addEventListener('pointerdown', markUserInput, true);
+    terminal.element.addEventListener('pointermove', markUserInput, true);
+    terminal.element.addEventListener('wheel', markUserInput, { capture: true, passive: true });
+    terminal.element.addEventListener('paste', markUserInput, true);
     terminal.element.addEventListener('contextmenu', (event) => event.preventDefault());
     terminal.element.addEventListener('paste', (event) => {
       const image = clipboardImageFromPaste(event);
@@ -516,12 +710,7 @@
   }
 
   function openBackend(backend, updateUrl = true) {
-    if (updateUrl) {
-      setSelectedBackend(backend.id);
-      // This runs from the session-picker click, which is a browser-recognized
-      // user gesture and therefore may request Chrome notification permission.
-      void requestBrowserNotificationPermission();
-    }
+    if (updateUrl) setSelectedBackend(backend.id);
     attach(backend);
   }
 
@@ -529,7 +718,7 @@
     backendList.replaceChildren();
     pickerError.hidden = true;
     try {
-      const response = await fetch(apiUrl('backends'), { cache: 'no-store' });
+      const response = await fetchWithTimeout(apiUrl('backends'), { cache: 'no-store' });
       if (!response.ok) throw new Error(`backend discovery failed (${response.status})`);
       const { backends } = await response.json();
       if (!backends.length) {
@@ -580,7 +769,18 @@
   document.querySelector('#refresh').addEventListener('click', () => loadBackends(false));
   document.querySelector('#back').addEventListener('click', () => showPicker());
   telemetry.addEventListener('click', attemptReconnect);
+  window.addEventListener('online', attemptReconnect);
+  window.addEventListener('pagehide', () => {
+    socket?.close();
+    if (sessionId) {
+      fetch(apiUrl(`sessions/${sessionId}`), { method: 'DELETE', keepalive: true }).catch(() => {});
+    }
+  });
   window.addEventListener('popstate', restoreUrlSelection);
   startTransportRateMeter();
   restoreUrlSelection();
-})();
+})().catch((error) => {
+  const pickerError = document.querySelector('#picker-error');
+  pickerError.textContent = `Could not start xterm.js: ${error.message}`;
+  pickerError.hidden = false;
+});

@@ -1,3 +1,33 @@
+@import url("vendor/xterm.css");
+
+@font-face {
+  font-family: "Herdr MesloLGS NF";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/MesloLGS-NF-Regular.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Herdr MesloLGS NF";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/MesloLGS-NF-Bold.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Herdr MesloLGS NF";
+  font-style: italic;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/MesloLGS-NF-Italic.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Herdr MesloLGS NF";
+  font-style: italic;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/MesloLGS-NF-Bold-Italic.woff2") format("woff2");
+}
 * { box-sizing: border-box; }
 html, body, main { height: 100%; overflow: hidden; }
 body {
@@ -67,7 +97,7 @@ header {
   border: 1px solid #3b4657;
   border-radius: .4rem;
   display: flex;
-  font: 12px ui-monospace, monospace;
+  font: 12px "Herdr MesloLGS NF", monospace;
   gap: .45rem;
   padding: .35rem .5rem;
   position: fixed;
@@ -86,13 +116,6 @@ header {
 #connection-indicator { background: #e5c07b; border-radius: 50%; height: .55rem; width: .55rem; }
 #connection-indicator[data-state="connected"] { background: #98c379; box-shadow: 0 0 7px #98c379; }
 #connection-indicator[data-state="disconnected"] { background: #e06c75; }
-#terminal-progress { align-items: center; display: flex; gap: .25rem; }
-#terminal-progress[hidden] { display: none; }
-#progress-value { accent-color: #98c379; height: .45rem; width: 4rem; }
-#terminal-progress[data-state="error"] #progress-value { accent-color: #e06c75; }
-#terminal-progress[data-state="paused"] #progress-value { accent-color: #e5c07b; }
-#terminal-progress[data-state="indeterminate"] #progress-value { animation: progress-pulse 1s ease-in-out infinite; }
-@keyframes progress-pulse { 50% { opacity: .35; } }
 #fps { border-left: 1px solid #3b4657; color: #9aa4b2; padding-left: .45rem; }
 #terminal { height: 100%; min-height: 0; overflow: hidden; padding: 0; }
 .xterm { height: 100%; max-height: 100%; }
