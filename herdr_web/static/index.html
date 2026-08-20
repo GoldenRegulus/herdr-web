@@ -8,9 +8,10 @@
     <script>
       const pagePath = window.location.pathname;
       window.herdrWebBasePath = pagePath.endsWith('/') ? pagePath : `${pagePath}/`;
+      window.herdrWebAssetBasePath = `${window.herdrWebBasePath}static/__HERDR_WEB_ASSET_VERSION__/`;
       const stylesheet = document.createElement('link');
       stylesheet.rel = 'stylesheet';
-      stylesheet.href = `${window.herdrWebBasePath}static/style.css`;
+      stylesheet.href = `${window.herdrWebAssetBasePath}style.css`;
       window.herdrWebStylesheetReady = new Promise((resolve, reject) => {
         stylesheet.addEventListener('load', resolve, { once: true });
         stylesheet.addEventListener('error', reject, { once: true });
@@ -47,7 +48,7 @@
 
     <script type="module">
       window.herdrWebStylesheetReady
-        .then(() => import(`${window.herdrWebBasePath}static/app.js`))
+        .then(() => import(`${window.herdrWebAssetBasePath}app.js`))
         .catch((error) => {
           const pickerError = document.querySelector('#picker-error');
           pickerError.textContent = `Could not load the terminal: ${error.message}`;
