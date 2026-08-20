@@ -23,7 +23,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Final
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -32,6 +32,13 @@ from herdr_web.theme import ThemeAppearance, resolve_theme
 
 PACKAGE_DIR: Final = Path(__file__).resolve().parent
 STATIC_DIR: Final = PACKAGE_DIR / "static"
+STATIC_ASSET_VERSION: Final = secrets.token_urlsafe(12)
+STATIC_ASSET_PLACEHOLDER: Final = "__HERDR_WEB_ASSET_VERSION__"
+NO_STORE_HEADERS: Final = {
+    "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+    "Pragma": "no-cache",
+    "Expires": "0",
+}
 STAGED_IMAGE_DIRECTORY: Final = Path(tempfile.gettempdir()) / "herdr-web-images"
 MAX_TERMINAL_DIMENSION: Final = 500
 MAX_CLIPBOARD_IMAGE_BYTES: Final = 16 * 1024 * 1024
@@ -61,7 +68,27 @@ IMAGE_EXTENSIONS: Final = frozenset({"png", "jpg", "jpeg", "gif", "webp", "bmp"}
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="herdr-web", docs_url=None, redoc_url=None)
+# Put the fixed per-process path before the compatibility path. Relative JS and
+# CSS imports stay in this versioned directory, so a page cannot mix assets
+# from two Herdr Web processes.
+app.mount(
+    f"/static/{STATIC_ASSET_VERSION}",
+    StaticFiles(directory=STATIC_DIR),
+    name="versioned-static",
+)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
+@app.middleware("http")
+async def set_static_cache_headers(request: Request, call_next):
+    response = await call_next(request)
+    path = request.url.path
+    if path.startswith(f"/static/{STATIC_ASSET_VERSION}/"):
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    elif path.startswith("/static/"):
+        for name, value in NO_STORE_HEADERS.items():
+            response.headers[name] = value
+    return response
 
 
 @dataclass(frozen=True)
@@ -508,7 +535,9 @@ def start_client(backend: Backend, cols: int, rows: int) -> PtyClient:
 async def index() -> HTMLResponse:
     # The browser derives its base path from the visible URL. This works when
     # Jupyter or SageMaker removes the proxy prefix before forwarding here.
-    return HTMLResponse((STATIC_DIR / "index.html").read_text(encoding="utf-8"))
+    document = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    document = document.replace(STATIC_ASSET_PLACEHOLDER, STATIC_ASSET_VERSION)
+    return HTMLResponse(document, headers=NO_STORE_HEADERS)
 
 
 @app.get("/api/backends")

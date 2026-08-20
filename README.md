@@ -111,6 +111,11 @@ works with prefixes such as `/codeeditor/default/proxy/8765/` when SageMaker
 Code Editor provides that proxy route. The proxy must support WebSocket
 upgrades. If it does not, the browser uses the HTTP fallback.
 
+Each server process puts its complete static asset set in a new versioned
+path. The index response is not cached, and all JS, CSS, and font references
+use the same version. A server restart therefore cannot combine files from two
+releases, even when a Jupyter proxy or browser retains older assets.
+
 The package includes xterm.js 6.0.0, the fit addon 0.11.0, and the WebGL addon
 0.19.0 under `herdr_web/static/vendor/`. The terminal does not require a CDN or
 internet access. Their MIT licenses are in `xterm.LICENSE`,
