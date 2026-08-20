@@ -5,31 +5,42 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import errno
 import fcntl
+import json
 import logging
 import os
 from pathlib import Path
 import pty
+import secrets
 import shutil
 import signal
 import socket
 import struct
 import termios
 import tempfile
-import secrets
+import time
 from dataclasses import dataclass, field
 from typing import Final
 
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
-from pydantic import BaseModel
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 PACKAGE_DIR: Final = Path(__file__).resolve().parent
 STATIC_DIR: Final = PACKAGE_DIR / "static"
+STAGED_IMAGE_DIRECTORY: Final = Path(tempfile.gettempdir()) / "herdr-web-images"
 MAX_TERMINAL_DIMENSION: Final = 500
 MAX_CLIPBOARD_IMAGE_BYTES: Final = 16 * 1024 * 1024
-DISPLAY_FRAME_INTERVAL: Final = 1 / 60
+PTY_READ_SIZE: Final = 256 * 1024
+PTY_COALESCE_SECONDS: Final = 0.002
+OUTPUT_QUEUE_SIZE: Final = 1
+OUTPUT_ACK_WINDOW_BYTES: Final = 128 * 1024
+WEBSOCKET_HEARTBEAT_SECONDS: Final = 15
+HTTP_SESSION_IDLE_SECONDS: Final = 30
+CHILD_TERMINATION_GRACE_SECONDS: Final = 1
+CHILD_KILL_GRACE_SECONDS: Final = 1
 IMAGE_EXTENSIONS: Final = frozenset({"png", "jpg", "jpeg", "gif", "webp", "bmp"})
 logger = logging.getLogger(__name__)
 
@@ -50,8 +61,11 @@ class Backend:
 class PtyClient:
     pid: int
     master_fd: int
+    closed: bool = False
 
     def resize(self, cols: int, rows: int) -> None:
+        if self.closed:
+            return
         cols = max(1, min(cols, MAX_TERMINAL_DIMENSION))
         rows = max(1, min(rows, MAX_TERMINAL_DIMENSION))
         fcntl.ioctl(
@@ -64,27 +78,67 @@ class PtyClient:
         except ProcessLookupError:
             pass
 
-    def close(self) -> None:
+    def _reap_nowait(self) -> bool:
         try:
-            os.kill(self.pid, signal.SIGTERM)
+            reaped_pid, _ = os.waitpid(self.pid, os.WNOHANG)
+        except ChildProcessError:
+            return True
+        return reaped_pid == self.pid
+
+    def _process_group_exists(self) -> bool:
+        try:
+            os.killpg(self.pid, 0)
+        except ProcessLookupError:
+            return False
+        return True
+
+    async def close(self) -> None:
+        """Stop the complete PTY process group and reap its leader."""
+        if self.closed:
+            return
+        self.closed = True
+        try:
+            os.killpg(self.pid, signal.SIGTERM)
         except ProcessLookupError:
             pass
         try:
             os.close(self.master_fd)
         except OSError:
             pass
+
+        reaped = False
+        deadline = asyncio.get_running_loop().time() + CHILD_TERMINATION_GRACE_SECONDS
+        while asyncio.get_running_loop().time() < deadline:
+            reaped = self._reap_nowait() or reaped
+            if reaped and not self._process_group_exists():
+                return
+            await asyncio.sleep(0.05)
+
         try:
-            os.waitpid(self.pid, os.WNOHANG)
-        except ChildProcessError:
+            os.killpg(self.pid, signal.SIGKILL)
+        except ProcessLookupError:
             pass
+        kill_deadline = asyncio.get_running_loop().time() + CHILD_KILL_GRACE_SECONDS
+        while asyncio.get_running_loop().time() < kill_deadline:
+            reaped = self._reap_nowait() or reaped
+            if reaped and not self._process_group_exists():
+                return
+            await asyncio.sleep(0.01)
+        logger.error("could not fully reap PTY process group %s", self.pid)
 
 
 @dataclass
 class BrowserSession:
     client: PtyClient
-    output: asyncio.Queue[bytes] = field(default_factory=asyncio.Queue)
+    output: asyncio.Queue[bytes] = field(
+        default_factory=lambda: asyncio.Queue(maxsize=OUTPUT_QUEUE_SIZE)
+    )
     reader: asyncio.Task[None] | None = None
     closed: bool = False
+    last_activity: float = field(default_factory=time.monotonic)
+
+    def touch(self) -> None:
+        self.last_activity = time.monotonic()
 
 
 class SessionStart(BaseModel):
@@ -103,6 +157,42 @@ class TerminalResize(BaseModel):
 
 
 sessions: dict[str, BrowserSession] = {}
+session_reaper: asyncio.Task[None] | None = None
+staged_image_cleanup_tasks: set[asyncio.Task[None]] = set()
+
+
+async def reap_idle_sessions() -> None:
+    while True:
+        await asyncio.sleep(10)
+        stale_before = time.monotonic() - HTTP_SESSION_IDLE_SECONDS
+        stale_ids = [
+            session_id
+            for session_id, session in sessions.items()
+            if session.last_activity < stale_before
+        ]
+        await asyncio.gather(*(close_session(session_id) for session_id in stale_ids))
+
+
+@app.on_event("startup")
+async def start_session_reaper() -> None:
+    global session_reaper
+    remove_stale_staged_images()
+    session_reaper = asyncio.create_task(reap_idle_sessions())
+
+
+@app.on_event("shutdown")
+async def stop_sessions() -> None:
+    global session_reaper
+    if session_reaper is not None:
+        session_reaper.cancel()
+        await asyncio.gather(session_reaper, return_exceptions=True)
+        session_reaper = None
+    cleanup_tasks = list(staged_image_cleanup_tasks)
+    for task in cleanup_tasks:
+        task.cancel()
+    await asyncio.gather(*cleanup_tasks, return_exceptions=True)
+    remove_stale_staged_images()
+    await asyncio.gather(*(close_session(session_id) for session_id in list(sessions)))
 
 
 def config_dir() -> Path:
@@ -166,11 +256,62 @@ def herdr_binary() -> str:
     return binary
 
 
-def write_pty(master_fd: int, data: bytes) -> None:
-    """Preserve complete key/paste payloads when a PTY performs a short write."""
+async def wait_for_fd(master_fd: int, *, writable: bool = False) -> None:
+    """Wait for PTY readiness without using a blocked worker thread."""
+    loop = asyncio.get_running_loop()
+    ready = loop.create_future()
+
+    def mark_ready() -> None:
+        if not ready.done():
+            ready.set_result(None)
+
+    add = loop.add_writer if writable else loop.add_reader
+    remove = loop.remove_writer if writable else loop.remove_reader
+    add(master_fd, mark_ready)
+    try:
+        await ready
+    finally:
+        remove(master_fd)
+
+
+async def read_pty_chunk(master_fd: int) -> bytes:
+    """Coalesce one short burst of PTY output into one chunk."""
+    await wait_for_fd(master_fd)
+    deadline = asyncio.get_running_loop().time() + PTY_COALESCE_SECONDS
+    chunks: list[bytes] = []
+    size = 0
+    while size < PTY_READ_SIZE:
+        try:
+            chunk = os.read(master_fd, PTY_READ_SIZE - size)
+        except BlockingIOError:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                break
+            try:
+                await asyncio.wait_for(wait_for_fd(master_fd), timeout=remaining)
+            except TimeoutError:
+                break
+            continue
+        except OSError as exc:
+            if exc.errno == errno.EIO and chunks:
+                break
+            raise
+        if not chunk:
+            break
+        chunks.append(chunk)
+        size += len(chunk)
+    return b"".join(chunks)
+
+
+async def write_pty(master_fd: int, data: bytes) -> None:
+    """Preserve complete input without blocking the event loop on PTY backpressure."""
     remaining = memoryview(data)
     while remaining:
-        written = os.write(master_fd, remaining)
+        try:
+            written = os.write(master_fd, remaining)
+        except BlockingIOError:
+            await wait_for_fd(master_fd, writable=True)
+            continue
         if written <= 0:
             raise OSError("PTY write made no progress")
         remaining = remaining[written:]
@@ -181,9 +322,10 @@ def stage_clipboard_image(extension: str, data: bytes) -> Path:
         raise ValueError("unsupported clipboard image format")
     if not data or len(data) > MAX_CLIPBOARD_IMAGE_BYTES:
         raise ValueError("clipboard image exceeds Herdr's 16 MiB limit")
-    directory = Path(tempfile.gettempdir()) / "herdr-web-images"
-    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-    fd, raw_path = tempfile.mkstemp(prefix="image-", suffix=f".{extension}", dir=directory)
+    STAGED_IMAGE_DIRECTORY.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd, raw_path = tempfile.mkstemp(
+        prefix="image-", suffix=f".{extension}", dir=STAGED_IMAGE_DIRECTORY
+    )
     path = Path(raw_path)
     try:
         os.fchmod(fd, 0o600)
@@ -195,11 +337,34 @@ def stage_clipboard_image(extension: str, data: bytes) -> Path:
     return path
 
 
+def remove_stale_staged_images() -> None:
+    """Remove files left by a terminated bridge process."""
+    if not STAGED_IMAGE_DIRECTORY.is_dir():
+        return
+    for path in STAGED_IMAGE_DIRECTORY.glob("image-*"):
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("could not remove stale clipboard image %s", path)
+
+
 async def remove_staged_image_later(path: Path) -> None:
     # The client synchronously reads the path after its bracketed-paste event;
-    # retain it briefly for that handoff, then remove this bridge-owned file.
-    await asyncio.sleep(30)
-    path.unlink(missing_ok=True)
+    # retain it briefly for that handoff. A shutdown cancellation also removes
+    # it, and the next process start removes files left by a hard termination.
+    try:
+        await asyncio.sleep(30)
+    finally:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("could not remove clipboard image %s", path)
+
+
+def schedule_staged_image_removal(path: Path) -> None:
+    task = asyncio.create_task(remove_staged_image_later(path))
+    staged_image_cleanup_tasks.add(task)
+    task.add_done_callback(staged_image_cleanup_tasks.discard)
 
 
 def start_client(backend: Backend, cols: int, rows: int) -> PtyClient:
@@ -228,9 +393,6 @@ def start_client(backend: Backend, cols: int, rows: int) -> PtyClient:
         environment["HERDR_RENDER_ENCODING"] = "terminal-ansi"
         environment.setdefault("TERM", "xterm-256color")
         environment.setdefault("COLORTERM", "truecolor")
-        # Herdr maps its terminal-toast delivery to OSC 9 for this backend.
-        # The browser's xterm parser consumes OSC 9 and displays a web toast.
-        environment["TERM_PROGRAM"] = "ghostty"
         # Make the normal Herdr client write clipboard updates as OSC 52 to
         # this PTY, where the browser can apply them to its real clipboard.
         environment["SSH_TTY"] = "herdr-web"
@@ -239,19 +401,17 @@ def start_client(backend: Backend, cols: int, rows: int) -> PtyClient:
         environment["HERDR_REMOTE_KEYBINDINGS"] = "server"
         os.execvpe(binary, [binary, "client"], environment)
 
+    os.set_blocking(master_fd, False)
     client = PtyClient(pid, master_fd)
     client.resize(cols, rows)
     return client
 
 
 @app.get("/")
-async def index(request: Request) -> HTMLResponse:
-    # jupyter-server-proxy removes /proxy/<port> before forwarding, but passes
-    # it here so generated browser asset/API URLs retain the required prefix.
-    prefix = request.headers.get("x-forwarded-prefix", "").rstrip("/")
-    base_path = f"{prefix}/" if prefix else "./"
-    document = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
-    return HTMLResponse(document.replace("{{HERDR_WEB_BASE_PATH}}", base_path))
+async def index() -> HTMLResponse:
+    # The browser derives its base path from the visible URL. This works when
+    # Jupyter or SageMaker removes the proxy prefix before forwarding here.
+    return HTMLResponse((STATIC_DIR / "index.html").read_text(encoding="utf-8"))
 
 
 @app.get("/api/backends")
@@ -268,7 +428,7 @@ async def read_pty(session: BrowserSession) -> None:
     try:
         while True:
             try:
-                data = await asyncio.to_thread(os.read, session.client.master_fd, 16 * 1024)
+                data = await read_pty_chunk(session.client.master_fd)
             except OSError:
                 return
             if not data:
@@ -285,7 +445,7 @@ async def close_session(session_id: str) -> None:
     if session.reader is not None:
         session.reader.cancel()
         await asyncio.gather(session.reader, return_exceptions=True)
-    session.client.close()
+    await session.client.close()
 
 
 def session_or_404(session_id: str) -> BrowserSession:
@@ -315,6 +475,7 @@ async def create_session(request: SessionStart) -> dict[str, str]:
 async def read_session(session_id: str) -> dict[str, object]:
     """Long-poll terminal output so this also works behind HTTP-only proxies."""
     session = session_or_404(session_id)
+    session.touch()
     chunks: list[bytes] = []
     try:
         chunks.append(await asyncio.wait_for(session.output.get(), timeout=1))
@@ -335,12 +496,13 @@ async def read_session(session_id: str) -> dict[str, object]:
 @app.post("/api/sessions/{session_id}/input")
 async def send_input(session_id: str, request: TerminalInput) -> dict[str, bool]:
     session = session_or_404(session_id)
+    session.touch()
     try:
         data = base64.b64decode(request.data_base64, validate=True)
     except ValueError as error:
         raise HTTPException(status_code=400, detail="input is not valid base64") from error
     try:
-        write_pty(session.client.master_fd, data)
+        await write_pty(session.client.master_fd, data)
     except OSError as error:
         raise HTTPException(status_code=410, detail="terminal session is closed") from error
     return {"ok": True}
@@ -348,7 +510,9 @@ async def send_input(session_id: str, request: TerminalInput) -> dict[str, bool]
 
 @app.post("/api/sessions/{session_id}/resize")
 async def resize_session(session_id: str, request: TerminalResize) -> dict[str, bool]:
-    session_or_404(session_id).client.resize(request.cols, request.rows)
+    session = session_or_404(session_id)
+    session.touch()
+    session.client.resize(request.cols, request.rows)
     return {"ok": True}
 
 
@@ -377,7 +541,13 @@ def main() -> None:
 
     import uvicorn
 
-    uvicorn.run(app, host=arguments.host, port=arguments.port)
+    uvicorn.run(
+        app,
+        host=arguments.host,
+        port=arguments.port,
+        ws_ping_interval=WEBSOCKET_HEARTBEAT_SECONDS,
+        ws_ping_timeout=WEBSOCKET_HEARTBEAT_SECONDS * 3,
+    )
 
 
 @app.websocket("/ws/{backend_id}")
@@ -399,17 +569,32 @@ async def terminal(websocket: WebSocket, backend_id: str) -> None:
             return
         cols = int(initial.get("cols", 120))
         rows = int(initial.get("rows", 40))
+        output_ack_enabled = initial.get("output_ack") is True
         client = start_client(backend, cols, rows)
-        await websocket.send_json({"type": "attached", "label": backend.label})
+        await websocket.send_json(
+            {
+                "type": "attached",
+                "label": backend.label,
+                "output_window_bytes": (
+                    OUTPUT_ACK_WINDOW_BYTES if output_ack_enabled else 0
+                ),
+            }
+        )
 
-        # Bound queued chunks so a slow browser applies backpressure instead
-        # of allowing an unbounded terminal-output allocation.
-        output: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=120)
+        # Keep only one PTY chunk between the client and WebSocket sender.
+        # Early backpressure lets Herdr coalesce slow-client frames at its
+        # semantic render layer instead of building a stale ANSI burst here.
+        output: asyncio.Queue[bytes | dict[str, str] | None] = asyncio.Queue(
+            maxsize=OUTPUT_QUEUE_SIZE
+        )
+        output_bytes_sent = 0
+        output_bytes_acknowledged = 0
+        output_acknowledged = asyncio.Event()
 
-        async def read_pty() -> None:
+        async def read_pty_output() -> None:
             while True:
                 try:
-                    data = await asyncio.to_thread(os.read, client.master_fd, 16 * 1024)
+                    data = await read_pty_chunk(client.master_fd)
                 except OSError:
                     break
                 if not data:
@@ -417,34 +602,42 @@ async def terminal(websocket: WebSocket, backend_id: str) -> None:
                 await output.put(data)
             await output.put(None)
 
-        async def send_changed_frames() -> None:
-            # Herdr's TerminalAnsi render stream already has stable frame
-            # identity: unchanged FrameData is suppressed, and changed frames
-            # are ANSI diffs. Do not byte-deduplicate here: equal ANSI chunks
-            # can still be meaningful incremental terminal operations.
-            # Instead, batch only changed bytes into one transport event per
-            # display interval, avoiding network/UI churn above 60 Hz.
+        async def send_browser_output() -> None:
+            nonlocal output_bytes_sent
             while True:
-                first = await output.get()
-                if first is None:
+                try:
+                    item = await asyncio.wait_for(
+                        output.get(), timeout=WEBSOCKET_HEARTBEAT_SECONDS
+                    )
+                except asyncio.TimeoutError:
+                    await websocket.send_json({"type": "ping"})
+                    continue
+                if item is None:
                     return
-                chunks = [first]
-                await asyncio.sleep(DISPLAY_FRAME_INTERVAL)
-                closed = False
-                while True:
-                    try:
-                        item = output.get_nowait()
-                    except asyncio.QueueEmpty:
-                        break
-                    if item is None:
-                        closed = True
-                        break
-                    chunks.append(item)
-                await websocket.send_bytes(b"".join(chunks))
-                if closed:
-                    return
+                if isinstance(item, bytes):
+                    while (
+                        output_ack_enabled
+                        and output_bytes_sent - output_bytes_acknowledged
+                        >= OUTPUT_ACK_WINDOW_BYTES
+                    ):
+                        output_acknowledged.clear()
+                        if (
+                            output_bytes_sent - output_bytes_acknowledged
+                            >= OUTPUT_ACK_WINDOW_BYTES
+                        ):
+                            await output_acknowledged.wait()
+                    # Increment before the await so a fast browser ACK cannot
+                    # race ahead of this task's cumulative byte counter.
+                    output_bytes_sent += len(item)
+                    await websocket.send_bytes(item)
+                else:
+                    await websocket.send_json(item)
+
+        async def report_error(message: str) -> None:
+            await output.put({"type": "error", "message": message})
 
         async def browser_to_pty() -> None:
+            nonlocal output_bytes_acknowledged
             pending_image: tuple[str, int] | None = None
             while True:
                 message = await websocket.receive()
@@ -458,55 +651,62 @@ async def terminal(websocket: WebSocket, backend_id: str) -> None:
                 if message.get("bytes") is not None:
                     data = message["bytes"]
                     if pending_image is None:
-                        write_pty(client.master_fd, data)
+                        try:
+                            await write_pty(client.master_fd, data)
+                        except OSError:
+                            await report_error("terminal session is closed")
+                            return
                         continue
                     extension, expected_size = pending_image
                     pending_image = None
                     if len(data) != expected_size:
-                        await websocket.send_json(
-                            {"type": "error", "message": "clipboard image upload was truncated"}
-                        )
+                        await report_error("clipboard image upload was truncated")
                         continue
+                    path: Path | None = None
                     try:
                         path = stage_clipboard_image(extension, data)
                         # Herdr's remote client recognizes an absolute image
                         # path inside bracketed paste and emits ClipboardImage.
-                        write_pty(
+                        await write_pty(
                             client.master_fd,
                             b"\x1b[200~" + os.fsencode(path) + b"\x1b[201~",
                         )
-                        asyncio.create_task(remove_staged_image_later(path))
                     except (OSError, ValueError) as error:
-                        await websocket.send_json(
-                            {"type": "error", "message": f"clipboard image rejected: {error}"}
-                        )
+                        await report_error(f"clipboard image rejected: {error}")
+                    finally:
+                        if path is not None:
+                            schedule_staged_image_removal(path)
                     continue
                 text = message.get("text")
                 if text is None:
                     continue
                 # Only JSON control messages are sent as text. All terminal
                 # input is binary, so paste and escape sequences stay exact.
-                import json
-
                 control = json.loads(text)
                 if control.get("type") == "resize":
                     client.resize(int(control["cols"]), int(control["rows"]))
+                elif control.get("type") == "output-ack":
+                    acknowledged = control.get("bytes")
+                    if (
+                        isinstance(acknowledged, int)
+                        and output_bytes_acknowledged < acknowledged <= output_bytes_sent
+                    ):
+                        output_bytes_acknowledged = acknowledged
+                        output_acknowledged.set()
                 elif control.get("type") == "clipboard-image":
                     extension = str(control.get("extension", "")).lower()
                     size = control.get("size")
                     if extension not in IMAGE_EXTENSIONS or not isinstance(size, int):
-                        await websocket.send_json(
-                            {"type": "error", "message": "invalid clipboard image header"}
-                        )
+                        await report_error("invalid clipboard image header")
                     elif size <= 0 or size > MAX_CLIPBOARD_IMAGE_BYTES:
-                        await websocket.send_json(
-                            {"type": "error", "message": "clipboard image exceeds Herdr's 16 MiB limit"}
-                        )
+                        await report_error("clipboard image exceeds Herdr's 16 MiB limit")
                     else:
                         pending_image = (extension, size)
+                elif control.get("type") == "pong":
+                    continue
 
-        reader = asyncio.create_task(read_pty())
-        sender = asyncio.create_task(send_changed_frames())
+        reader = asyncio.create_task(read_pty_output())
+        sender = asyncio.create_task(send_browser_output())
         input_reader = asyncio.create_task(browser_to_pty())
         done, pending = await asyncio.wait(
             [sender, input_reader],
@@ -525,7 +725,7 @@ async def terminal(websocket: WebSocket, backend_id: str) -> None:
         await websocket.send_json({"type": "error", "message": str(error)})
     finally:
         if client is not None:
-            client.close()
+            await client.close()
 
 
 if __name__ == "__main__":

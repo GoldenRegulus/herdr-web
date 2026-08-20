@@ -1,8 +1,8 @@
 # herdr-web
 
-`herdr-web` is a local browser terminal for existing Herdr sessions. It is a
-companion service, not a fork of Herdr, and it does not expose the private
-Herdr socket to JavaScript.
+`herdr-web` is a local browser terminal for existing Herdr sessions. It uses
+xterm.js in the browser. It is a companion service, not a fork of Herdr, and it
+does not expose the private Herdr socket to JavaScript.
 
 It discovers the local user's conventional client sockets:
 
@@ -75,11 +75,11 @@ login. Anyone who can reach the service can control the selected Herdr session.
 Only use a LAN bind on a trusted network, or place the service behind an
 authenticated reverse proxy.
 
-## Run beside Jupyter
+## Run behind Jupyter or SageMaker
 
-The same process supports direct access and Jupyter Server Proxy access. If the
-Jupyter server runs on the same host, bind to `0.0.0.0` when you need both LAN
-access and the Jupyter proxy:
+The same process supports direct access, Jupyter Server Proxy, and SageMaker
+Code Editor proxy prefixes. If the Jupyter server runs on the same host, bind
+to `0.0.0.0` when you need both LAN access and the Jupyter proxy:
 
 ```bash
 uv run herdr-web --host 0.0.0.0 --port 8765
@@ -99,13 +99,43 @@ https://hub.example.org/user/alice/proxy/8765/
 
 If only Jupyter access is needed, bind to `127.0.0.1` instead. A process bound
 only to `192.168.1.1` accepts direct connections to that address, but a proxy
-that connects to `127.0.0.1` cannot reach it. The application keeps the
-Jupyter proxy prefix when the proxy sends `X-Forwarded-Prefix`, while direct
-access uses the root path.
+that connects to `127.0.0.1` cannot reach it.
 
-The page loads xterm.js and its fit addon from jsDelivr. For an air-gapped
-installation, serve matching xterm assets locally and replace the two CDN URLs
-in `herdr_web/static/index.html`.
+The browser derives the complete proxy prefix from its visible URL. It applies
+that prefix to local assets, HTTP requests, and the WebSocket URL. This also
+works with prefixes such as `/codeeditor/default/proxy/8765/` when SageMaker
+Code Editor provides that proxy route. The proxy must support WebSocket
+upgrades. If it does not, the browser uses the HTTP fallback.
+
+The package includes xterm.js 6.0.0 and the xterm.js fit addon 0.11.0 under
+`herdr_web/static/vendor/`. The terminal does not require a CDN or internet
+access. Their MIT licenses are in `xterm.LICENSE` and
+`xterm-addon-fit.LICENSE` in that directory.
+
+The package also includes the prebuilt MesloLGS NF Nerd Font web fonts under
+`herdr_web/static/fonts/`. This Powerlevel10k-patched font includes terminal
+symbols. xterm.js draws standard box characters with its connected custom
+glyphs. The browser loads the regular, bold, italic, and bold-italic files
+before it measures the terminal. The font license
+and copyright notice are in `herdr_web/static/fonts/MesloLGSNF.LICENSE`.
+
+## Slow connections
+
+The WebSocket bridge keeps one PTY output chunk in its application queue. It
+coalesces each output burst for at most 2 ms and up to 256 KiB. This reduces
+WebSocket and parser calls without dropping ANSI bytes. The browser parses each
+coalesced chunk before it acknowledges the bytes. During keyboard, pointer, or
+wheel input, it uses xterm.js's scheduled parser path to keep input responsive.
+Cumulative acknowledgements limit data waiting in the WebSocket and xterm.js.
+This early backpressure lets Herdr apply its native slow-client frame
+coalescing.
+
+Browser input uses a reusable byte buffer and `TextEncoder.encodeInto()`. It
+combines input into small binary WebSocket messages and limits the browser's
+native WebSocket backlog. Interactive input drains in its browser event task,
+so continuous output cannot starve it behind a timer. Input stays in order
+while the connection attaches. The HTTP fallback sends one input request at a
+time, so requests cannot pass each other.
 
 ## Clipboard images
 
@@ -130,10 +160,9 @@ client deliberately has no endpoint that accepts an arbitrary Unix-socket path.
 
 ## Current scope
 
-This first vertical slice provides backend selection and an interactive,
+The application provides backend selection and an interactive,
 terminal-faithful Herdr view. It intentionally uses the shipped Herdr client
 rather than duplicating its unstable bincode client protocol in JavaScript.
 
-Not yet implemented: offline xterm assets, multiple browser clients
-coordinated for one backend, or discovery of Herdr sessions outside the
-conventional config directory.
+Not yet implemented: multiple browser clients coordinated for one backend, or
+discovery of Herdr sessions outside the conventional config directory.
