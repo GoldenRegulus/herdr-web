@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
-import { InputByteBuffer } from '../herdr_web/static/input-buffer.js';
+import {
+  InputByteBuffer,
+  isDisposableMouseMotion,
+} from '../herdr_web/static/input-buffer.js';
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -52,5 +55,15 @@ assert.throws(() => {
   const buffer = new InputByteBuffer(encoder);
   buffer.consume(1);
 }, RangeError);
+
+assert.equal(isDisposableMouseMotion('\x1b[<35;130;30M'), true);
+assert.equal(isDisposableMouseMotion('\x1b[<32;10;20M'), true);
+assert.equal(isDisposableMouseMotion(`\x1b[M${String.fromCharCode(67, 42, 52)}`), true);
+assert.equal(isDisposableMouseMotion(`\x1b[M${String.fromCharCode(67, 42, 52)}paste`), false);
+assert.equal(isDisposableMouseMotion('\x1b[<0;10;20M'), false);
+assert.equal(isDisposableMouseMotion('\x1b[<0;10;20m'), false);
+assert.equal(isDisposableMouseMotion('\x1b[<64;10;20M'), false);
+assert.equal(isDisposableMouseMotion('q'), false);
+assert.equal(isDisposableMouseMotion('\x1b[<35;10;20Mmore'), false);
 
 console.log('input buffer tests: ok');

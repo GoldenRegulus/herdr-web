@@ -1,4 +1,17 @@
 const MAX_RETAINED_CAPACITY = 64 * 1024;
+const SGR_MOUSE_EVENT = /^\x1b\[<(\d+);\d+;\d+M$/;
+
+export function isDisposableMouseMotion(data) {
+  const sgr = SGR_MOUSE_EVENT.exec(data);
+  if (sgr) return (Number(sgr[1]) & 32) !== 0;
+
+  // X10 and UTF-8 mouse protocols encode the button value at this position.
+  if (data.startsWith('\x1b[M') && data.length === 6) {
+    const button = data.charCodeAt(3) - 32;
+    return button >= 0 && (button & 32) !== 0;
+  }
+  return false;
+}
 
 export class InputByteBuffer {
   constructor(encoder, initialCapacity = 4096, maximumLength = 16 * 1024 * 1024) {

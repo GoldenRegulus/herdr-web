@@ -1,15 +1,18 @@
-import { InputByteBuffer } from './input-buffer.js';
+import { InputByteBuffer, isDisposableMouseMotion } from './input-buffer.js';
 import './vendor/xterm.js';
 import './vendor/xterm-addon-fit.js';
+import './vendor/xterm-addon-webgl.js';
 
 const { Terminal } = globalThis;
 const { FitAddon } = globalThis.FitAddon;
+const { WebglAddon } = globalThis.WebglAddon;
 
 (async () => {
   const picker = document.querySelector('#picker');
   const terminalView = document.querySelector('#terminal-view');
   const backendList = document.querySelector('#backends');
   const pickerError = document.querySelector('#picker-error');
+  const addSessionButton = document.querySelector('#add-session');
   const status = document.querySelector('#connection-status');
   const connectionIndicator = document.querySelector('#connection-indicator');
   const fps = document.querySelector('#fps');
@@ -29,14 +32,16 @@ const { FitAddon } = globalThis.FitAddon;
   let httpFallbackStarting = false;
   let terminal;
   let fitAddon;
+  let webglAddon;
   let resizeObserver;
   let resizeQueued = false;
   let receivedFrames = 0;
   let outputFlow;
   let inputDrainTimer;
+  let mouseMotionTimer;
+  let pendingMouseMotion;
   let httpInputInFlight = false;
   let httpInputReady = false;
-  let lastUserInputAt = -Infinity;
   const inputEncoder = new TextEncoder();
   const inputBuffer = new InputByteBuffer(inputEncoder);
   const inputOperations = [];
@@ -44,7 +49,7 @@ const { FitAddon } = globalThis.FitAddon;
   const INPUT_WEBSOCKET_HIGH_WATER_BYTES = 32 * 1024;
   const OUTPUT_ACK_BATCH_BYTES = 64 * 1024;
   const OUTPUT_ACK_DELAY_MS = 10;
-  const INTERACTIVE_OUTPUT_GRACE_MS = 250;
+  const MOUSE_MOTION_INTERVAL_MS = 16;
   const MAX_CLIPBOARD_IMAGE_BYTES = 16 * 1024 * 1024;
   const clipboardImageExtensions = {
     'image/png': 'png',
@@ -53,6 +58,89 @@ const { FitAddon } = globalThis.FitAddon;
     'image/webp': 'webp',
     'image/bmp': 'bmp',
   };
+  const appearanceQuery = matchMedia('(prefers-color-scheme: light)');
+  let terminalTheme = {
+    background: '#181825',
+    foreground: '#cdd6f4',
+    cursor: '#89b4fa',
+  };
+  let appliedThemeFingerprint;
+  let themeSyncInFlight = false;
+
+  function xtermTheme(palette) {
+    return {
+      background: palette.panel_bg,
+      foreground: palette.text,
+      cursor: palette.accent,
+      cursorAccent: palette.panel_bg,
+      selectionBackground: palette.surface1,
+      selectionForeground: palette.text,
+      black: palette.surface_dim,
+      red: palette.red,
+      green: palette.green,
+      yellow: palette.yellow,
+      blue: palette.blue,
+      magenta: palette.mauve,
+      cyan: palette.teal,
+      white: palette.text,
+      brightBlack: palette.overlay0,
+      brightRed: palette.red,
+      brightGreen: palette.green,
+      brightYellow: palette.yellow,
+      brightBlue: palette.blue,
+      brightMagenta: palette.mauve,
+      brightCyan: palette.teal,
+      brightWhite: palette.text,
+    };
+  }
+
+  function applyHerdrTheme(theme) {
+    const fingerprint = JSON.stringify(theme);
+    if (fingerprint === appliedThemeFingerprint) return;
+    const palette = theme.palette;
+    const root = document.documentElement;
+    const variables = {
+      accent: palette.accent,
+      background: palette.panel_bg,
+      'surface-0': palette.surface0,
+      'surface-1': palette.surface1,
+      'surface-dim': palette.surface_dim,
+      'overlay-0': palette.overlay0,
+      'overlay-1': palette.overlay1,
+      text: palette.text,
+      subtext: palette.subtext0,
+      red: palette.red,
+      green: palette.green,
+      yellow: palette.yellow,
+    };
+    for (const [name, value] of Object.entries(variables)) {
+      root.style.setProperty(`--theme-${name}`, value);
+    }
+    root.style.colorScheme = theme.color_scheme;
+    root.dataset.herdrTheme = theme.name;
+    terminalTheme = xtermTheme(palette);
+    appliedThemeFingerprint = fingerprint;
+    if (terminal) terminal.options.theme = terminalTheme;
+  }
+
+  async function syncHerdrTheme() {
+    if (themeSyncInFlight) return;
+    themeSyncInFlight = true;
+    const appearance = appearanceQuery.matches ? 'light' : 'dark';
+    try {
+      const response = await fetchWithTimeout(
+        apiUrl(`theme?appearance=${appearance}`),
+        { cache: 'no-store' },
+        5_000,
+      );
+      if (!response.ok) throw new Error(`theme discovery failed (${response.status})`);
+      applyHerdrTheme(await response.json());
+    } catch (_) {
+      // Keep the last valid palette when the service is temporarily unavailable.
+    } finally {
+      themeSyncInFlight = false;
+    }
+  }
 
   const terminalFontFamily = '"Herdr MesloLGS NF", monospace';
   await Promise.all([
@@ -60,6 +148,7 @@ const { FitAddon } = globalThis.FitAddon;
     document.fonts.load('normal 700 14px "Herdr MesloLGS NF"'),
     document.fonts.load('italic 400 14px "Herdr MesloLGS NF"'),
     document.fonts.load('italic 700 14px "Herdr MesloLGS NF"'),
+    syncHerdrTheme(),
   ]);
 
   function setStatus(message, state = 'connecting') {
@@ -185,6 +274,10 @@ const { FitAddon } = globalThis.FitAddon;
       return;
     }
 
+    // Preserve the last pointer position before the image operation.
+    queuePendingMouseMotion();
+    drainInput();
+
     // Record the byte position now. Input typed after this paste remains after
     // the image even if reading the browser File takes time.
     const operation = {
@@ -276,27 +369,31 @@ const { FitAddon } = globalThis.FitAddon;
     }
   }
 
+  function enableWebglRenderer(activeTerminal) {
+    let addon;
+    try {
+      addon = new WebglAddon();
+      addon.onContextLoss(() => {
+        if (webglAddon !== addon) return;
+        webglAddon = undefined;
+        addon.dispose();
+      });
+      activeTerminal.loadAddon(addon);
+      webglAddon = addon;
+    } catch (_) {
+      // xterm keeps its DOM renderer when WebGL2 is unavailable.
+      addon?.dispose();
+      webglAddon = undefined;
+    }
+  }
+
   function queueTerminalOutput(bytes, flow) {
     receivedFrames += 1;
     const activeTerminal = terminal;
     if (!activeTerminal) return;
-    const inputPending = navigator.scheduling?.isInputPending?.({ includeContinuous: true });
-    if (
-      flow && !flow.pendingTerminalWrites && !inputPending
-      && performance.now() - lastUserInputAt >= INTERACTIVE_OUTPUT_GRACE_MS
-      && activeTerminal._core?.writeSync
-    ) {
-      // WebSocket messages are ordered, non-reentrant tasks. Parse each
-      // coalesced PTY chunk now so stale animation frames cannot build up in
-      // xterm.js's asynchronous write queue. Use xterm's scheduled path while
-      // the user interacts, so large output does not make input feel heavy.
-      activeTerminal._core.writeSync(bytes);
-      noteParsedOutput(flow, bytes.length);
-      return;
-    }
-    if (flow) flow.pendingTerminalWrites += 1;
+    // Use xterm's supported write queue. It limits parser work per browser
+    // task and gives the renderer an opportunity to paint between batches.
     activeTerminal.write(bytes, () => {
-      if (flow) flow.pendingTerminalWrites -= 1;
       if (terminal !== activeTerminal) return;
       if (flow) noteParsedOutput(flow, bytes.length);
       else {
@@ -399,6 +496,37 @@ const { FitAddon } = globalThis.FitAddon;
     drainHttpInput();
   }
 
+  function clearPendingMouseMotion() {
+    clearTimeout(mouseMotionTimer);
+    mouseMotionTimer = undefined;
+    pendingMouseMotion = undefined;
+  }
+
+  function queuePendingMouseMotion() {
+    if (pendingMouseMotion === undefined) return false;
+    inputBuffer.append(pendingMouseMotion);
+    pendingMouseMotion = undefined;
+    clearTimeout(mouseMotionTimer);
+    mouseMotionTimer = undefined;
+    return true;
+  }
+
+  function flushPendingMouseMotion() {
+    try {
+      if (queuePendingMouseMotion()) drainInput();
+    } catch (error) {
+      showBrowserToast(error.message);
+    }
+  }
+
+  function scheduleMouseMotion() {
+    if (mouseMotionTimer !== undefined) return;
+    mouseMotionTimer = setTimeout(() => {
+      mouseMotionTimer = undefined;
+      flushPendingMouseMotion();
+    }, MOUSE_MOTION_INTERVAL_MS);
+  }
+
   function showPicker(updateUrl = true, refresh = true) {
     clearTimeout(connectTimer);
     clearTimeout(reconnectTimer);
@@ -414,6 +542,7 @@ const { FitAddon } = globalThis.FitAddon;
     clearOutputFlow();
     clearTimeout(inputDrainTimer);
     inputDrainTimer = undefined;
+    clearPendingMouseMotion();
     inputBuffer.clear();
     inputOperations.length = 0;
     httpInputInFlight = false;
@@ -427,6 +556,7 @@ const { FitAddon } = globalThis.FitAddon;
     terminal?.dispose();
     terminal = undefined;
     fitAddon = undefined;
+    webglAddon = undefined;
     terminalHost.replaceChildren();
     terminalView.hidden = true;
     picker.hidden = false;
@@ -474,6 +604,15 @@ const { FitAddon } = globalThis.FitAddon;
 
   function sendInput(data) {
     try {
+      if (isDisposableMouseMotion(data)) {
+        // Mouse tracking can produce input faster than a remote application
+        // consumes it. Keep only the latest adjacent position. Do not let old
+        // pointer positions delay keys, clicks, wheel events, or paste data.
+        pendingMouseMotion = data;
+        scheduleMouseMotion();
+        return;
+      }
+      queuePendingMouseMotion();
       inputBuffer.append(data);
       // Drain in the input event task. A zero-delay timer can starve behind a
       // continuous stream of WebSocket output events.
@@ -565,7 +704,6 @@ const { FitAddon } = globalThis.FitAddon;
       parsedBytes: 0,
       acknowledgedBytes: 0,
       ackTimer: undefined,
-      pendingTerminalWrites: 0,
     };
     clearOutputFlow();
     outputFlow = flow;
@@ -644,6 +782,7 @@ const { FitAddon } = globalThis.FitAddon;
     receivedFrames = 0;
     clearTimeout(inputDrainTimer);
     inputDrainTimer = undefined;
+    clearPendingMouseMotion();
     inputBuffer.clear();
     inputOperations.length = 0;
     httpInputInFlight = false;
@@ -663,11 +802,12 @@ const { FitAddon } = globalThis.FitAddon;
       fontSize: 14,
       logLevel: 'error',
       scrollback: 20_000,
-      theme: { background: '#101216', foreground: '#d8dee9', cursor: '#eceff4' },
+      theme: terminalTheme,
     });
     fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
     terminal.open(terminalHost);
+    enableWebglRenderer(terminal);
     terminal.parser.registerOscHandler(52, handleOsc52);
     terminal.attachCustomKeyEventHandler((event) => {
       if (event.type !== 'keydown') return true;
@@ -687,12 +827,6 @@ const { FitAddon } = globalThis.FitAddon;
       sendInput(commandKey);
       return false;
     });
-    const markUserInput = () => { lastUserInputAt = performance.now(); };
-    terminal.element.addEventListener('keydown', markUserInput, true);
-    terminal.element.addEventListener('pointerdown', markUserInput, true);
-    terminal.element.addEventListener('pointermove', markUserInput, true);
-    terminal.element.addEventListener('wheel', markUserInput, { capture: true, passive: true });
-    terminal.element.addEventListener('paste', markUserInput, true);
     terminal.element.addEventListener('contextmenu', (event) => event.preventDefault());
     terminal.element.addEventListener('paste', (event) => {
       const image = clipboardImageFromPaste(event);
@@ -714,6 +848,67 @@ const { FitAddon } = globalThis.FitAddon;
     attach(backend);
   }
 
+  async function startNamedSession(event) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const input = form.querySelector('input');
+    const button = form.querySelector('button');
+    const name = input.value.trim();
+    input.value = name;
+    if (!form.reportValidity()) return;
+
+    pickerError.hidden = true;
+    input.disabled = true;
+    button.disabled = true;
+    form.setAttribute('aria-busy', 'true');
+    try {
+      const response = await fetchWithTimeout(apiUrl('backends'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      }, 20_000);
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.detail || `session start failed (${response.status})`);
+      openBackend(result.backend);
+    } catch (error) {
+      pickerError.textContent = error.message;
+      pickerError.hidden = false;
+    } finally {
+      input.disabled = false;
+      button.disabled = false;
+      form.removeAttribute('aria-busy');
+    }
+  }
+
+  function addSessionRow() {
+    const existing = backendList.querySelector('.start-session-row');
+    if (existing) {
+      existing.querySelector('input').focus();
+      return;
+    }
+    backendList.querySelector('.empty-backends')?.remove();
+    const form = document.createElement('form');
+    form.className = 'start-session-row';
+    form.setAttribute('aria-label', 'Start a named session');
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.name = 'session-name';
+    input.maxLength = 64;
+    input.pattern = '[A-Za-z0-9._\\-]+';
+    input.placeholder = 'Session name';
+    input.autocomplete = 'off';
+    input.spellcheck = false;
+    input.required = true;
+    input.setAttribute('aria-label', 'Session name');
+    const button = document.createElement('button');
+    button.type = 'submit';
+    button.textContent = 'Start';
+    form.append(input, button);
+    form.addEventListener('submit', startNamedSession);
+    backendList.append(form);
+    input.focus();
+  }
+
   async function loadBackends(openSelected = true) {
     backendList.replaceChildren();
     pickerError.hidden = true;
@@ -722,8 +917,11 @@ const { FitAddon } = globalThis.FitAddon;
       if (!response.ok) throw new Error(`backend discovery failed (${response.status})`);
       const { backends } = await response.json();
       if (!backends.length) {
-        backendList.textContent = 'No running Herdr client sockets found.';
-        return []; 
+        const empty = document.createElement('div');
+        empty.className = 'empty-backends muted';
+        empty.textContent = 'No running Herdr client sockets found.';
+        backendList.append(empty);
+        return [];
       }
       for (const backend of backends) {
         const button = document.createElement('button');
@@ -768,6 +966,7 @@ const { FitAddon } = globalThis.FitAddon;
 
   document.querySelector('#refresh').addEventListener('click', () => loadBackends(false));
   document.querySelector('#back').addEventListener('click', () => showPicker());
+  addSessionButton.addEventListener('click', addSessionRow);
   telemetry.addEventListener('click', attemptReconnect);
   window.addEventListener('online', attemptReconnect);
   window.addEventListener('pagehide', () => {
@@ -777,6 +976,13 @@ const { FitAddon } = globalThis.FitAddon;
     }
   });
   window.addEventListener('popstate', restoreUrlSelection);
+  appearanceQuery.addEventListener('change', syncHerdrTheme);
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) void syncHerdrTheme();
+  });
+  window.setInterval(() => {
+    if (!document.hidden) void syncHerdrTheme();
+  }, 2_000);
   startTransportRateMeter();
   restoreUrlSelection();
 })().catch((error) => {

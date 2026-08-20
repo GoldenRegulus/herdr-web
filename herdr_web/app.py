@@ -28,6 +28,8 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from herdr_web.theme import ThemeAppearance, resolve_theme
+
 PACKAGE_DIR: Final = Path(__file__).resolve().parent
 STATIC_DIR: Final = PACKAGE_DIR / "static"
 STAGED_IMAGE_DIRECTORY: Final = Path(tempfile.gettempdir()) / "herdr-web-images"
@@ -41,6 +43,20 @@ WEBSOCKET_HEARTBEAT_SECONDS: Final = 15
 HTTP_SESSION_IDLE_SECONDS: Final = 30
 CHILD_TERMINATION_GRACE_SECONDS: Final = 1
 CHILD_KILL_GRACE_SECONDS: Final = 1
+SESSION_START_TIMEOUT_SECONDS: Final = 16
+MAX_SESSION_NAME_BYTES: Final = 64
+HERDR_PARENT_ENVIRONMENT_VARIABLES: Final = (
+    "HERDR_ENV",
+    "HERDR_SOCKET_PATH",
+    "HERDR_CLIENT_SOCKET_PATH",
+    "HERDR_SESSION",
+    "HERDR_TAB_ID",
+    "HERDR_WORKSPACE_ID",
+    "HERDR_PANE_ID",
+    "HERDR_RENDER_ENCODING",
+    "HERDR_REMOTE_KEYBINDINGS",
+    "SSH_TTY",
+)
 IMAGE_EXTENSIONS: Final = frozenset({"png", "jpg", "jpeg", "gif", "webp", "bmp"})
 logger = logging.getLogger(__name__)
 
@@ -147,6 +163,10 @@ class SessionStart(BaseModel):
     rows: int = 40
 
 
+class NamedSessionStart(BaseModel):
+    name: str
+
+
 class TerminalInput(BaseModel):
     data_base64: str
 
@@ -159,6 +179,7 @@ class TerminalResize(BaseModel):
 sessions: dict[str, BrowserSession] = {}
 session_reaper: asyncio.Task[None] | None = None
 staged_image_cleanup_tasks: set[asyncio.Task[None]] = set()
+named_session_start_lock = asyncio.Lock()
 
 
 async def reap_idle_sessions() -> None:
@@ -254,6 +275,91 @@ def herdr_binary() -> str:
     if not binary:
         raise RuntimeError("could not find herdr; set HERDR_BINARY to its absolute path")
     return binary
+
+
+def clean_herdr_environment() -> dict[str, str]:
+    """Remove inherited attachment state before a new Herdr invocation."""
+    environment = os.environ.copy()
+    for variable in HERDR_PARENT_ENVIRONMENT_VARIABLES:
+        environment.pop(variable, None)
+    return environment
+
+
+def validate_session_name(name: str) -> str:
+    if not name:
+        raise ValueError("session name cannot be empty")
+    if name in {".", ".."}:
+        raise ValueError("session name cannot be . or ..")
+    if not name.isascii() or not all(
+        character.isalnum() or character in "._-" for character in name
+    ):
+        raise ValueError(
+            "session name may only contain ASCII letters, numbers, '.', '_' and '-'"
+        )
+    if len(name.encode("ascii")) > MAX_SESSION_NAME_BYTES:
+        raise ValueError(f"session name cannot be longer than {MAX_SESSION_NAME_BYTES} bytes")
+    return name
+
+
+def backend_with_label(name: str) -> Backend | None:
+    return next(
+        (backend for backend in discover_backends().values() if backend.label == name),
+        None,
+    )
+
+
+async def stop_session_launcher(process: asyncio.subprocess.Process) -> None:
+    if process.returncode is not None:
+        return
+    try:
+        process.terminate()
+    except ProcessLookupError:
+        return
+    try:
+        await asyncio.wait_for(process.wait(), timeout=CHILD_TERMINATION_GRACE_SECONDS)
+        return
+    except asyncio.TimeoutError:
+        pass
+    try:
+        process.kill()
+    except ProcessLookupError:
+        return
+    await process.wait()
+
+
+async def start_named_backend(name: str) -> Backend:
+    """Start a named persistent Herdr session and detach its launcher client."""
+    existing = backend_with_label(name)
+    if existing is not None:
+        return existing
+
+    process = await asyncio.create_subprocess_exec(
+        herdr_binary(),
+        "--session",
+        name,
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+        env=clean_herdr_environment(),
+    )
+    assert process.stderr is not None
+    stderr_reader = asyncio.create_task(process.stderr.read())
+    try:
+        deadline = asyncio.get_running_loop().time() + SESSION_START_TIMEOUT_SECONDS
+        while asyncio.get_running_loop().time() < deadline:
+            backend = backend_with_label(name)
+            if backend is not None:
+                return backend
+            if process.returncode is not None:
+                error = (await stderr_reader).decode(errors="replace").strip()
+                raise RuntimeError(error or "Herdr exited before the session became ready")
+            await asyncio.sleep(0.05)
+        raise RuntimeError("Herdr did not start the session within 16 seconds")
+    finally:
+        await stop_session_launcher(process)
+        if not stderr_reader.done():
+            stderr_reader.cancel()
+        await asyncio.gather(stderr_reader, return_exceptions=True)
 
 
 async def wait_for_fd(master_fd: int, *, writable: bool = False) -> None:
@@ -377,18 +483,9 @@ def start_client(backend: Backend, cols: int, rows: int) -> PtyClient:
     binary = herdr_binary()
     pid, master_fd = pty.fork()
     if pid == 0:
-        environment = os.environ.copy()
         # The bridge can run inside Herdr. Do not make its child client look
         # like a nested launch or bind it to the parent's pane.
-        for variable in (
-            "HERDR_ENV",
-            "HERDR_SOCKET_PATH",
-            "HERDR_SESSION",
-            "HERDR_TAB_ID",
-            "HERDR_WORKSPACE_ID",
-            "HERDR_PANE_ID",
-        ):
-            environment.pop(variable, None)
+        environment = clean_herdr_environment()
         environment["HERDR_CLIENT_SOCKET_PATH"] = str(backend.socket_path)
         environment["HERDR_RENDER_ENCODING"] = "terminal-ansi"
         environment.setdefault("TERM", "xterm-256color")
@@ -422,6 +519,25 @@ async def list_backends() -> dict[str, list[dict[str, str]]]:
             for backend in discover_backends().values()
         ]
     }
+
+
+@app.get("/api/theme")
+async def get_theme(appearance: ThemeAppearance = "dark") -> dict[str, object]:
+    return resolve_theme(appearance)
+
+
+@app.post("/api/backends")
+async def create_named_backend(request: NamedSessionStart) -> dict[str, dict[str, str]]:
+    try:
+        name = validate_session_name(request.name)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    try:
+        async with named_session_start_lock:
+            backend = await start_named_backend(name)
+    except (OSError, RuntimeError) as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    return {"backend": {"id": backend.id, "label": backend.label}}
 
 
 async def read_pty(session: BrowserSession) -> None:

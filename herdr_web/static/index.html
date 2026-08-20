@@ -25,7 +25,10 @@
         <p class="muted">Select a running session on this host.</p>
         <div id="backends" class="backends" aria-live="polite"></div>
         <p id="picker-error" class="error" hidden></p>
-        <button id="refresh" type="button">Refresh</button>
+        <div class="picker-actions">
+          <button id="refresh" type="button">Refresh</button>
+          <button id="add-session" type="button">Add</button>
+        </div>
       </section>
       <div id="web-toasts" aria-live="polite" aria-atomic="true"></div>
       <section id="terminal-view" hidden>
