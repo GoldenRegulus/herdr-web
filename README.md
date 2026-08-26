@@ -86,12 +86,12 @@ Tailscale login:
 
 ```bash
 uv run herdr-web \
-  --host 100.70.11.77 \
+  --host TAILSCALE_IP \
   --port 8765 \
-  --tailscale-user mradityadash@gmail.com
+  --tailscale-user OWNER_LOGIN
 ```
 
-Open `http://100.70.11.77:8765/` from a device that belongs to that user. Herdr
+Open `http://TAILSCALE_IP:8765/` from a device that belongs to that user. Herdr
 Web calls the local Tailscale `whois` API for each source address and caches the
 verified login. It rejects HTTP and WebSocket access from missing or different
 identities. This includes other users who can access a shared Tailscale device.
