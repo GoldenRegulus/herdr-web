@@ -43,6 +43,22 @@
           <span id="fps">-- FPS</span>
         </aside>
         <div id="terminal" aria-label="Herdr terminal"></div>
+        <nav id="mobile-toolbar" aria-label="Herdr navigation">
+          <button type="button" data-sheet="spaces">Spaces</button>
+          <button type="button" data-sheet="tabs">Tabs</button>
+          <button type="button" data-sheet="agents">Agents</button>
+          <button type="button" data-sheet="more">More</button>
+        </nav>
+        <div id="mobile-sheet" hidden>
+          <button id="sheet-backdrop" type="button" aria-label="Close navigation"></button>
+          <section role="dialog" aria-modal="true" aria-labelledby="sheet-title">
+            <header>
+              <h2 id="sheet-title"></h2>
+              <button id="sheet-close" type="button" aria-label="Close navigation">Close</button>
+            </header>
+            <div id="sheet-content"></div>
+          </section>
+        </div>
       </section>
     </main>
 

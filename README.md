@@ -74,10 +74,34 @@ To bind only one interface, use that address instead:
 uv run herdr-web --host 192.168.1.1 --port 8765
 ```
 
-The default bind address is `127.0.0.1` for safety. The service has no separate
-login. Anyone who can reach the service can control a selected Herdr session
-and start named sessions. Only use a LAN bind on a trusted network, or place
-the service behind an authenticated reverse proxy.
+The default bind address is `127.0.0.1` for safety. Without
+`--tailscale-user`, anyone who can reach the service can control a selected
+Herdr session and start named sessions. Only use an unrestricted LAN bind on a
+trusted network, or place the service behind an authenticated reverse proxy.
+
+## Run directly through Tailscale
+
+Bind Herdr Web to the machine's Tailscale address and require one exact
+Tailscale login:
+
+```bash
+uv run herdr-web \
+  --host 100.70.11.77 \
+  --port 8765 \
+  --tailscale-user mradityadash@gmail.com
+```
+
+Open `http://100.70.11.77:8765/` from a device that belongs to that user. Herdr
+Web calls the local Tailscale `whois` API for each source address and caches the
+verified login. It rejects HTTP and WebSocket access from missing or different
+identities. This includes other users who can access a shared Tailscale device.
+The WebSocket endpoint also requires a same-origin browser handshake.
+
+This mode needs a direct Tailscale connection. Do not put it behind a TCP or
+HTTP proxy, because the web process must see the original Tailscale peer
+address. Set `TAILSCALE_BINARY` when the `tailscale` command is not on `PATH`.
+Direct IP access uses HTTP. Use an HTTPS reverse proxy when browser features
+require a secure context.
 
 ## Run behind Jupyter or SageMaker
 
@@ -180,6 +204,19 @@ so non-disposable input stays ordered and lossless. Input stays queued while
 the connection attaches. The HTTP fallback sends one input request at a time,
 so requests cannot pass each other.
 
+## Mobile navigation
+
+On a narrow or coarse-pointer screen, the browser shows a native toolbar with
+Spaces, Tabs, Agents, and More controls. The bottom sheets read structured
+state from `herdr api snapshot`. Focus actions use the public Herdr workspace,
+tab, and agent CLI commands. The browser does not parse terminal ANSI to find
+navigation state.
+
+Herdr 0.7.5 still renders its permanent terminal UI around the focused pane.
+The native toolbar covers the terminal-drawn mobile switch area. Complete
+pane-only rendering needs a future Herdr client presentation capability; Herdr
+Web does not crop or discard the ordered terminal stream to simulate it.
+
 ## Clipboard images
 
 When the browser has a WebSocket connection, paste PNG, JPEG, GIF, WebP, or
@@ -195,6 +232,9 @@ The HTTP fallback supports terminal text input but not binary image uploads.
 | --- | --- |
 | `--host HOST` | Interface to bind. Defaults to `127.0.0.1`. |
 | `--port PORT` | Port to bind. Defaults to `8765`. |
+| `--tailscale-user LOGIN` | Allow only this exact Tailscale login, verified from each direct peer address. |
+| `HERDR_WEB_TAILSCALE_USER` | Environment form of `--tailscale-user`. |
+| `TAILSCALE_BINARY` | Absolute path to the Tailscale CLI used for identity queries. |
 | `HERDR_BINARY` | Absolute path to the Herdr binary used for the local client. Defaults to `herdr` on `PATH`. |
 | `HERDR_WEB_CONFIG_DIR` | Herdr configuration directory to scan. Defaults to `~/.config/herdr`, respecting `XDG_CONFIG_HOME`. |
 | `HERDR_CONFIG_PATH` | Herdr config file used for synchronized theme settings. Uses Herdr's normal config path when unset. |

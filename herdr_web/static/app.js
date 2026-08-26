@@ -20,6 +20,11 @@ const { WebglAddon } = globalThis.WebglAddon;
   const toastHost = document.querySelector('#web-toasts');
   const terminalHost = document.querySelector('#terminal');
   const backendName = document.querySelector('#backend-name');
+  const mobileToolbar = document.querySelector('#mobile-toolbar');
+  const mobileSheet = document.querySelector('#mobile-sheet');
+  const sheetTitle = document.querySelector('#sheet-title');
+  const sheetContent = document.querySelector('#sheet-content');
+  const mobileQuery = matchMedia('(max-width: 700px), (pointer: coarse) and (max-width: 900px)');
 
   let sessionId;
   let currentBackend;
@@ -66,6 +71,11 @@ const { WebglAddon } = globalThis.WebglAddon;
   };
   let appliedThemeFingerprint;
   let themeSyncInFlight = false;
+  let navigationSnapshot;
+  let navigationFingerprint;
+  let navigationTimer;
+  let navigationRequest;
+  let openSheetName;
 
   function xtermTheme(palette) {
     return {
@@ -321,6 +331,205 @@ const { WebglAddon } = globalThis.WebglAddon;
     return `${appBasePath()}api/${path}`;
   }
 
+  function backendApiUrl(backend, path) {
+    return apiUrl(`backends/${encodeURIComponent(backend.id)}/${path}`);
+  }
+
+  function navigationRecordLabel(record, fallback) {
+    return record.label || record.terminal_title_stripped || record.agent || fallback;
+  }
+
+  function agentStatus(record) {
+    const badge = document.createElement('span');
+    badge.className = 'agent-status';
+    badge.dataset.status = record.agent_status || 'unknown';
+    badge.textContent = record.agent_status || 'unknown';
+    return badge;
+  }
+
+  function sheetItem(label, detail, current, statusValue, action) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'sheet-item';
+    if (current) button.setAttribute('aria-current', 'true');
+    const name = document.createElement('span');
+    name.className = 'sheet-item-label';
+    name.textContent = label;
+    const description = document.createElement('span');
+    description.className = 'sheet-item-detail';
+    description.textContent = detail;
+    button.append(name, description);
+    if (statusValue) button.append(agentStatus({ agent_status: statusValue }));
+    button.addEventListener('click', action);
+    return button;
+  }
+
+  function closeMobileSheet(refocus = true) {
+    openSheetName = undefined;
+    mobileSheet.hidden = true;
+    for (const button of mobileToolbar.querySelectorAll('button')) {
+      button.setAttribute('aria-expanded', 'false');
+    }
+    if (refocus) terminal?.focus();
+  }
+
+  async function focusNavigationTarget(kind, targetId, button) {
+    if (!currentBackend) return;
+    button.disabled = true;
+    try {
+      const response = await fetchWithTimeout(
+        backendApiUrl(currentBackend, 'focus'),
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ kind, target_id: targetId }),
+        },
+      );
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.detail || `could not focus ${kind}`);
+      navigationSnapshot = result;
+      navigationFingerprint = JSON.stringify(result);
+      closeMobileSheet();
+    } catch (error) {
+      button.disabled = false;
+      showBrowserToast(error.message);
+    }
+  }
+
+  function renderMobileSheet() {
+    if (!openSheetName) return;
+    sheetContent.replaceChildren();
+    sheetTitle.textContent = {
+      spaces: 'Spaces', tabs: 'Tabs', agents: 'Agents', more: 'More',
+    }[openSheetName];
+
+    if (openSheetName === 'more') {
+      const reconnect = document.createElement('button');
+      reconnect.type = 'button';
+      reconnect.className = 'more-action';
+      reconnect.textContent = 'Reconnect terminal';
+      reconnect.addEventListener('click', () => {
+        closeMobileSheet(false);
+        setStatus('Reconnect requested', 'disconnected');
+        attemptReconnect();
+      });
+      const sessionsButton = document.createElement('button');
+      sessionsButton.type = 'button';
+      sessionsButton.className = 'more-action';
+      sessionsButton.textContent = 'Back to sessions';
+      sessionsButton.addEventListener('click', () => {
+        closeMobileSheet(false);
+        showPicker();
+      });
+      sheetContent.append(reconnect, sessionsButton);
+      return;
+    }
+
+    if (!navigationSnapshot) {
+      const loading = document.createElement('p');
+      loading.className = 'sheet-empty';
+      loading.textContent = 'Loading…';
+      sheetContent.append(loading);
+      return;
+    }
+
+    const workspaces = navigationSnapshot.workspaces || [];
+    const tabs = navigationSnapshot.tabs || [];
+    let records;
+    let kind;
+    if (openSheetName === 'spaces') {
+      records = workspaces;
+      kind = 'workspace';
+    } else if (openSheetName === 'tabs') {
+      records = tabs.filter(
+        (record) => record.workspace_id === navigationSnapshot.focused_workspace_id,
+      );
+      kind = 'tab';
+    } else {
+      records = navigationSnapshot.agents || [];
+      kind = 'agent';
+    }
+
+    const workspaceLabels = new Map(
+      workspaces.map((record) => [record.workspace_id, navigationRecordLabel(record, 'Space')]),
+    );
+    const tabLabels = new Map(
+      tabs.map((record) => [record.tab_id, navigationRecordLabel(record, 'Tab')]),
+    );
+    for (const record of records) {
+      const targetId = kind === 'workspace'
+        ? record.workspace_id : kind === 'tab' ? record.tab_id : record.pane_id;
+      const fallback = kind === 'workspace' ? 'Space' : kind === 'tab' ? 'Tab' : 'Agent';
+      let detail;
+      if (kind === 'workspace') {
+        const tabCount = record.tab_count || 0;
+        const paneCount = record.pane_count || 0;
+        detail = `${tabCount} ${tabCount === 1 ? 'tab' : 'tabs'} · ${paneCount} ${paneCount === 1 ? 'pane' : 'panes'}`;
+      } else if (kind === 'tab') {
+        const paneCount = record.pane_count || 0;
+        detail = `${paneCount} ${paneCount === 1 ? 'pane' : 'panes'}`;
+      } else {
+        detail = `${workspaceLabels.get(record.workspace_id) || 'Space'} · ${tabLabels.get(record.tab_id) || 'Tab'}`;
+      }
+      const current = targetId === navigationSnapshot[`focused_${kind === 'agent' ? 'pane' : kind}_id`];
+      const button = sheetItem(
+        navigationRecordLabel(record, fallback), detail, current, record.agent_status,
+        () => focusNavigationTarget(kind, targetId, button),
+      );
+      sheetContent.append(button);
+    }
+    if (!records.length) {
+      const empty = document.createElement('p');
+      empty.className = 'sheet-empty';
+      empty.textContent = `No ${openSheetName.toLowerCase()} found.`;
+      sheetContent.append(empty);
+    }
+  }
+
+  async function refreshNavigation() {
+    if (!currentBackend || !mobileQuery.matches || document.hidden) return;
+    if (navigationRequest) return navigationRequest;
+    const backend = currentBackend;
+    navigationRequest = fetchWithTimeout(
+      backendApiUrl(backend, 'navigation'), { cache: 'no-store' }, 5_000,
+    ).then(async (response) => {
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.detail || 'navigation state is unavailable');
+      if (currentBackend?.id !== backend.id) return;
+      const fingerprint = JSON.stringify(result);
+      if (fingerprint === navigationFingerprint) return;
+      navigationSnapshot = result;
+      navigationFingerprint = fingerprint;
+      renderMobileSheet();
+    }).catch((error) => {
+      if (openSheetName) showBrowserToast(error.message);
+    }).finally(() => {
+      navigationRequest = undefined;
+    });
+    return navigationRequest;
+  }
+
+  function startNavigationPolling() {
+    clearInterval(navigationTimer);
+    navigationTimer = undefined;
+    navigationSnapshot = undefined;
+    navigationFingerprint = undefined;
+    if (!mobileQuery.matches || !currentBackend) return;
+    void refreshNavigation();
+    navigationTimer = setInterval(refreshNavigation, 2_000);
+  }
+
+  function openMobileSheet(name, trigger) {
+    openSheetName = name;
+    mobileSheet.hidden = false;
+    for (const button of mobileToolbar.querySelectorAll('button')) {
+      button.setAttribute('aria-expanded', button === trigger ? 'true' : 'false');
+    }
+    renderMobileSheet();
+    if (name !== 'more') void refreshNavigation();
+    document.querySelector('#sheet-close').focus();
+  }
+
   async function fetchWithTimeout(url, options = {}, timeout = 10_000) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeout);
@@ -528,6 +737,12 @@ const { WebglAddon } = globalThis.WebglAddon;
   }
 
   function showPicker(updateUrl = true, refresh = true) {
+    closeMobileSheet(false);
+    clearInterval(navigationTimer);
+    navigationTimer = undefined;
+    navigationSnapshot = undefined;
+    navigationFingerprint = undefined;
+    navigationRequest = undefined;
     clearTimeout(connectTimer);
     clearTimeout(reconnectTimer);
     clearTimeout(reconnectStableTimer);
@@ -841,6 +1056,7 @@ const { WebglAddon } = globalThis.WebglAddon;
     resizeObserver = new ResizeObserver(sendResize);
     resizeObserver.observe(terminalHost);
     startWebSocket(backend);
+    startNavigationPolling();
   }
 
   function openBackend(backend, updateUrl = true) {
@@ -966,6 +1182,24 @@ const { WebglAddon } = globalThis.WebglAddon;
 
   document.querySelector('#refresh').addEventListener('click', () => loadBackends(false));
   document.querySelector('#back').addEventListener('click', () => showPicker());
+  for (const button of mobileToolbar.querySelectorAll('button')) {
+    button.setAttribute('aria-haspopup', 'dialog');
+    button.setAttribute('aria-expanded', 'false');
+    button.addEventListener('click', () => openMobileSheet(button.dataset.sheet, button));
+  }
+  document.querySelector('#sheet-backdrop').addEventListener('click', () => closeMobileSheet());
+  document.querySelector('#sheet-close').addEventListener('click', () => closeMobileSheet());
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && openSheetName) {
+      event.preventDefault();
+      closeMobileSheet();
+    }
+  });
+  mobileQuery.addEventListener('change', () => {
+    if (!mobileQuery.matches) closeMobileSheet(false);
+    startNavigationPolling();
+    sendResize();
+  });
   addSessionButton.addEventListener('click', addSessionRow);
   telemetry.addEventListener('click', attemptReconnect);
   window.addEventListener('online', attemptReconnect);
@@ -978,7 +1212,10 @@ const { WebglAddon } = globalThis.WebglAddon;
   window.addEventListener('popstate', restoreUrlSelection);
   appearanceQuery.addEventListener('change', syncHerdrTheme);
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) void syncHerdrTheme();
+    if (!document.hidden) {
+      void syncHerdrTheme();
+      void refreshNavigation();
+    }
   });
   window.setInterval(() => {
     if (!document.hidden) void syncHerdrTheme();
