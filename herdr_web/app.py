@@ -25,7 +25,7 @@ from typing import Final, Literal
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -55,14 +55,6 @@ SESSION_START_TIMEOUT_SECONDS: Final = 16
 MAX_SESSION_NAME_BYTES: Final = 64
 HERDR_API_TIMEOUT_SECONDS: Final = 5
 HERDR_API_MAX_OUTPUT_BYTES: Final = 8 * 1024 * 1024
-TAILSCALE_WHOIS_TIMEOUT_SECONDS: Final = 3
-TAILSCALE_IDENTITY_CACHE_SECONDS: Final = 60
-TAILSCALE_BINARY_CANDIDATES: Final = (
-    "/Applications/Tailscale.app/Contents/MacOS/tailscale",
-    "/opt/homebrew/bin/tailscale",
-    "/usr/local/bin/tailscale",
-    "/usr/bin/tailscale",
-)
 HERDR_PARENT_ENVIRONMENT_VARIABLES: Final = (
     "HERDR_ENV",
     "HERDR_SOCKET_PATH",
@@ -90,104 +82,18 @@ app.mount(
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
-def tailscale_binary() -> str:
-    """Find the Tailscale CLI used for LocalAPI identity queries."""
-    configured = os.environ.get("TAILSCALE_BINARY")
-    if configured:
-        return configured
-    discovered = shutil.which("tailscale")
-    if discovered:
-        return discovered
-    for candidate in TAILSCALE_BINARY_CANDIDATES:
-        if os.access(candidate, os.X_OK):
-            return candidate
-    raise RuntimeError("could not find tailscale; set TAILSCALE_BINARY")
-
-
-async def query_tailscale_login(address: str) -> str | None:
-    """Return the verified Tailscale login for one peer address."""
-    try:
-        process = await asyncio.create_subprocess_exec(
-            tailscale_binary(),
-            "whois",
-            "--json",
-            address,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-    except (OSError, RuntimeError):
-        return None
-    try:
-        stdout, _ = await asyncio.wait_for(
-            process.communicate(), timeout=TAILSCALE_WHOIS_TIMEOUT_SECONDS
-        )
-    except asyncio.TimeoutError:
-        process.kill()
-        await process.wait()
-        return None
-    if process.returncode != 0 or len(stdout) > HERDR_API_MAX_OUTPUT_BYTES:
-        return None
-    try:
-        document = json.loads(stdout)
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        return None
-    profile = document.get("UserProfile")
-    if not isinstance(profile, dict):
-        return None
-    login = profile.get("LoginName")
-    return login if isinstance(login, str) and login else None
-
-
-async def tailscale_login_for(address: str) -> str | None:
-    """Cache LocalAPI identity results to avoid one process per asset request."""
-    now = time.monotonic()
-    cached = tailscale_identity_cache.get(address)
-    if cached is not None and cached[0] > now:
-        return cached[1]
-    lock = tailscale_identity_locks.setdefault(address, asyncio.Lock())
-    async with lock:
-        cached = tailscale_identity_cache.get(address)
-        if cached is not None and cached[0] > time.monotonic():
-            return cached[1]
-        login = await query_tailscale_login(address)
-        tailscale_identity_cache[address] = (
-            time.monotonic() + TAILSCALE_IDENTITY_CACHE_SECONDS,
-            login,
-        )
-        return login
-
-
-async def tailscale_request_is_allowed(address: str | None) -> bool:
-    if allowed_tailscale_user is None:
-        return True
-    if not address:
-        return False
-    return await tailscale_login_for(address) == allowed_tailscale_user
-
-
 def websocket_origin_is_allowed(websocket: WebSocket) -> bool:
-    """Reject cross-site WebSocket use when Tailscale authorization is active."""
-    if allowed_tailscale_user is None:
-        return True
+    """Reject browser WebSockets opened by a different web origin."""
     origin = websocket.headers.get("origin")
+    if origin is None:
+        # Keep non-browser protocol clients compatible. Browsers always send
+        # Origin for a WebSocket handshake.
+        return True
     host = websocket.headers.get("host")
-    if not origin or not host:
+    if not host:
         return False
     parsed = urlsplit(origin)
     return parsed.scheme in {"http", "https"} and parsed.netloc.casefold() == host.casefold()
-
-
-@app.middleware("http")
-async def authorize_tailscale_request(request: Request, call_next):
-    address = request.client.host if request.client is not None else None
-    if not await tailscale_request_is_allowed(address):
-        return JSONResponse(
-            status_code=403,
-            content={"detail": "this Tailscale identity cannot access Herdr Web"},
-            headers=NO_STORE_HEADERS,
-        )
-    return await call_next(request)
 
 
 @app.middleware("http")
@@ -323,10 +229,7 @@ sessions: dict[str, BrowserSession] = {}
 session_reaper: asyncio.Task[None] | None = None
 staged_image_cleanup_tasks: set[asyncio.Task[None]] = set()
 named_session_start_lock = asyncio.Lock()
-tailscale_identity_cache: dict[str, tuple[float, str | None]] = {}
-tailscale_identity_locks: dict[str, asyncio.Lock] = {}
 navigation_snapshot_cache: dict[str, tuple[float, dict[str, object]]] = {}
-allowed_tailscale_user = os.environ.get("HERDR_WEB_TAILSCALE_USER") or None
 
 
 async def reap_idle_sessions() -> None:
@@ -761,6 +664,11 @@ async def index() -> HTMLResponse:
     return HTMLResponse(document, headers=NO_STORE_HEADERS)
 
 
+@app.get("/healthz")
+async def health() -> dict[str, str]:
+    return {"status": "ok"}
+
+
 @app.get("/api/backends")
 async def list_backends() -> dict[str, list[dict[str, str]]]:
     return {
@@ -944,22 +852,9 @@ def main() -> None:
         type=int,
         help="port to bind (default: 8765)",
     )
-    parser.add_argument(
-        "--tailscale-user",
-        default=os.environ.get("HERDR_WEB_TAILSCALE_USER"),
-        metavar="LOGIN",
-        help="allow only this Tailscale login, verified through tailscale whois",
-    )
     arguments = parser.parse_args()
     if not 1 <= arguments.port <= 65535:
         parser.error("--port must be between 1 and 65535")
-    if arguments.tailscale_user is not None and not arguments.tailscale_user.strip():
-        parser.error("--tailscale-user cannot be empty")
-
-    global allowed_tailscale_user
-    allowed_tailscale_user = (
-        arguments.tailscale_user.strip() if arguments.tailscale_user else None
-    )
 
     import uvicorn
 
@@ -967,8 +862,8 @@ def main() -> None:
         app,
         host=arguments.host,
         port=arguments.port,
-        # Direct Tailscale authorization must use the socket peer address. Do
-        # not let a local caller replace it with X-Forwarded-For.
+        # Herdr Web does not consume proxy identity or client-address headers.
+        # Keep the transport peer authoritative and avoid accidental trust.
         proxy_headers=False,
         ws_ping_interval=WEBSOCKET_HEARTBEAT_SECONDS,
         ws_ping_timeout=WEBSOCKET_HEARTBEAT_SECONDS * 3,
@@ -977,10 +872,6 @@ def main() -> None:
 
 @app.websocket("/ws/{backend_id}")
 async def terminal(websocket: WebSocket, backend_id: str) -> None:
-    address = websocket.client.host if websocket.client is not None else None
-    if not await tailscale_request_is_allowed(address):
-        await websocket.close(code=4403, reason="Tailscale identity is not allowed")
-        return
     if not websocket_origin_is_allowed(websocket):
         await websocket.close(code=4403, reason="WebSocket origin is not allowed")
         return

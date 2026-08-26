@@ -1,19 +1,11 @@
-import asyncio
 import inspect
 import json
 import unittest
-from unittest.mock import AsyncMock, patch
 
 from starlette.websockets import WebSocket
 
 from herdr_web import app as application
-from herdr_web.app import (
-    Backend,
-    project_navigation_snapshot,
-    query_tailscale_login,
-    tailscale_request_is_allowed,
-    websocket_origin_is_allowed,
-)
+from herdr_web.app import project_navigation_snapshot, websocket_origin_is_allowed
 
 
 class NavigationTests(unittest.TestCase):
@@ -70,72 +62,39 @@ class NavigationTests(unittest.TestCase):
             project_navigation_snapshot({"result": {}})
 
 
-class TailscaleAuthorizationTests(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self) -> None:
-        application.tailscale_identity_cache.clear()
-        application.tailscale_identity_locks.clear()
-
-    async def test_whois_returns_verified_login(self) -> None:
-        process = AsyncMock()
-        process.returncode = 0
-        process.communicate.return_value = (
-            json.dumps(
-                {"UserProfile": {"LoginName": "mradityadash@gmail.com"}}
-            ).encode(),
-            b"",
-        )
-        with patch(
-            "herdr_web.app.asyncio.create_subprocess_exec",
-            AsyncMock(return_value=process),
-        ):
-            login = await query_tailscale_login("100.119.149.107")
-
-        self.assertEqual(login, "mradityadash@gmail.com")
-
-    async def test_only_configured_login_is_allowed(self) -> None:
-        with (
-            patch("herdr_web.app.allowed_tailscale_user", "mradityadash@gmail.com"),
-            patch(
-                "herdr_web.app.query_tailscale_login",
-                AsyncMock(side_effect=["mradityadash@gmail.com", "other@example.com"]),
-            ),
-        ):
-            self.assertTrue(await tailscale_request_is_allowed("100.1.1.1"))
-            self.assertFalse(await tailscale_request_is_allowed("100.1.1.2"))
-            self.assertFalse(await tailscale_request_is_allowed(None))
-
+class TransportSecurityTests(unittest.TestCase):
     def test_server_does_not_trust_forwarded_source_addresses(self) -> None:
         self.assertIn("proxy_headers=False", inspect.getsource(application.main))
 
     def test_websocket_origin_must_match_host(self) -> None:
-        def websocket(origin: str) -> WebSocket:
+        def websocket(origin: str | None) -> WebSocket:
             async def receive():
                 return {"type": "websocket.disconnect"}
 
             async def send(_message):
                 return None
 
+            headers = [(b"host", b"herdr.example:8765")]
+            if origin is not None:
+                headers.append((b"origin", origin.encode()))
             return WebSocket(
                 {
                     "type": "websocket",
                     "path": "/ws/test",
-                    "headers": [
-                        (b"host", b"100.70.11.77:8765"),
-                        (b"origin", origin.encode()),
-                    ],
-                    "client": ("100.119.149.107", 12345),
+                    "headers": headers,
+                    "client": ("127.0.0.1", 12345),
                 },
                 receive,
                 send,
             )
 
-        with patch("herdr_web.app.allowed_tailscale_user", "mradityadash@gmail.com"):
-            self.assertTrue(
-                websocket_origin_is_allowed(websocket("http://100.70.11.77:8765"))
-            )
-            self.assertFalse(
-                websocket_origin_is_allowed(websocket("https://attacker.example"))
-            )
+        self.assertTrue(
+            websocket_origin_is_allowed(websocket("https://herdr.example:8765"))
+        )
+        self.assertFalse(
+            websocket_origin_is_allowed(websocket("https://attacker.example"))
+        )
+        self.assertTrue(websocket_origin_is_allowed(websocket(None)))
 
 
 if __name__ == "__main__":

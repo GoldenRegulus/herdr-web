@@ -11,6 +11,7 @@ from herdr_web.app import (
     NO_STORE_HEADERS,
     STATIC_ASSET_PLACEHOLDER,
     STATIC_ASSET_VERSION,
+    health,
     index,
     set_static_cache_headers,
 )
@@ -20,6 +21,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 class StaticAssetTests(unittest.TestCase):
+    def test_health_check_has_no_session_dependency(self) -> None:
+        self.assertEqual(asyncio.run(health()), {"status": "ok"})
+
     def test_index_uses_one_versioned_asset_directory(self) -> None:
         response = asyncio.run(index())
         document = response.body.decode("utf-8")
