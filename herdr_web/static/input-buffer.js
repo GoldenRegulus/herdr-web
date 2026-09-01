@@ -1,5 +1,55 @@
 const MAX_RETAINED_CAPACITY = 64 * 1024;
 const SGR_MOUSE_EVENT = /^\x1b\[<(\d+);\d+;\d+M$/;
+const META_BACKSPACE = '\x1b\x7f';
+const IOS_CHARACTER_BACKSPACES_BEFORE_WORDS = 22;
+const CSI_FINAL_NAVIGATION_KEYS = {
+  left: 'D',
+  right: 'C',
+  up: 'A',
+  down: 'B',
+  home: 'H',
+  end: 'F',
+};
+const CSI_TILDE_NAVIGATION_KEYS = {
+  'page-up': 5,
+  'page-down': 6,
+  delete: 3,
+};
+
+export function terminalDataForModifiedEnter(modifiers = {}) {
+  const modifierBits = Number(modifiers.shift === true)
+    + Number(modifiers.alt === true) * 2
+    + Number(modifiers.control === true) * 4
+    + Number(modifiers.meta === true) * 8;
+  return modifierBits ? `\x1b[13;${modifierBits + 1}u` : undefined;
+}
+
+export function terminalDataForNavigationKey(key, modifiers = {}) {
+  const final = CSI_FINAL_NAVIGATION_KEYS[key];
+  const tilde = CSI_TILDE_NAVIGATION_KEYS[key];
+  if (final === undefined && tilde === undefined) return undefined;
+  const modifierBits = Number(modifiers.shift === true)
+    + Number(modifiers.alt === true) * 2
+    + Number(modifiers.control === true) * 4;
+  if (!modifierBits) return final === undefined ? `\x1b[${tilde}~` : `\x1b[${final}`;
+  const modifier = modifierBits + 1;
+  return final === undefined
+    ? `\x1b[${tilde};${modifier}~`
+    : `\x1b[1;${modifier}${final}`;
+}
+
+export function terminalDataForBeforeInput(inputType) {
+  if (inputType === 'deleteWordBackward') return META_BACKSPACE;
+  return undefined;
+}
+
+export function terminalDataForRepeatedMobileBackspace(count) {
+  return count > IOS_CHARACTER_BACKSPACES_BEFORE_WORDS ? META_BACKSPACE : undefined;
+}
+
+export function normalizeTerminalPasteText(text) {
+  return text.replace(/\r\n?/g, '\n');
+}
 
 export function isDisposableMouseMotion(data) {
   const sgr = SGR_MOUSE_EVENT.exec(data);

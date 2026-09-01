@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import atexit
 import base64
 import errno
 import fcntl
@@ -25,20 +26,70 @@ from typing import Final, Literal
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from herdr_web.pane_stream import (
+    AnsiFrame,
+    PaneController,
+    PaneObserver,
+    PaneStream,
+    PaneStreamError,
+    TerminalClosed,
+    open_pane_stream,
+)
 from herdr_web.theme import ThemeAppearance, resolve_theme
 
 PACKAGE_DIR: Final = Path(__file__).resolve().parent
 STATIC_DIR: Final = PACKAGE_DIR / "static"
+
+
+def snapshot_static_directory(source: Path) -> tuple[Path, Path]:
+    """Copy one immutable set of static files for this process."""
+    root = Path(tempfile.mkdtemp(prefix="herdr-web-static-"))
+    destination = root / "static"
+    try:
+        shutil.copytree(source, destination)
+    except BaseException:
+        shutil.rmtree(root, ignore_errors=True)
+        raise
+    return root, destination
+
+
+STATIC_SNAPSHOT_ROOT, STATIC_SNAPSHOT_DIR = snapshot_static_directory(STATIC_DIR)
+atexit.register(shutil.rmtree, STATIC_SNAPSHOT_ROOT, ignore_errors=True)
 STATIC_ASSET_VERSION: Final = secrets.token_urlsafe(12)
 STATIC_ASSET_PLACEHOLDER: Final = "__HERDR_WEB_ASSET_VERSION__"
 NO_STORE_HEADERS: Final = {
     "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
     "Pragma": "no-cache",
     "Expires": "0",
+}
+PWA_MANIFEST: Final[dict[str, object]] = {
+    "id": "/",
+    "name": "Herdr Web",
+    "short_name": "Herdr",
+    "description": "Browser access to Herdr terminal sessions",
+    "start_url": "/",
+    "scope": "/",
+    "display": "standalone",
+    "background_color": "#181825",
+    "theme_color": "#181825",
+    "icons": [
+        {
+            "src": "/static/icons/herdr-192.png",
+            "sizes": "192x192",
+            "type": "image/png",
+            "purpose": "any maskable",
+        },
+        {
+            "src": "/static/icons/herdr-512.png",
+            "sizes": "512x512",
+            "type": "image/png",
+            "purpose": "any maskable",
+        },
+    ],
 }
 STAGED_IMAGE_DIRECTORY: Final = Path(tempfile.gettempdir()) / "herdr-web-images"
 MAX_TERMINAL_DIMENSION: Final = 500
@@ -48,13 +99,19 @@ PTY_COALESCE_SECONDS: Final = 0.002
 OUTPUT_QUEUE_SIZE: Final = 1
 OUTPUT_ACK_WINDOW_BYTES: Final = 128 * 1024
 WEBSOCKET_HEARTBEAT_SECONDS: Final = 15
+PANE_FRAME_ACK_TIMEOUT_SECONDS: Final = 60
 HTTP_SESSION_IDLE_SECONDS: Final = 30
 CHILD_TERMINATION_GRACE_SECONDS: Final = 1
 CHILD_KILL_GRACE_SECONDS: Final = 1
 SESSION_START_TIMEOUT_SECONDS: Final = 16
 MAX_SESSION_NAME_BYTES: Final = 64
 HERDR_API_TIMEOUT_SECONDS: Final = 5
+HERDR_API_MAX_REQUEST_BYTES: Final = 1024 * 1024
 HERDR_API_MAX_OUTPUT_BYTES: Final = 8 * 1024 * 1024
+MAX_PANE_STREAMS: Final = 32
+MAX_PANE_TEXT_PASTE_BYTES: Final = 512 * 1024
+PANE_FRAME_MAGIC: Final = b"HWP1"
+PANE_FRAME_HEADER: Final = struct.Struct("!4sIQBHH")
 HERDR_PARENT_ENVIRONMENT_VARIABLES: Final = (
     "HERDR_ENV",
     "HERDR_SOCKET_PATH",
@@ -76,10 +133,10 @@ app = FastAPI(title="herdr-web", docs_url=None, redoc_url=None)
 # from two Herdr Web processes.
 app.mount(
     f"/static/{STATIC_ASSET_VERSION}",
-    StaticFiles(directory=STATIC_DIR),
+    StaticFiles(directory=STATIC_SNAPSHOT_DIR),
     name="versioned-static",
 )
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+app.mount("/static", StaticFiles(directory=STATIC_SNAPSHOT_DIR), name="static")
 
 
 def websocket_origin_is_allowed(websocket: WebSocket) -> bool:
@@ -223,6 +280,21 @@ class TerminalResize(BaseModel):
 class FocusRequest(BaseModel):
     kind: Literal["workspace", "tab", "agent"]
     target_id: str
+
+
+@dataclass(frozen=True)
+class PaneStreamRequest:
+    stream_id: int
+    pane_id: str
+    cols: int
+    rows: int
+
+
+@dataclass
+class PaneOutputFrame:
+    stream_id: int
+    frame: AnsiFrame
+    acknowledged: asyncio.Event
 
 
 sessions: dict[str, BrowserSession] = {}
@@ -376,6 +448,135 @@ async def run_herdr_api(backend: Backend, *arguments: str) -> dict[str, object]:
     return document
 
 
+async def run_herdr_socket_api(
+    backend: Backend, method: str, params: dict[str, object]
+) -> dict[str, object]:
+    """Send one bounded request directly to Herdr's public JSON API socket."""
+    api_socket = backend_api_socket(backend)
+    if not api_socket.is_socket():
+        raise RuntimeError("Herdr API socket is not available")
+    if not method:
+        raise ValueError("Herdr API method cannot be empty")
+    request_id = f"herdr-web:{secrets.token_hex(8)}"
+    try:
+        request = json.dumps(
+            {"id": request_id, "method": method, "params": params},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8") + b"\n"
+    except (TypeError, ValueError) as error:
+        raise ValueError("Herdr API request is not valid JSON") from error
+    if len(request) > HERDR_API_MAX_REQUEST_BYTES:
+        raise ValueError("Herdr API request is too large")
+
+    async def exchange() -> bytes:
+        try:
+            reader, writer = await asyncio.open_unix_connection(
+                path=str(api_socket), limit=HERDR_API_MAX_OUTPUT_BYTES + 1
+            )
+        except (ConnectionError, OSError) as error:
+            raise RuntimeError("could not connect to the Herdr API socket") from error
+        try:
+            writer.write(request)
+            await writer.drain()
+            try:
+                response = await reader.readline()
+            except ValueError as error:
+                raise RuntimeError("Herdr API response is too large") from error
+            if not response:
+                raise RuntimeError("Herdr API returned an empty response")
+            if len(response) > HERDR_API_MAX_OUTPUT_BYTES:
+                raise RuntimeError("Herdr API response is too large")
+            if not response.endswith(b"\n"):
+                raise RuntimeError("Herdr API response is not newline-delimited")
+            return response[:-1]
+        finally:
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except (BrokenPipeError, ConnectionError, OSError):
+                pass
+
+    try:
+        encoded_response = await asyncio.wait_for(
+            exchange(), timeout=HERDR_API_TIMEOUT_SECONDS
+        )
+    except asyncio.TimeoutError as error:
+        raise RuntimeError("Herdr API request timed out") from error
+    try:
+        document = json.loads(encoded_response)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeError("Herdr API returned invalid JSON") from error
+    if not isinstance(document, dict) or document.get("id") != request_id:
+        raise RuntimeError("Herdr API returned an invalid response")
+    api_error = document.get("error")
+    if isinstance(api_error, dict):
+        message = api_error.get("message")
+        raise RuntimeError(
+            message if isinstance(message, str) and message else "Herdr API request failed"
+        )
+    if "result" not in document:
+        raise RuntimeError("Herdr API returned an invalid response")
+    return document
+
+
+def validate_layout_rect(
+    value: object,
+    *,
+    area: dict[str, int] | None = None,
+) -> dict[str, int]:
+    """Validate bounded Herdr cell geometry before browser projection."""
+    if not isinstance(value, dict):
+        raise RuntimeError("Herdr API returned invalid pane layout geometry")
+    coordinates: dict[str, int] = {}
+    for field in ("x", "y", "width", "height"):
+        coordinate = value.get(field)
+        if (
+            not isinstance(coordinate, int)
+            or isinstance(coordinate, bool)
+            or coordinate < 0
+            or coordinate > 65535
+            or (field in {"width", "height"} and coordinate == 0)
+        ):
+            raise RuntimeError("Herdr API returned invalid pane layout geometry")
+        coordinates[field] = coordinate
+    if area is not None and (
+        coordinates["x"] < area["x"]
+        or coordinates["y"] < area["y"]
+        or coordinates["x"] + coordinates["width"] > area["x"] + area["width"]
+        or coordinates["y"] + coordinates["height"] > area["y"] + area["height"]
+    ):
+        raise RuntimeError("Herdr API returned pane geometry outside its layout")
+    return coordinates
+
+
+def project_layout_snapshot(record: dict[str, object]) -> dict[str, object]:
+    """Keep only validated public geometry for one tab layout."""
+    projected = {
+        field: record[field]
+        for field in ("workspace_id", "tab_id", "zoomed", "focused_pane_id")
+        if field in record
+    }
+    area = validate_layout_rect(record.get("area"))
+    projected["area"] = area
+    panes = record.get("panes")
+    projected_panes: list[dict[str, object]] = []
+    if not isinstance(panes, list):
+        raise RuntimeError("Herdr API returned invalid pane layout panes")
+    for pane in panes:
+        if not isinstance(pane, dict) or not isinstance(pane.get("pane_id"), str):
+            raise RuntimeError("Herdr API returned invalid pane layout pane")
+        projected_panes.append(
+            {
+                "pane_id": pane["pane_id"],
+                "focused": pane.get("focused") is True,
+                "rect": validate_layout_rect(pane.get("rect"), area=area),
+            }
+        )
+    projected["panes"] = projected_panes
+    return projected
+
+
 def project_navigation_snapshot(document: dict[str, object]) -> dict[str, object]:
     """Return only the structured state needed by the browser navigation UI."""
     result = document.get("result")
@@ -420,7 +621,116 @@ def project_navigation_snapshot(document: dict[str, object]) -> dict[str, object
             if isinstance(records, list)
             else []
         )
+    layouts = snapshot.get("layouts")
+    projected["layouts"] = (
+        [project_layout_snapshot(record) for record in layouts if isinstance(record, dict)]
+        if isinstance(layouts, list)
+        else []
+    )
     return projected
+
+
+def validate_pane_paste_text(value: object) -> str:
+    """Validate one bounded UTF-8 text Paste operation."""
+    if not isinstance(value, str) or not value:
+        raise ValueError("pane paste text is invalid")
+    try:
+        size = len(value.encode("utf-8"))
+    except UnicodeEncodeError as error:
+        raise ValueError("pane paste text is invalid Unicode") from error
+    if size > MAX_PANE_TEXT_PASTE_BYTES:
+        raise ValueError("pane paste text is too large")
+    return value
+
+
+def encode_pane_mouse_sequence(control: dict[str, object]) -> str:
+    """Validate one structured pane mouse operation and encode SGR bytes."""
+    button_code = control.get("button_code")
+    column = control.get("column")
+    row = control.get("row")
+    action = control.get("action")
+    if (
+        not isinstance(button_code, int)
+        or isinstance(button_code, bool)
+        or not 0 <= button_code <= 30
+        or (button_code & 0x03) > 2
+    ):
+        raise ValueError("pane mouse button code is invalid")
+    if (
+        not isinstance(column, int)
+        or isinstance(column, bool)
+        or not 1 <= column <= MAX_TERMINAL_DIMENSION
+        or not isinstance(row, int)
+        or isinstance(row, bool)
+        or not 1 <= row <= MAX_TERMINAL_DIMENSION
+    ):
+        raise ValueError("pane mouse coordinates are invalid")
+    if action != "click":
+        raise ValueError("pane mouse action is invalid")
+    prefix = f"\x1b[<{button_code};{column};{row}"
+    return f"{prefix}M{prefix}m"
+
+
+def parse_pane_stream_requests(
+    initial: dict[str, object], snapshot: dict[str, object]
+) -> tuple[str, list[PaneStreamRequest]]:
+    """Validate browser stream requests against a fresh public snapshot."""
+    tab_id = initial.get("tab_id")
+    if not isinstance(tab_id, str) or not tab_id:
+        raise ValueError("pane attachment requires a tab ID")
+    raw_requests = initial.get("panes")
+    if not isinstance(raw_requests, list) or not raw_requests:
+        raise ValueError("pane attachment requires at least one pane")
+    if len(raw_requests) > MAX_PANE_STREAMS:
+        raise ValueError(f"pane attachment is limited to {MAX_PANE_STREAMS} panes")
+
+    panes = snapshot.get("panes")
+    allowed = {
+        record.get("pane_id")
+        for record in panes
+        if isinstance(record, dict)
+        and record.get("tab_id") == tab_id
+        and isinstance(record.get("pane_id"), str)
+    } if isinstance(panes, list) else set()
+    tabs = snapshot.get("tabs")
+    tab_exists = isinstance(tabs, list) and any(
+        isinstance(record, dict) and record.get("tab_id") == tab_id for record in tabs
+    )
+    if not tab_exists:
+        raise ValueError("selected Herdr tab was not found")
+
+    requests: list[PaneStreamRequest] = []
+    stream_ids: set[int] = set()
+    pane_ids: set[str] = set()
+    for raw in raw_requests:
+        if not isinstance(raw, dict):
+            raise ValueError("pane attachment contains an invalid record")
+        stream_id = raw.get("stream_id")
+        pane_id = raw.get("pane_id")
+        cols = raw.get("cols")
+        rows = raw.get("rows")
+        if (
+            not isinstance(stream_id, int)
+            or isinstance(stream_id, bool)
+            or not 1 <= stream_id <= 0xFFFFFFFF
+            or stream_id in stream_ids
+        ):
+            raise ValueError("pane attachment contains an invalid stream ID")
+        if not isinstance(pane_id, str) or pane_id not in allowed or pane_id in pane_ids:
+            raise ValueError("pane attachment contains an unavailable pane")
+        if (
+            not isinstance(cols, int)
+            or isinstance(cols, bool)
+            or not isinstance(rows, int)
+            or isinstance(rows, bool)
+            or not 1 <= cols <= MAX_TERMINAL_DIMENSION
+            or not 1 <= rows <= MAX_TERMINAL_DIMENSION
+        ):
+            raise ValueError("pane attachment contains invalid terminal dimensions")
+        stream_ids.add(stream_id)
+        pane_ids.add(pane_id)
+        requests.append(PaneStreamRequest(stream_id, pane_id, cols, rows))
+    return tab_id, requests
 
 
 async def navigation_snapshot(
@@ -624,6 +934,24 @@ def schedule_staged_image_removal(path: Path) -> None:
     task.add_done_callback(staged_image_cleanup_tasks.discard)
 
 
+async def start_pane_stream(
+    backend: Backend, request: PaneStreamRequest, *, control: bool
+) -> PaneController | PaneObserver:
+    """Open one public pane stream for a validated backend and pane."""
+    environment = clean_herdr_environment()
+    environment["HERDR_CLIENT_SOCKET_PATH"] = str(backend.socket_path)
+    environment.setdefault("TERM", "xterm-256color")
+    environment.setdefault("COLORTERM", "truecolor")
+    return await open_pane_stream(
+        request.pane_id,
+        cols=request.cols,
+        rows=request.rows,
+        executable=herdr_binary(),
+        environment=environment,
+        control=control,
+    )
+
+
 def start_client(backend: Backend, cols: int, rows: int) -> PtyClient:
     """Run Herdr's existing terminal client in a PTY.
 
@@ -659,9 +987,18 @@ def start_client(backend: Backend, cols: int, rows: int) -> PtyClient:
 async def index() -> HTMLResponse:
     # The browser derives its base path from the visible URL. This works when
     # Jupyter or SageMaker removes the proxy prefix before forwarding here.
-    document = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    document = (STATIC_SNAPSHOT_DIR / "index.html").read_text(encoding="utf-8")
     document = document.replace(STATIC_ASSET_PLACEHOLDER, STATIC_ASSET_VERSION)
     return HTMLResponse(document, headers=NO_STORE_HEADERS)
+
+
+@app.get("/manifest.webmanifest", include_in_schema=False)
+async def web_manifest() -> JSONResponse:
+    return JSONResponse(
+        PWA_MANIFEST,
+        headers=NO_STORE_HEADERS,
+        media_type="application/manifest+json",
+    )
 
 
 @app.get("/healthz")
@@ -839,6 +1176,374 @@ async def delete_session(session_id: str) -> dict[str, bool]:
     return {"ok": True}
 
 
+async def run_panes_websocket(
+    websocket: WebSocket,
+    backend: Backend,
+    initial: dict[str, object],
+) -> None:
+    """Multiplex one active tab's public terminal-session streams."""
+    try:
+        snapshot = await navigation_snapshot(backend, refresh=True)
+        tab_id, requests = parse_pane_stream_requests(initial, snapshot)
+    except (OSError, RuntimeError, ValueError) as error:
+        await websocket.close(code=4400, reason=str(error)[:120])
+        return
+
+    requests_by_stream = {request.stream_id: request for request in requests}
+    clients: dict[int, PaneStream] = {}
+    modes: dict[int, str] = {}
+    writable_streams: set[int] = set()
+    all_clients: list[PaneStream] = []
+    try:
+        for request in requests:
+            client = await start_pane_stream(backend, request, control=True)
+            clients[request.stream_id] = client
+            modes[request.stream_id] = "control"
+            all_clients.append(client)
+    except (OSError, RuntimeError) as error:
+        await asyncio.gather(*(client.close() for client in all_clients))
+        await websocket.send_json({"type": "error", "message": str(error)})
+        return
+
+    await websocket.send_json(
+        {
+            "type": "panes-attached",
+            "tab_id": tab_id,
+            "streams": [
+                {
+                    "stream_id": request.stream_id,
+                    "pane_id": request.pane_id,
+                    "mode": "control",
+                }
+                for request in requests
+            ],
+        }
+    )
+
+    output: asyncio.Queue[PaneOutputFrame | dict[str, object] | None] = asyncio.Queue(
+        maxsize=OUTPUT_QUEUE_SIZE
+    )
+    acknowledgements: dict[tuple[int, int], asyncio.Event] = {}
+    fatal_error: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+    active_stream_id = requests[0].stream_id
+    pane_image_paths: set[Path] = set()
+
+    async def pump_stream(request: PaneStreamRequest) -> None:
+        stream_id = request.stream_id
+        client = clients[stream_id]
+        received_frame = False
+        while True:
+            try:
+                record = await client.read_record()
+            except PaneStreamError as error:
+                await output.put(
+                    {"type": "pane-closed", "stream_id": stream_id, "reason": str(error)}
+                )
+                return
+            if isinstance(record, TerminalClosed):
+                writable_streams.discard(stream_id)
+                conflict = (
+                    modes[stream_id] == "control"
+                    and not received_frame
+                    and "already has an attached client" in record.reason.casefold()
+                )
+                if conflict:
+                    await client.close()
+                    try:
+                        client = await start_pane_stream(backend, request, control=False)
+                    except (OSError, RuntimeError) as error:
+                        await output.put(
+                            {
+                                "type": "pane-closed",
+                                "stream_id": stream_id,
+                                "reason": str(error),
+                            }
+                        )
+                        return
+                    clients[stream_id] = client
+                    all_clients.append(client)
+                    modes[stream_id] = "observe"
+                    await output.put(
+                        {"type": "pane-mode", "stream_id": stream_id, "mode": "observe"}
+                    )
+                    received_frame = False
+                    continue
+                await output.put(
+                    {
+                        "type": "pane-closed",
+                        "stream_id": stream_id,
+                        "reason": record.reason,
+                    }
+                )
+                return
+
+            received_frame = True
+            if modes[stream_id] == "control":
+                writable_streams.add(stream_id)
+            acknowledged = asyncio.Event()
+            key = (stream_id, record.seq)
+            acknowledgements[key] = acknowledged
+            try:
+                await output.put(PaneOutputFrame(stream_id, record, acknowledged))
+                try:
+                    await asyncio.wait_for(
+                        acknowledged.wait(), timeout=PANE_FRAME_ACK_TIMEOUT_SECONDS
+                    )
+                except asyncio.TimeoutError:
+                    if not fatal_error.done():
+                        fatal_error.set_result("pane parser acknowledgement timed out")
+                    return
+            finally:
+                acknowledgements.pop(key, None)
+
+    async def send_browser_output() -> None:
+        while True:
+            try:
+                item = await asyncio.wait_for(
+                    output.get(), timeout=WEBSOCKET_HEARTBEAT_SECONDS
+                )
+            except asyncio.TimeoutError:
+                await websocket.send_json({"type": "ping"})
+                continue
+            if item is None:
+                return
+            if isinstance(item, PaneOutputFrame):
+                frame = item.frame
+                header = PANE_FRAME_HEADER.pack(
+                    PANE_FRAME_MAGIC,
+                    item.stream_id,
+                    frame.seq,
+                    int(frame.full),
+                    frame.width,
+                    frame.height,
+                )
+                await websocket.send_bytes(header + frame.bytes)
+            else:
+                await websocket.send_json(item)
+
+    async def report_error(message: str) -> None:
+        await output.put({"type": "error", "message": message})
+
+    async def browser_to_panes() -> None:
+        nonlocal active_stream_id
+        pending_image: tuple[PaneStreamRequest, str, int] | None = None
+        while True:
+            message = await websocket.receive()
+            if message["type"] == "websocket.disconnect":
+                return
+            data = message.get("bytes")
+            if data is not None:
+                if pending_image is not None:
+                    request, extension, expected_size = pending_image
+                    pending_image = None
+                    if len(data) != expected_size:
+                        await report_error("clipboard image upload was truncated")
+                        continue
+                    path: Path | None = None
+                    try:
+                        path = stage_clipboard_image(extension, data)
+                        pane_image_paths.add(path)
+                        # The pane and Herdr Web run on the same host. Paste the
+                        # staged absolute path through Herdr's public semantic
+                        # text-input API. Herdr applies the target runtime's
+                        # bracketed-paste mode, which matches its ClipboardImage
+                        # path handoff without using the private client protocol.
+                        await run_herdr_socket_api(
+                            backend,
+                            "pane.send_input",
+                            {"pane_id": request.pane_id, "text": str(path)},
+                        )
+                    except (OSError, RuntimeError, ValueError) as error:
+                        if path is not None:
+                            pane_image_paths.discard(path)
+                            path.unlink(missing_ok=True)
+                        await report_error(f"clipboard image rejected: {error}")
+                    continue
+                client = clients.get(active_stream_id)
+                if (
+                    not isinstance(client, PaneController)
+                    or active_stream_id not in writable_streams
+                ):
+                    await report_error("The selected pane is read-only")
+                    continue
+                try:
+                    await client.send_input(data)
+                except PaneStreamError as error:
+                    await report_error(str(error))
+                continue
+            text = message.get("text")
+            if text is None:
+                continue
+            try:
+                control = json.loads(text)
+            except json.JSONDecodeError:
+                await report_error("invalid pane control message")
+                continue
+            if not isinstance(control, dict):
+                await report_error("invalid pane control message")
+                continue
+            kind = control.get("type")
+            if kind == "pane-active":
+                stream_id = control.get("stream_id")
+                if isinstance(stream_id, int) and stream_id in clients:
+                    active_stream_id = stream_id
+            elif kind == "pane-resize":
+                stream_id = control.get("stream_id")
+                client = clients.get(stream_id) if isinstance(stream_id, int) else None
+                if isinstance(client, PaneController):
+                    try:
+                        await client.resize(int(control["cols"]), int(control["rows"]))
+                    except (KeyError, TypeError, ValueError, PaneStreamError) as error:
+                        await report_error(f"pane resize rejected: {error}")
+            elif kind == "pane-scroll":
+                stream_id = control.get("stream_id")
+                client = clients.get(stream_id) if isinstance(stream_id, int) else None
+                if isinstance(client, PaneController):
+                    try:
+                        await client.scroll(
+                            str(control["direction"]),
+                            int(control.get("lines", 1)),
+                            column=(
+                                int(control["column"])
+                                if control.get("column") is not None
+                                else None
+                            ),
+                            row=(
+                                int(control["row"])
+                                if control.get("row") is not None
+                                else None
+                            ),
+                        )
+                    except (KeyError, TypeError, ValueError, PaneStreamError) as error:
+                        await report_error(f"pane scroll rejected: {error}")
+            elif kind == "pane-paste":
+                stream_id = control.get("stream_id")
+                client = clients.get(stream_id) if isinstance(stream_id, int) else None
+                request = (
+                    requests_by_stream.get(stream_id)
+                    if isinstance(stream_id, int)
+                    else None
+                )
+                if (
+                    not isinstance(client, PaneController)
+                    or modes.get(stream_id) != "control"
+                    or stream_id not in writable_streams
+                    or request is None
+                ):
+                    await report_error("The selected pane is read-only")
+                    continue
+                try:
+                    pasted_text = validate_pane_paste_text(control.get("text"))
+                    await run_herdr_socket_api(
+                        backend,
+                        "pane.send_input",
+                        {"pane_id": request.pane_id, "text": pasted_text},
+                    )
+                except (OSError, RuntimeError, ValueError) as error:
+                    await report_error(f"pane paste rejected: {error}")
+            elif kind == "pane-mouse":
+                stream_id = control.get("stream_id")
+                client = clients.get(stream_id) if isinstance(stream_id, int) else None
+                request = (
+                    requests_by_stream.get(stream_id)
+                    if isinstance(stream_id, int)
+                    else None
+                )
+                if (
+                    not isinstance(client, PaneController)
+                    or modes.get(stream_id) != "control"
+                    or stream_id not in writable_streams
+                    or request is None
+                ):
+                    await report_error("The selected pane is read-only")
+                    continue
+                try:
+                    sequence = encode_pane_mouse_sequence(control)
+                    await run_herdr_socket_api(
+                        backend,
+                        "pane.send_text",
+                        {"pane_id": request.pane_id, "text": sequence},
+                    )
+                except (OSError, RuntimeError, ValueError) as error:
+                    await report_error(f"pane mouse input rejected: {error}")
+            elif kind == "pane-output-ack":
+                stream_id = control.get("stream_id")
+                raw_seq = control.get("seq")
+                try:
+                    seq = int(raw_seq)
+                except (TypeError, ValueError):
+                    continue
+                if isinstance(stream_id, int):
+                    acknowledged = acknowledgements.get((stream_id, seq))
+                    if acknowledged is not None:
+                        acknowledged.set()
+            elif kind == "clipboard-image":
+                stream_id = control.get("stream_id")
+                client = clients.get(stream_id) if isinstance(stream_id, int) else None
+                request = (
+                    requests_by_stream.get(stream_id)
+                    if isinstance(stream_id, int)
+                    else None
+                )
+                extension = str(control.get("extension", "")).lower()
+                size = control.get("size")
+                valid_size = (
+                    isinstance(size, int)
+                    and not isinstance(size, bool)
+                    and 0 < size <= MAX_CLIPBOARD_IMAGE_BYTES
+                )
+                if (
+                    not isinstance(client, PaneController)
+                    or modes.get(stream_id) != "control"
+                    or stream_id not in writable_streams
+                    or request is None
+                    or extension not in IMAGE_EXTENSIONS
+                    or not valid_size
+                ):
+                    await websocket.close(code=4400, reason="invalid clipboard image header")
+                    return
+                pending_image = (request, extension, size)
+            elif kind == "pong":
+                continue
+
+    pumps = [asyncio.create_task(pump_stream(request)) for request in requests]
+
+    async def close_output_after_pumps() -> None:
+        await asyncio.gather(*pumps, return_exceptions=True)
+        await output.put(None)
+
+    monitor = asyncio.create_task(close_output_after_pumps())
+    sender = asyncio.create_task(send_browser_output())
+    receiver = asyncio.create_task(browser_to_panes())
+    failure = asyncio.ensure_future(fatal_error)
+    try:
+        done, pending = await asyncio.wait(
+            [sender, receiver, failure], return_when=asyncio.FIRST_COMPLETED
+        )
+        if failure in done:
+            try:
+                await websocket.close(code=1011, reason=failure.result())
+            except RuntimeError:
+                pass
+        for task in [*pumps, monitor, *pending]:
+            task.cancel()
+        await asyncio.gather(*pumps, monitor, *pending, return_exceptions=True)
+        for task in done - {failure}:
+            task.result()
+    finally:
+        for acknowledged in acknowledgements.values():
+            acknowledged.set()
+        await asyncio.gather(
+            *(client.close() for client in dict.fromkeys(all_clients)),
+            return_exceptions=True,
+        )
+        for path in pane_image_paths:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                logger.warning("could not remove staged pane image %s", path)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the Herdr Web browser terminal")
     parser.add_argument(
@@ -888,8 +1593,11 @@ async def terminal(websocket: WebSocket, backend_id: str) -> None:
         # The UI sends this before attaching, but retain sane defaults for
         # callers that use the WebSocket endpoint directly.
         initial = await asyncio.wait_for(websocket.receive_json(), timeout=10)
+        if initial.get("type") == "panes.attach":
+            await run_panes_websocket(websocket, backend, initial)
+            return
         if initial.get("type") != "resize":
-            await websocket.close(code=4400, reason="expected initial resize")
+            await websocket.close(code=4400, reason="expected initial resize or pane attachment")
             return
         cols = int(initial.get("cols", 120))
         rows = int(initial.get("rows", 40))

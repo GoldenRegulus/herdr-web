@@ -2,6 +2,11 @@ import assert from 'node:assert/strict';
 import {
   InputByteBuffer,
   isDisposableMouseMotion,
+  normalizeTerminalPasteText,
+  terminalDataForBeforeInput,
+  terminalDataForModifiedEnter,
+  terminalDataForNavigationKey,
+  terminalDataForRepeatedMobileBackspace,
 } from '../herdr_web/static/input-buffer.js';
 
 const encoder = new TextEncoder();
@@ -65,5 +70,52 @@ assert.equal(isDisposableMouseMotion('\x1b[<0;10;20m'), false);
 assert.equal(isDisposableMouseMotion('\x1b[<64;10;20M'), false);
 assert.equal(isDisposableMouseMotion('q'), false);
 assert.equal(isDisposableMouseMotion('\x1b[<35;10;20Mmore'), false);
+
+const mobileEnterModifiers = [
+  [{ shift: true }, '\x1b[13;2u'],
+  [{ alt: true }, '\x1b[13;3u'],
+  [{ shift: true, alt: true }, '\x1b[13;4u'],
+  [{ control: true }, '\x1b[13;5u'],
+  [{ shift: true, control: true }, '\x1b[13;6u'],
+  [{ alt: true, control: true }, '\x1b[13;7u'],
+  [{ shift: true, alt: true, control: true }, '\x1b[13;8u'],
+];
+for (const [modifiers, expected] of mobileEnterModifiers) {
+  assert.equal(terminalDataForModifiedEnter(modifiers), expected);
+}
+assert.equal(terminalDataForModifiedEnter({ meta: true }), '\x1b[13;9u');
+assert.equal(terminalDataForModifiedEnter(), undefined);
+
+const navigationKeys = [
+  ['left', '\x1b[D', '\x1b[1;8D'],
+  ['right', '\x1b[C', '\x1b[1;8C'],
+  ['up', '\x1b[A', '\x1b[1;8A'],
+  ['down', '\x1b[B', '\x1b[1;8B'],
+  ['home', '\x1b[H', '\x1b[1;8H'],
+  ['end', '\x1b[F', '\x1b[1;8F'],
+  ['page-up', '\x1b[5~', '\x1b[5;8~'],
+  ['page-down', '\x1b[6~', '\x1b[6;8~'],
+  ['delete', '\x1b[3~', '\x1b[3;8~'],
+];
+for (const [key, plain, modified] of navigationKeys) {
+  assert.equal(terminalDataForNavigationKey(key), plain);
+  assert.equal(
+    terminalDataForNavigationKey(key, { shift: true, alt: true, control: true }),
+    modified,
+  );
+}
+assert.equal(terminalDataForNavigationKey('page-up', { control: true }), '\x1b[5;5~');
+assert.equal(terminalDataForNavigationKey('unknown'), undefined);
+
+assert.equal(terminalDataForBeforeInput('deleteWordBackward'), '\x1b\x7f');
+assert.equal(terminalDataForBeforeInput('deleteContentBackward'), undefined);
+assert.equal(terminalDataForBeforeInput('deleteSoftLineBackward'), undefined);
+assert.equal(terminalDataForBeforeInput(''), undefined);
+assert.equal(terminalDataForRepeatedMobileBackspace(1), undefined);
+assert.equal(terminalDataForRepeatedMobileBackspace(22), undefined);
+assert.equal(terminalDataForRepeatedMobileBackspace(23), '\x1b\x7f');
+assert.equal(terminalDataForRepeatedMobileBackspace(100), '\x1b\x7f');
+assert.equal(normalizeTerminalPasteText('one\r\ntwo\rthree\nfour'), 'one\ntwo\nthree\nfour');
+assert.equal(normalizeTerminalPasteText('single line'), 'single line');
 
 console.log('input buffer tests: ok');

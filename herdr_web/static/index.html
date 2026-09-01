@@ -3,8 +3,16 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#181825" />
+    <meta name="application-name" content="Herdr Web" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Herdr" />
     <title>Herdr Web</title>
-    <link rel="icon" href="data:," />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/static/icons/herdr.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/static/icons/herdr-180.png" />
     <script>
       const pagePath = window.location.pathname;
       window.herdrWebBasePath = pagePath.endsWith('/') ? pagePath : `${pagePath}/`;
@@ -36,13 +44,96 @@
         <header>
           <strong id="backend-name"></strong>
           <button id="back" type="button">Back to sessions</button>
+          <div id="view-modes" role="group" aria-label="Presentation mode">
+            <button id="full-mode" type="button" aria-pressed="true">Full</button>
+            <button id="panes-mode" type="button" aria-pressed="false">Panes</button>
+          </div>
+          <aside id="telemetry" aria-live="polite">
+            <span id="connection-indicator" data-state="connecting"></span>
+            <span id="connection-status">Connecting…</span>
+            <span id="fps">-- FPS</span>
+          </aside>
         </header>
-        <aside id="telemetry" aria-live="polite">
-          <span id="connection-indicator" data-state="connecting"></span>
-          <span id="connection-status">Connecting…</span>
-          <span id="fps">-- FPS</span>
-        </aside>
         <div id="terminal" aria-label="Herdr terminal"></div>
+        <section id="panes-view" aria-label="Herdr panes" hidden>
+          <nav id="pane-navigation" aria-label="Workspace and tabs">
+            <label for="pane-workspace">Space</label>
+            <select id="pane-workspace"></select>
+            <div id="pane-tabs" role="tablist" aria-label="Tabs"></div>
+          </nav>
+          <div id="pane-grid"></div>
+          <nav id="pane-mobile-bar" aria-label="Terminal controls">
+            <div id="mobile-primary-row" class="mobile-key-row">
+              <button id="pane-browse" type="button" aria-label="Browse" aria-haspopup="dialog" aria-expanded="false">
+                <svg class="mobile-bar-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M4 6h16M4 12h16M4 18h16"></path>
+                </svg>
+              </button>
+              <div id="mobile-modifiers" role="group" aria-label="Modifier keys">
+                <button type="button" data-modifier="control" aria-pressed="false">Ctrl</button>
+                <button type="button" data-modifier="alt" aria-pressed="false">Alt</button>
+                <button type="button" data-modifier="shift" aria-pressed="false">Shift</button>
+              </div>
+              <div id="mobile-special-keys" role="group" aria-label="Terminal keys">
+                <button type="button" data-terminal-key="escape">Esc</button>
+                <button type="button" data-terminal-key="tab">Tab</button>
+              </div>
+              <button id="mobile-navigation-mode" type="button" aria-label="Show navigation keys" aria-pressed="false" aria-controls="mobile-default-row mobile-navigation-row">Nav</button>
+            </div>
+            <div id="mobile-default-row" class="mobile-key-row" role="group" aria-label="Pointer, keyboard, and arrow controls">
+              <button id="mobile-mouse-mode" type="button" aria-label="Mouse input off. Activate mouse input." aria-pressed="false" data-mode="off">
+                <svg class="mobile-bar-icon mobile-pointer-icon" data-mode-icon="on" viewBox="0 0 24 24" aria-hidden="true" hidden>
+                  <path d="M4.037 4.688a.495.495 0 0 1 .651-.651l16 6.5a.5.5 0 0 1-.063.947l-6.124 1.58a2 2 0 0 0-1.438 1.435l-1.579 6.126a.5.5 0 0 1-.947.063Z"></path>
+                </svg>
+                <svg class="mobile-bar-icon mobile-pointer-icon" data-mode-icon="off" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="m15.55 8.45 5.138 2.087a.5.5 0 0 1-.063.947l-6.124 1.58a2 2 0 0 0-1.438 1.435l-1.579 6.126a.5.5 0 0 1-.947.063L8.45 15.551"></path>
+                  <path d="M22 2 2 22"></path>
+                  <path d="m6.816 11.528-2.779-6.84a.495.495 0 0 1 .651-.651l6.84 2.779"></path>
+                </svg>
+              </button>
+              <button id="mobile-keyboard-lock" type="button" aria-label="Keyboard unlocked. Activate keyboard lock." aria-pressed="false" data-locked="false">
+                <svg class="mobile-bar-icon" data-lock-icon="unlocked" viewBox="0 0 24 24" aria-hidden="true">
+                  <rect x="6" y="10" width="12" height="10" rx="2"></rect>
+                  <path d="M9 10V7a3 3 0 0 1 5.6-1.5"></path>
+                </svg>
+                <svg class="mobile-bar-icon" data-lock-icon="locked" viewBox="0 0 24 24" aria-hidden="true" hidden>
+                  <rect x="6" y="10" width="12" height="10" rx="2"></rect>
+                  <path d="M9 10V7a3 3 0 0 1 6 0v3"></path>
+                </svg>
+              </button>
+              <div id="mobile-arrows" role="group" aria-label="Arrow keys">
+                <button type="button" data-arrow="left" aria-label="Left arrow">
+                  <svg class="mobile-bar-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"></path></svg>
+                </button>
+                <button type="button" data-arrow="up" aria-label="Up arrow">
+                  <svg class="mobile-bar-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 15 6-6 6 6"></path></svg>
+                </button>
+                <button type="button" data-arrow="down" aria-label="Down arrow">
+                  <svg class="mobile-bar-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"></path></svg>
+                </button>
+                <button type="button" data-arrow="right" aria-label="Right arrow">
+                  <svg class="mobile-bar-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"></path></svg>
+                </button>
+              </div>
+            </div>
+            <div id="mobile-navigation-row" class="mobile-key-row" role="group" aria-label="Navigation keys" hidden>
+              <button id="mobile-snapshot" type="button" aria-label="Open terminal snapshot" aria-pressed="false" disabled>
+                <svg class="mobile-bar-icon" data-snapshot-icon="capture" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M8 6l1.5-2h5L16 6h3a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2Z"></path>
+                  <circle cx="12" cy="13" r="3.5"></circle>
+                </svg>
+                <svg class="mobile-bar-icon" data-snapshot-icon="close" viewBox="0 0 24 24" aria-hidden="true" hidden>
+                  <path d="M6 6l12 12M18 6L6 18"></path>
+                </svg>
+              </button>
+              <button type="button" data-navigation-key="home">Home</button>
+              <button type="button" data-navigation-key="page-up" aria-label="Page Up">PgUp</button>
+              <button type="button" data-navigation-key="page-down" aria-label="Page Down">PgDn</button>
+              <button type="button" data-navigation-key="end">End</button>
+              <button type="button" data-navigation-key="delete" aria-label="Delete">Del</button>
+            </div>
+          </nav>
+        </section>
         <nav id="mobile-toolbar" aria-label="Herdr navigation">
           <button type="button" data-sheet="spaces">Spaces</button>
           <button type="button" data-sheet="tabs">Tabs</button>
@@ -54,7 +145,17 @@
           <section role="dialog" aria-modal="true" aria-labelledby="sheet-title">
             <header>
               <h2 id="sheet-title"></h2>
-              <button id="sheet-close" type="button" aria-label="Close navigation">Close</button>
+              <button id="sheet-sessions" type="button" aria-label="Back to sessions">
+                <svg class="sheet-sessions-icon" viewBox="6 4 12 16" aria-hidden="true">
+                  <path d="m15 18-6-6 6-6"></path>
+                </svg>
+                <span>Sessions</span>
+              </button>
+              <button id="sheet-close" type="button" aria-label="Close navigation">
+                <svg class="sheet-close-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M6 6l12 12M18 6L6 18"></path>
+                </svg>
+              </button>
             </header>
             <div id="sheet-content"></div>
           </section>
