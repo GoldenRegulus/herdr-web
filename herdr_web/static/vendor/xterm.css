@@ -121,6 +121,13 @@
     line-height: normal;
 }
 
+.xterm .xterm-width-cache-measure-container {
+    position: absolute;
+    visibility: hidden;
+    left: -9999em;
+    top: 0;
+}
+
 .xterm.enable-mouse-events {
     /* When mouse events are enabled (eg. tmux), revert to the standard pointer cursor */
     cursor: default;
