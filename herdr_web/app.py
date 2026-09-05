@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import atexit
 import base64
+from collections.abc import Iterator
 import errno
 import fcntl
 import json
@@ -21,6 +22,7 @@ import struct
 import termios
 import tempfile
 import time
+import zlib
 from dataclasses import dataclass, field
 from typing import Final, Literal
 from urllib.parse import urlsplit
@@ -94,12 +96,32 @@ PWA_MANIFEST: Final[dict[str, object]] = {
 STAGED_IMAGE_DIRECTORY: Final = Path(tempfile.gettempdir()) / "herdr-web-images"
 MAX_TERMINAL_DIMENSION: Final = 500
 MAX_CLIPBOARD_IMAGE_BYTES: Final = 16 * 1024 * 1024
+CLIPBOARD_IMAGE_WRITE_CHUNK_BYTES: Final = 64 * 1024
 PTY_READ_SIZE: Final = 256 * 1024
 PTY_COALESCE_SECONDS: Final = 0.002
 OUTPUT_QUEUE_SIZE: Final = 1
-OUTPUT_ACK_WINDOW_BYTES: Final = 128 * 1024
+OUTPUT_WEBSOCKET_CHUNK_BYTES: Final = 8 * 1024
+OUTPUT_ACK_WINDOW_BYTES: Final = OUTPUT_WEBSOCKET_CHUNK_BYTES
 WEBSOCKET_HEARTBEAT_SECONDS: Final = 15
+PANE_OUTPUT_FRESHNESS_BUDGET_SECONDS: Final = 1.0
+PANE_RESYNC_TRIGGER_SECONDS: Final = PANE_OUTPUT_FRESHNESS_BUDGET_SECONDS / 2
+PANE_BUFFERED_FRAME_SECONDS: Final = 0.005
+PANE_FULL_RESYNC_TIMEOUT_SECONDS: Final = 5.0
+PANE_MAX_SEND_FRAMES_PER_SECOND: Final = 60.0
+PANE_MIN_SEND_FRAMES_PER_SECOND: Final = 2.0
+PANE_ACK_HEADROOM: Final = 1.25
+PANE_ACK_EWMA_ALPHA: Final = 0.25
 PANE_FRAME_ACK_TIMEOUT_SECONDS: Final = 60
+PANE_INTERACTIVE_PRIORITY_SECONDS: Final = PANE_OUTPUT_FRESHNESS_BUDGET_SECONDS
+PANE_INTERACTIVE_FRAME_WAIT_SECONDS: Final = 0.016
+PANE_MAX_PRIORITY_BURST_FRAMES: Final = 4
+PANE_COMMAND_QUEUE_SIZE: Final = 256
+PANE_COMMAND_QUEUE_BYTES: Final = 32 * 1024 * 1024
+PANE_COMMAND_DRAIN_TIMEOUT_SECONDS: Final = 5.0
+PANE_INPUT_MESSAGE_BYTES: Final = 64 * 1024
+PANE_CONTROL_MESSAGE_BYTES: Final = 1024 * 1024
+WEBSOCKET_SEND_TIMEOUT_SECONDS: Final = 5.0
+OUTPUT_ACK_TIMEOUT_SECONDS: Final = 60.0
 HTTP_SESSION_IDLE_SECONDS: Final = 30
 CHILD_TERMINATION_GRACE_SECONDS: Final = 1
 CHILD_KILL_GRACE_SECONDS: Final = 1
@@ -112,6 +134,10 @@ MAX_PANE_STREAMS: Final = 32
 MAX_PANE_TEXT_PASTE_BYTES: Final = 512 * 1024
 PANE_FRAME_MAGIC: Final = b"HWP1"
 PANE_FRAME_HEADER: Final = struct.Struct("!4sIQBHH")
+PANE_FRAME_FLAG_FULL: Final = 1
+PANE_FRAME_FLAG_DEFLATE: Final = 2
+PANE_DEFLATE_MINIMUM_BYTES: Final = 256
+PANE_DEFLATE_COOPERATIVE_BYTES: Final = 64 * 1024
 HERDR_PARENT_ENVIRONMENT_VARIABLES: Final = (
     "HERDR_ENV",
     "HERDR_SOCKET_PATH",
@@ -295,6 +321,246 @@ class PaneOutputFrame:
     stream_id: int
     frame: AnsiFrame
     acknowledged: asyncio.Event
+    pacing_updated: asyncio.Event = field(default_factory=asyncio.Event)
+    queued_at: float = field(default_factory=time.monotonic)
+    sent_at: float | None = None
+    discarded: bool = False
+
+
+@dataclass(frozen=True)
+class PaneBrowserCommand:
+    value: bytes | dict[str, object]
+    size: int
+
+
+def encode_pane_websocket_frame(
+    stream_id: int, frame: AnsiFrame, *, deflate: bool
+) -> bytes:
+    """Encode one negotiated pane frame without changing its ANSI content."""
+    flags = PANE_FRAME_FLAG_FULL if frame.full else 0
+    payload = frame.bytes
+    if deflate and len(payload) >= PANE_DEFLATE_MINIMUM_BYTES:
+        compressed = zlib.compress(payload, 1)
+        if len(compressed) < len(payload):
+            payload = compressed
+            flags |= PANE_FRAME_FLAG_DEFLATE
+    header = PANE_FRAME_HEADER.pack(
+        PANE_FRAME_MAGIC,
+        stream_id,
+        frame.seq,
+        flags,
+        frame.width,
+        frame.height,
+    )
+    return header + payload
+
+
+async def encode_pane_websocket_frame_async(
+    stream_id: int, frame: AnsiFrame, *, deflate: bool
+) -> bytes:
+    """Compress a large frame in bounded cooperative event-loop steps."""
+    if not deflate or len(frame.bytes) < PANE_DEFLATE_COOPERATIVE_BYTES:
+        return encode_pane_websocket_frame(stream_id, frame, deflate=deflate)
+
+    compressor = zlib.compressobj(1)
+    compressed_parts: list[bytes] = []
+    for offset in range(0, len(frame.bytes), PANE_DEFLATE_COOPERATIVE_BYTES):
+        compressed_parts.append(
+            compressor.compress(
+                frame.bytes[offset : offset + PANE_DEFLATE_COOPERATIVE_BYTES]
+            )
+        )
+        await asyncio.sleep(0)
+    compressed_parts.append(compressor.flush())
+    compressed = b"".join(compressed_parts)
+    if len(compressed) >= len(frame.bytes):
+        return encode_pane_websocket_frame(stream_id, frame, deflate=False)
+
+    flags = PANE_FRAME_FLAG_DEFLATE
+    if frame.full:
+        flags |= PANE_FRAME_FLAG_FULL
+    return PANE_FRAME_HEADER.pack(
+        PANE_FRAME_MAGIC,
+        stream_id,
+        frame.seq,
+        flags,
+        frame.width,
+        frame.height,
+    ) + compressed
+
+
+class AdaptivePaneFramePacer:
+    """Set one client's frame cadence from its parser acknowledgement time."""
+
+    def __init__(self) -> None:
+        self._minimum_interval = 1 / PANE_MAX_SEND_FRAMES_PER_SECOND
+        self._maximum_interval = 1 / PANE_MIN_SEND_FRAMES_PER_SECOND
+        self._smoothed_ack_seconds: float | None = None
+        self._target_interval = self._minimum_interval
+        self._last_sent_at: float | None = None
+        self._next_send_at = 0.0
+        self._expedite_generation = 0
+        self._sent_expedite_generation = 0
+        self._wakeup = asyncio.Event()
+
+    @property
+    def target_frames_per_second(self) -> float:
+        return 1 / self._target_interval
+
+    @property
+    def target_interval_seconds(self) -> float:
+        return self._target_interval
+
+    def note_sent(self, sent_at: float) -> None:
+        self._last_sent_at = sent_at
+        self._sent_expedite_generation = self._expedite_generation
+
+    def note_acknowledged(self, elapsed_seconds: float) -> None:
+        sample = max(0.0, elapsed_seconds)
+        if self._smoothed_ack_seconds is None:
+            self._smoothed_ack_seconds = sample
+        else:
+            alpha = PANE_ACK_EWMA_ALPHA
+            self._smoothed_ack_seconds = (
+                alpha * sample + (1 - alpha) * self._smoothed_ack_seconds
+            )
+        self._target_interval = min(
+            self._maximum_interval,
+            max(
+                self._minimum_interval,
+                self._smoothed_ack_seconds * PANE_ACK_HEADROOM,
+            ),
+        )
+        if self._expedite_generation != self._sent_expedite_generation:
+            self._next_send_at = 0.0
+        elif self._last_sent_at is not None:
+            self._next_send_at = self._last_sent_at + self._target_interval
+
+    def expedite(self) -> None:
+        """Wake a paced sender after interactive input."""
+        self._expedite_generation += 1
+        self._next_send_at = 0.0
+        self._wakeup.set()
+
+    async def wait(self) -> None:
+        """Wait until this client can receive its next terminal frame."""
+        while True:
+            delay = self._next_send_at - time.monotonic()
+            if delay <= 0:
+                return
+            self._wakeup.clear()
+            delay = self._next_send_at - time.monotonic()
+            if delay <= 0:
+                return
+            try:
+                await asyncio.wait_for(self._wakeup.wait(), timeout=delay)
+            except asyncio.TimeoutError:
+                return
+
+
+class PaneFrameScheduler:
+    """Keep one pending frame per stream and select frames fairly."""
+
+    def __init__(self, stream_ids: list[int]) -> None:
+        if not stream_ids:
+            raise ValueError("the pane frame scheduler needs at least one stream")
+        self._stream_ids = tuple(stream_ids)
+        self._stream_positions = {
+            stream_id: position for position, stream_id in enumerate(stream_ids)
+        }
+        self._pending: dict[int, PaneOutputFrame] = {}
+        self._round_robin_position = -1
+        self._priority_stream_id: int | None = None
+        self._priority_until = 0.0
+        self._priority_wait_until = 0.0
+        self._priority_burst = 0
+        self._wakeup = asyncio.Event()
+
+    @property
+    def has_pending(self) -> bool:
+        return bool(self._pending)
+
+    def notify(self) -> None:
+        self._wakeup.set()
+
+    def publish(self, item: PaneOutputFrame) -> None:
+        if item.stream_id in self._pending:
+            raise RuntimeError("a pane stream already has a pending frame")
+        self._pending[item.stream_id] = item
+        self.notify()
+
+    def remove(self, item: PaneOutputFrame) -> None:
+        if self._pending.get(item.stream_id) is item:
+            self._pending.pop(item.stream_id, None)
+
+    def prioritize(self, stream_id: int) -> None:
+        if stream_id not in self._stream_positions:
+            return
+        now = time.monotonic()
+        if self._priority_stream_id != stream_id or now >= self._priority_until:
+            self._priority_wait_until = now + PANE_INTERACTIVE_FRAME_WAIT_SECONDS
+            self._priority_burst = 0
+        self._priority_stream_id = stream_id
+        self._priority_until = now + PANE_INTERACTIVE_PRIORITY_SECONDS
+        self.notify()
+
+    def priority_wait_seconds(self, now: float | None = None) -> float:
+        now = time.monotonic() if now is None else now
+        if (
+            self._priority_stream_id is None
+            or self._priority_stream_id in self._pending
+            or now >= self._priority_until
+        ):
+            return 0.0
+        return max(0.0, self._priority_wait_until - now)
+
+    def take_next(self, now: float | None = None) -> PaneOutputFrame | None:
+        now = time.monotonic() if now is None else now
+        if not self._pending:
+            return None
+
+        priority = self._priority_stream_id
+        priority_is_current = priority is not None and now < self._priority_until
+        background_is_ready = priority_is_current and any(
+            stream_id != priority for stream_id in self._pending
+        )
+        if (
+            priority_is_current
+            and priority in self._pending
+            and (
+                not background_is_ready
+                or self._priority_burst < PANE_MAX_PRIORITY_BURST_FRAMES
+            )
+        ):
+            item = self._pending.pop(priority)
+            self._round_robin_position = self._stream_positions[priority]
+            self._priority_burst += 1
+            return item
+
+        stream_count = len(self._stream_ids)
+        for offset in range(1, stream_count + 1):
+            position = (self._round_robin_position + offset) % stream_count
+            stream_id = self._stream_ids[position]
+            if (
+                priority_is_current
+                and background_is_ready
+                and self._priority_burst >= PANE_MAX_PRIORITY_BURST_FRAMES
+                and stream_id == priority
+            ):
+                continue
+            item = self._pending.pop(stream_id, None)
+            if item is not None:
+                self._round_robin_position = position
+                if stream_id != priority:
+                    self._priority_burst = 0
+                return item
+        return None
+
+    def prepare_to_wait(self) -> None:
+        self._wakeup.clear()
+
+    async def wait_for_change(self, timeout: float) -> None:
+        await asyncio.wait_for(self._wakeup.wait(), timeout=timeout)
 
 
 sessions: dict[str, BrowserSession] = {}
@@ -884,7 +1150,8 @@ async def write_pty(master_fd: int, data: bytes) -> None:
         remaining = remaining[written:]
 
 
-def stage_clipboard_image(extension: str, data: bytes) -> Path:
+async def stage_clipboard_image_async(extension: str, data: bytes) -> Path:
+    """Write a bounded image in cooperative steps without starting a thread."""
     if extension not in IMAGE_EXTENSIONS:
         raise ValueError("unsupported clipboard image format")
     if not data or len(data) > MAX_CLIPBOARD_IMAGE_BYTES:
@@ -897,7 +1164,9 @@ def stage_clipboard_image(extension: str, data: bytes) -> Path:
     try:
         os.fchmod(fd, 0o600)
         with os.fdopen(fd, "wb") as image:
-            image.write(data)
+            for offset in range(0, len(data), CLIPBOARD_IMAGE_WRITE_CHUNK_BYTES):
+                image.write(data[offset : offset + CLIPBOARD_IMAGE_WRITE_CHUNK_BYTES])
+                await asyncio.sleep(0)
     except BaseException:
         path.unlink(missing_ok=True)
         raise
@@ -1078,6 +1347,12 @@ async def create_named_backend(request: NamedSessionStart) -> dict[str, dict[str
     return {"backend": {"id": backend.id, "label": backend.label}}
 
 
+def websocket_output_chunks(data: bytes) -> Iterator[bytes]:
+    """Split ordered PTY output into acknowledgement-sized WebSocket frames."""
+    for offset in range(0, len(data), OUTPUT_WEBSOCKET_CHUNK_BYTES):
+        yield data[offset : offset + OUTPUT_WEBSOCKET_CHUNK_BYTES]
+
+
 async def read_pty(session: BrowserSession) -> None:
     try:
         while True:
@@ -1087,7 +1362,8 @@ async def read_pty(session: BrowserSession) -> None:
                 return
             if not data:
                 return
-            await session.output.put(data)
+            for chunk in websocket_output_chunks(data):
+                await session.output.put(chunk)
     finally:
         session.closed = True
 
@@ -1135,7 +1411,7 @@ async def read_session(session_id: str) -> dict[str, object]:
         chunks.append(await asyncio.wait_for(session.output.get(), timeout=1))
     except asyncio.TimeoutError:
         pass
-    while sum(map(len, chunks)) < 64 * 1024:
+    while sum(map(len, chunks)) < OUTPUT_WEBSOCKET_CHUNK_BYTES:
         try:
             chunks.append(session.output.get_nowait())
         except asyncio.QueueEmpty:
@@ -1189,54 +1465,162 @@ async def run_panes_websocket(
         await websocket.close(code=4400, reason=str(error)[:120])
         return
 
+    pane_deflate_enabled = initial.get("compression") == "deflate"
     requests_by_stream = {request.stream_id: request for request in requests}
     clients: dict[int, PaneStream] = {}
     modes: dict[int, str] = {}
+    stream_sizes = {
+        request.stream_id: (request.cols, request.rows) for request in requests
+    }
+    stream_resize_locks = {
+        request.stream_id: asyncio.Lock() for request in requests
+    }
     writable_streams: set[int] = set()
-    all_clients: list[PaneStream] = []
+    all_clients: set[PaneStream] = set()
     try:
         for request in requests:
             client = await start_pane_stream(backend, request, control=True)
             clients[request.stream_id] = client
             modes[request.stream_id] = "control"
-            all_clients.append(client)
+            all_clients.add(client)
     except (OSError, RuntimeError) as error:
         await asyncio.gather(*(client.close() for client in all_clients))
         await websocket.send_json({"type": "error", "message": str(error)})
         return
 
-    await websocket.send_json(
-        {
-            "type": "panes-attached",
-            "tab_id": tab_id,
-            "streams": [
-                {
-                    "stream_id": request.stream_id,
-                    "pane_id": request.pane_id,
-                    "mode": "control",
-                }
-                for request in requests
-            ],
-        }
-    )
+    attached_message = {
+        "type": "panes-attached",
+        "tab_id": tab_id,
+        "compression": "deflate" if pane_deflate_enabled else None,
+        "streams": [
+            {
+                "stream_id": request.stream_id,
+                "pane_id": request.pane_id,
+                "mode": "control",
+            }
+            for request in requests
+        ],
+    }
+    try:
+        await asyncio.wait_for(
+            websocket.send_json(attached_message),
+            timeout=WEBSOCKET_SEND_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        await asyncio.gather(*(client.close() for client in all_clients))
+        try:
+            await websocket.close(code=1011, reason="pane WebSocket send timed out")
+        except RuntimeError:
+            pass
+        return
+    except (OSError, RuntimeError):
+        await asyncio.gather(*(client.close() for client in all_clients))
+        return
 
-    output: asyncio.Queue[PaneOutputFrame | dict[str, object] | None] = asyncio.Queue(
+    control_output: asyncio.Queue[dict[str, object] | None] = asyncio.Queue(
         maxsize=OUTPUT_QUEUE_SIZE
     )
-    acknowledgements: dict[tuple[int, int], asyncio.Event] = {}
+    command_queue: asyncio.Queue[PaneBrowserCommand | None] = asyncio.Queue(
+        maxsize=PANE_COMMAND_QUEUE_SIZE
+    )
+    acknowledgements: dict[tuple[int, int], PaneOutputFrame] = {}
     fatal_error: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+    frame_pacer = AdaptivePaneFramePacer()
+    frame_scheduler = PaneFrameScheduler(
+        [request.stream_id for request in requests]
+    )
     active_stream_id = requests[0].stream_id
     pane_image_paths: set[Path] = set()
+    pending_error: dict[str, object] | None = None
+    no_control = object()
+    resync_budget_lock = asyncio.Lock()
+    next_resync_at = 0.0
+    queued_command_bytes = 0
+
+    async def queue_control(message: dict[str, object] | None) -> None:
+        await control_output.put(message)
+        frame_scheduler.notify()
+
+    def mark_interactive(stream_id: int) -> None:
+        frame_scheduler.prioritize(stream_id)
+        frame_pacer.expedite()
+
+    def enqueue_browser_command(
+        command: bytes | dict[str, object], size: int
+    ) -> bool:
+        nonlocal queued_command_bytes
+        if size < 0 or queued_command_bytes + size > PANE_COMMAND_QUEUE_BYTES:
+            if not fatal_error.done():
+                fatal_error.set_result("pane command queue is full")
+            return False
+        try:
+            command_queue.put_nowait(PaneBrowserCommand(command, size))
+        except asyncio.QueueFull:
+            if not fatal_error.done():
+                fatal_error.set_result("pane command queue is full")
+            return False
+        queued_command_bytes += size
+        return True
+
+    async def wait_for_resync_budget() -> None:
+        nonlocal next_resync_at
+        async with resync_budget_lock:
+            delay = next_resync_at - time.monotonic()
+            if delay > 0:
+                await asyncio.sleep(delay)
+            started_at = time.monotonic()
+            next_resync_at = started_at + frame_pacer.target_interval_seconds
+
+    async def read_fresh_pane_frame(
+        request: PaneStreamRequest, client: PaneStream
+    ) -> tuple[PaneStream, AnsiFrame | TerminalClosed]:
+        """Skip superseded framed updates and return a new full frame."""
+        stream_id = request.stream_id
+        await wait_for_resync_budget()
+        async with stream_resize_locks[stream_id]:
+            if isinstance(client, PaneController):
+                cols, rows = stream_sizes[stream_id]
+                await client.resize(cols, rows)
+            else:
+                await client.close()
+                all_clients.discard(client)
+                cols, rows = stream_sizes[stream_id]
+                fresh_request = PaneStreamRequest(
+                    stream_id=stream_id,
+                    pane_id=request.pane_id,
+                    cols=cols,
+                    rows=rows,
+                )
+                client = await start_pane_stream(backend, fresh_request, control=False)
+                clients[stream_id] = client
+                all_clients.add(client)
+
+            deadline = time.monotonic() + PANE_FULL_RESYNC_TIMEOUT_SECONDS
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise asyncio.TimeoutError
+                record = await asyncio.wait_for(client.read_record(), timeout=remaining)
+                if isinstance(record, TerminalClosed):
+                    return client, record
+                if record.full and (record.width, record.height) == (cols, rows):
+                    return client, record
 
     async def pump_stream(request: PaneStreamRequest) -> None:
         stream_id = request.stream_id
         client = clients[stream_id]
         received_frame = False
+        pending_record: AnsiFrame | TerminalClosed | None = None
+        backlog_started_at: float | None = None
         while True:
             try:
-                record = await client.read_record()
-            except PaneStreamError as error:
-                await output.put(
+                if pending_record is None:
+                    record = await client.read_record()
+                else:
+                    record = pending_record
+                    pending_record = None
+            except (OSError, RuntimeError, asyncio.TimeoutError, PaneStreamError) as error:
+                await queue_control(
                     {"type": "pane-closed", "stream_id": stream_id, "reason": str(error)}
                 )
                 return
@@ -1249,10 +1633,11 @@ async def run_panes_websocket(
                 )
                 if conflict:
                     await client.close()
+                    all_clients.discard(client)
                     try:
                         client = await start_pane_stream(backend, request, control=False)
                     except (OSError, RuntimeError) as error:
-                        await output.put(
+                        await queue_control(
                             {
                                 "type": "pane-closed",
                                 "stream_id": stream_id,
@@ -1261,14 +1646,14 @@ async def run_panes_websocket(
                         )
                         return
                     clients[stream_id] = client
-                    all_clients.append(client)
+                    all_clients.add(client)
                     modes[stream_id] = "observe"
-                    await output.put(
+                    await queue_control(
                         {"type": "pane-mode", "stream_id": stream_id, "mode": "observe"}
                     )
                     received_frame = False
                     continue
-                await output.put(
+                await queue_control(
                     {
                         "type": "pane-closed",
                         "stream_id": stream_id,
@@ -1281,10 +1666,11 @@ async def run_panes_websocket(
             if modes[stream_id] == "control":
                 writable_streams.add(stream_id)
             acknowledged = asyncio.Event()
+            item = PaneOutputFrame(stream_id, record, acknowledged)
             key = (stream_id, record.seq)
-            acknowledgements[key] = acknowledged
+            acknowledgements[key] = item
             try:
-                await output.put(PaneOutputFrame(stream_id, record, acknowledged))
+                frame_scheduler.publish(item)
                 try:
                     await asyncio.wait_for(
                         acknowledged.wait(), timeout=PANE_FRAME_ACK_TIMEOUT_SECONDS
@@ -1294,65 +1680,274 @@ async def run_panes_websocket(
                         fatal_error.set_result("pane parser acknowledgement timed out")
                     return
             finally:
+                frame_scheduler.remove(item)
                 acknowledgements.pop(key, None)
 
-    async def send_browser_output() -> None:
-        while True:
-            try:
-                item = await asyncio.wait_for(
-                    output.get(), timeout=WEBSOCKET_HEARTBEAT_SECONDS
+            await item.pacing_updated.wait()
+            frame_was_slow = (
+                item.sent_at is not None
+                and time.monotonic() - item.sent_at >= PANE_RESYNC_TRIGGER_SECONDS
+            )
+            buffered_successor = False
+            if not item.discarded and not frame_was_slow:
+                try:
+                    pending_record = await asyncio.wait_for(
+                        client.read_record(), timeout=PANE_BUFFERED_FRAME_SECONDS
+                    )
+                    buffered_successor = isinstance(pending_record, AnsiFrame)
+                except asyncio.TimeoutError:
+                    pending_record = None
+                except (OSError, RuntimeError, PaneStreamError) as error:
+                    await queue_control(
+                        {
+                            "type": "pane-closed",
+                            "stream_id": stream_id,
+                            "reason": str(error),
+                        }
+                    )
+                    return
+
+            if buffered_successor:
+                if backlog_started_at is None:
+                    backlog_started_at = item.sent_at or item.queued_at
+                backlog_is_stale = (
+                    time.monotonic()
+                    - backlog_started_at
+                    + frame_pacer.target_interval_seconds
+                    >= PANE_RESYNC_TRIGGER_SECONDS
                 )
-            except asyncio.TimeoutError:
-                await websocket.send_json({"type": "ping"})
-                continue
-            if item is None:
-                return
-            if isinstance(item, PaneOutputFrame):
-                frame = item.frame
-                header = PANE_FRAME_HEADER.pack(
-                    PANE_FRAME_MAGIC,
-                    item.stream_id,
-                    frame.seq,
-                    int(frame.full),
-                    frame.width,
-                    frame.height,
-                )
-                await websocket.send_bytes(header + frame.bytes)
             else:
-                await websocket.send_json(item)
+                backlog_started_at = None
+                backlog_is_stale = False
+
+            if item.discarded or frame_was_slow or backlog_is_stale:
+                backlog_started_at = None
+                try:
+                    client, pending_record = await read_fresh_pane_frame(request, client)
+                except (OSError, RuntimeError, asyncio.TimeoutError, PaneStreamError) as error:
+                    await queue_control(
+                        {
+                            "type": "pane-closed",
+                            "stream_id": stream_id,
+                            "reason": str(error),
+                        }
+                    )
+                    return
+
+    async def send_browser_output() -> None:
+        nonlocal pending_error
+        while True:
+            if pending_error is not None:
+                control_item = pending_error
+                pending_error = None
+            else:
+                try:
+                    control_item = control_output.get_nowait()
+                except asyncio.QueueEmpty:
+                    control_item = no_control
+            if control_item is None:
+                return
+            if control_item is not no_control:
+                try:
+                    await asyncio.wait_for(
+                        websocket.send_json(control_item),
+                        timeout=WEBSOCKET_SEND_TIMEOUT_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    if not fatal_error.done():
+                        fatal_error.set_result("pane WebSocket send timed out")
+                    return
+                continue
+
+            priority_delay = frame_scheduler.priority_wait_seconds()
+            if priority_delay > 0:
+                await asyncio.sleep(priority_delay)
+                continue
+            if frame_scheduler.has_pending:
+                await frame_pacer.wait()
+                # A control transition, such as control-to-observe fallback,
+                # must reach the browser before that stream's next frame.
+                if pending_error is not None or not control_output.empty():
+                    continue
+                item = frame_scheduler.take_next()
+                if item is None:
+                    continue
+                if (
+                    time.monotonic() - item.queued_at
+                    >= PANE_RESYNC_TRIGGER_SECONDS
+                ):
+                    item.discarded = True
+                    item.pacing_updated.set()
+                    item.acknowledged.set()
+                    continue
+                encoded = await encode_pane_websocket_frame_async(
+                    item.stream_id,
+                    item.frame,
+                    deflate=pane_deflate_enabled,
+                )
+                if (
+                    time.monotonic() - item.queued_at
+                    >= PANE_RESYNC_TRIGGER_SECONDS
+                ):
+                    item.discarded = True
+                    item.pacing_updated.set()
+                    item.acknowledged.set()
+                    continue
+                item.sent_at = time.monotonic()
+                frame_pacer.note_sent(item.sent_at)
+                try:
+                    await asyncio.wait_for(
+                        websocket.send_bytes(encoded),
+                        timeout=WEBSOCKET_SEND_TIMEOUT_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    if not fatal_error.done():
+                        fatal_error.set_result("pane WebSocket send timed out")
+                    item.pacing_updated.set()
+                    item.acknowledged.set()
+                    return
+                # Keep one frame awaiting browser parser acknowledgement across
+                # the complete WebSocket. Unsent frames remain bounded to one
+                # decoded record per configured pane and are age-checked first.
+                await item.acknowledged.wait()
+                frame_pacer.note_acknowledged(time.monotonic() - item.sent_at)
+                item.pacing_updated.set()
+                continue
+
+            frame_scheduler.prepare_to_wait()
+            if (
+                pending_error is not None
+                or not control_output.empty()
+                or frame_scheduler.has_pending
+            ):
+                continue
+            try:
+                await frame_scheduler.wait_for_change(WEBSOCKET_HEARTBEAT_SECONDS)
+            except asyncio.TimeoutError:
+                try:
+                    await asyncio.wait_for(
+                        websocket.send_json({"type": "ping"}),
+                        timeout=WEBSOCKET_SEND_TIMEOUT_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    if not fatal_error.done():
+                        fatal_error.set_result("pane WebSocket send timed out")
+                    return
 
     async def report_error(message: str) -> None:
-        await output.put({"type": "error", "message": message})
+        nonlocal pending_error
+        error = {"type": "error", "message": message}
+        try:
+            control_output.put_nowait(error)
+            frame_scheduler.notify()
+        except asyncio.QueueFull:
+            # The latest error is sufficient for the browser toast. ACK intake
+            # remains independent from this bounded control-output queue.
+            pending_error = error
+            frame_scheduler.notify()
 
-    async def browser_to_panes() -> None:
-        nonlocal active_stream_id
-        pending_image: tuple[PaneStreamRequest, str, int] | None = None
+    async def receive_browser_messages() -> None:
+        """Receive ACKs immediately and queue ordered terminal commands."""
+        expected_image_bytes: int | None = None
         while True:
             message = await websocket.receive()
             if message["type"] == "websocket.disconnect":
                 return
             data = message.get("bytes")
             if data is not None:
+                if expected_image_bytes is None and len(data) > PANE_INPUT_MESSAGE_BYTES:
+                    if not fatal_error.done():
+                        fatal_error.set_result("pane input message is too large")
+                    return
+                if expected_image_bytes is not None and len(data) > MAX_CLIPBOARD_IMAGE_BYTES:
+                    if not fatal_error.done():
+                        fatal_error.set_result("clipboard image is too large")
+                    return
+                expected_image_bytes = None
+                if not enqueue_browser_command(data, len(data)):
+                    return
+                continue
+            text = message.get("text")
+            if text is None:
+                continue
+            text_size = len(text.encode("utf-8"))
+            if text_size > PANE_CONTROL_MESSAGE_BYTES:
+                if not fatal_error.done():
+                    fatal_error.set_result("pane control message is too large")
+                return
+            try:
+                control = json.loads(text)
+            except json.JSONDecodeError:
+                await report_error("invalid pane control message")
+                continue
+            if not isinstance(control, dict):
+                await report_error("invalid pane control message")
+                continue
+            kind = control.get("type")
+            if kind == "pane-output-ack":
+                stream_id = control.get("stream_id")
+                raw_seq = control.get("seq")
+                try:
+                    seq = int(raw_seq)
+                except (TypeError, ValueError):
+                    continue
+                if isinstance(stream_id, int):
+                    item = acknowledgements.get((stream_id, seq))
+                    if item is not None and item.sent_at is not None:
+                        item.acknowledged.set()
+            elif kind == "pong":
+                continue
+            else:
+                if expected_image_bytes is not None:
+                    if not fatal_error.done():
+                        fatal_error.set_result("clipboard image upload body is missing")
+                    return
+                if kind == "clipboard-image":
+                    image_size = control.get("size")
+                    if (
+                        not isinstance(image_size, int)
+                        or isinstance(image_size, bool)
+                        or not 0 < image_size <= MAX_CLIPBOARD_IMAGE_BYTES
+                    ):
+                        if not fatal_error.done():
+                            fatal_error.set_result("invalid clipboard image header")
+                        return
+                    expected_image_bytes = image_size
+                if not enqueue_browser_command(control, text_size):
+                    return
+
+    async def apply_browser_commands() -> None:
+        """Apply non-disposable browser commands in their received order."""
+        nonlocal active_stream_id, queued_command_bytes
+        pending_image: tuple[PaneStreamRequest, str, int] | None = None
+        while True:
+            envelope = await command_queue.get()
+            if envelope is None:
+                return
+            queued_command_bytes -= envelope.size
+            command = envelope.value
+            if pending_image is not None and not isinstance(command, bytes):
+                pending_image = None
+                await report_error("clipboard image upload body is missing")
+            if isinstance(command, bytes):
                 if pending_image is not None:
                     request, extension, expected_size = pending_image
                     pending_image = None
-                    if len(data) != expected_size:
+                    if len(command) != expected_size:
                         await report_error("clipboard image upload was truncated")
                         continue
                     path: Path | None = None
                     try:
-                        path = stage_clipboard_image(extension, data)
+                        path = await stage_clipboard_image_async(extension, command)
                         pane_image_paths.add(path)
-                        # The pane and Herdr Web run on the same host. Paste the
-                        # staged absolute path through Herdr's public semantic
-                        # text-input API. Herdr applies the target runtime's
-                        # bracketed-paste mode, which matches its ClipboardImage
-                        # path handoff without using the private client protocol.
+                        # Herdr Web and the pane use the same host. Herdr's
+                        # public semantic input API applies bracketed paste.
                         await run_herdr_socket_api(
                             backend,
                             "pane.send_input",
                             {"pane_id": request.pane_id, "text": str(path)},
                         )
+                        mark_interactive(request.stream_id)
                     except (OSError, RuntimeError, ValueError) as error:
                         if path is not None:
                             pane_image_paths.discard(path)
@@ -1367,32 +1962,30 @@ async def run_panes_websocket(
                     await report_error("The selected pane is read-only")
                     continue
                 try:
-                    await client.send_input(data)
+                    await client.send_input(command)
+                    mark_interactive(active_stream_id)
                 except PaneStreamError as error:
                     await report_error(str(error))
                 continue
-            text = message.get("text")
-            if text is None:
-                continue
-            try:
-                control = json.loads(text)
-            except json.JSONDecodeError:
-                await report_error("invalid pane control message")
-                continue
-            if not isinstance(control, dict):
-                await report_error("invalid pane control message")
-                continue
+
+            control = command
             kind = control.get("type")
             if kind == "pane-active":
                 stream_id = control.get("stream_id")
                 if isinstance(stream_id, int) and stream_id in clients:
                     active_stream_id = stream_id
+                    mark_interactive(stream_id)
             elif kind == "pane-resize":
                 stream_id = control.get("stream_id")
                 client = clients.get(stream_id) if isinstance(stream_id, int) else None
                 if isinstance(client, PaneController):
                     try:
-                        await client.resize(int(control["cols"]), int(control["rows"]))
+                        cols = int(control["cols"])
+                        rows = int(control["rows"])
+                        async with stream_resize_locks[stream_id]:
+                            await client.resize(cols, rows)
+                            stream_sizes[stream_id] = (cols, rows)
+                        mark_interactive(stream_id)
                     except (KeyError, TypeError, ValueError, PaneStreamError) as error:
                         await report_error(f"pane resize rejected: {error}")
             elif kind == "pane-scroll":
@@ -1414,6 +2007,7 @@ async def run_panes_websocket(
                                 else None
                             ),
                         )
+                        mark_interactive(stream_id)
                     except (KeyError, TypeError, ValueError, PaneStreamError) as error:
                         await report_error(f"pane scroll rejected: {error}")
             elif kind == "pane-paste":
@@ -1439,6 +2033,7 @@ async def run_panes_websocket(
                         "pane.send_input",
                         {"pane_id": request.pane_id, "text": pasted_text},
                     )
+                    mark_interactive(stream_id)
                 except (OSError, RuntimeError, ValueError) as error:
                     await report_error(f"pane paste rejected: {error}")
             elif kind == "pane-mouse":
@@ -1464,19 +2059,9 @@ async def run_panes_websocket(
                         "pane.send_text",
                         {"pane_id": request.pane_id, "text": sequence},
                     )
+                    mark_interactive(stream_id)
                 except (OSError, RuntimeError, ValueError) as error:
                     await report_error(f"pane mouse input rejected: {error}")
-            elif kind == "pane-output-ack":
-                stream_id = control.get("stream_id")
-                raw_seq = control.get("seq")
-                try:
-                    seq = int(raw_seq)
-                except (TypeError, ValueError):
-                    continue
-                if isinstance(stream_id, int):
-                    acknowledged = acknowledgements.get((stream_id, seq))
-                    if acknowledged is not None:
-                        acknowledged.set()
             elif kind == "clipboard-image":
                 stream_id = control.get("stream_id")
                 client = clients.get(stream_id) if isinstance(stream_id, int) else None
@@ -1503,27 +2088,62 @@ async def run_panes_websocket(
                     await websocket.close(code=4400, reason="invalid clipboard image header")
                     return
                 pending_image = (request, extension, size)
-            elif kind == "pong":
-                continue
+
+    async def run_browser_input_pipeline() -> None:
+        receiver = asyncio.create_task(receive_browser_messages())
+        command_worker = asyncio.create_task(apply_browser_commands())
+        try:
+            done, _ = await asyncio.wait(
+                [receiver, command_worker], return_when=asyncio.FIRST_COMPLETED
+            )
+            if command_worker in done:
+                receiver.cancel()
+                await asyncio.gather(receiver, return_exceptions=True)
+                command_worker.result()
+                return
+
+            receiver.result()
+
+            async def drain_commands() -> None:
+                await command_queue.put(None)
+                await command_worker
+
+            # Finish already admitted input when possible, but do not retain a
+            # disconnected controller for one API timeout per queued command.
+            try:
+                await asyncio.wait_for(
+                    drain_commands(), timeout=PANE_COMMAND_DRAIN_TIMEOUT_SECONDS
+                )
+            except asyncio.TimeoutError:
+                logger.info("pane command drain timed out after disconnect")
+        finally:
+            for task in (receiver, command_worker):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(receiver, command_worker, return_exceptions=True)
 
     pumps = [asyncio.create_task(pump_stream(request)) for request in requests]
 
     async def close_output_after_pumps() -> None:
         await asyncio.gather(*pumps, return_exceptions=True)
-        await output.put(None)
+        await queue_control(None)
 
     monitor = asyncio.create_task(close_output_after_pumps())
     sender = asyncio.create_task(send_browser_output())
-    receiver = asyncio.create_task(browser_to_panes())
+    input_pipeline = asyncio.create_task(run_browser_input_pipeline())
     failure = asyncio.ensure_future(fatal_error)
     try:
         done, pending = await asyncio.wait(
-            [sender, receiver, failure], return_when=asyncio.FIRST_COMPLETED
+            [sender, input_pipeline, failure],
+            return_when=asyncio.FIRST_COMPLETED,
         )
-        if failure in done:
+        if fatal_error.done():
             try:
-                await websocket.close(code=1011, reason=failure.result())
-            except RuntimeError:
+                await asyncio.wait_for(
+                    websocket.close(code=1011, reason=fatal_error.result()),
+                    timeout=WEBSOCKET_SEND_TIMEOUT_SECONDS,
+                )
+            except (RuntimeError, asyncio.TimeoutError):
                 pass
         for task in [*pumps, monitor, *pending]:
             task.cancel()
@@ -1531,10 +2151,11 @@ async def run_panes_websocket(
         for task in done - {failure}:
             task.result()
     finally:
-        for acknowledged in acknowledgements.values():
-            acknowledged.set()
+        for item in acknowledgements.values():
+            item.pacing_updated.set()
+            item.acknowledged.set()
         await asyncio.gather(
-            *(client.close() for client in dict.fromkeys(all_clients)),
+            *(client.close() for client in tuple(all_clients)),
             return_exceptions=True,
         )
         for path in pane_image_paths:
@@ -1603,14 +2224,17 @@ async def terminal(websocket: WebSocket, backend_id: str) -> None:
         rows = int(initial.get("rows", 40))
         output_ack_enabled = initial.get("output_ack") is True
         client = start_client(backend, cols, rows)
-        await websocket.send_json(
-            {
-                "type": "attached",
-                "label": backend.label,
-                "output_window_bytes": (
-                    OUTPUT_ACK_WINDOW_BYTES if output_ack_enabled else 0
-                ),
-            }
+        await asyncio.wait_for(
+            websocket.send_json(
+                {
+                    "type": "attached",
+                    "label": backend.label,
+                    "output_window_bytes": (
+                        OUTPUT_ACK_WINDOW_BYTES if output_ack_enabled else 0
+                    ),
+                }
+            ),
+            timeout=WEBSOCKET_SEND_TIMEOUT_SECONDS,
         )
 
         # Keep only one PTY chunk between the client and WebSocket sender.
@@ -1622,6 +2246,7 @@ async def terminal(websocket: WebSocket, backend_id: str) -> None:
         output_bytes_sent = 0
         output_bytes_acknowledged = 0
         output_acknowledged = asyncio.Event()
+        pending_output_error: dict[str, str] | None = None
 
         async def read_pty_output() -> None:
             while True:
@@ -1635,38 +2260,71 @@ async def terminal(websocket: WebSocket, backend_id: str) -> None:
             await output.put(None)
 
         async def send_browser_output() -> None:
-            nonlocal output_bytes_sent
+            nonlocal output_bytes_sent, pending_output_error
             while True:
-                try:
-                    item = await asyncio.wait_for(
-                        output.get(), timeout=WEBSOCKET_HEARTBEAT_SECONDS
-                    )
-                except asyncio.TimeoutError:
-                    await websocket.send_json({"type": "ping"})
-                    continue
+                if pending_output_error is not None:
+                    item = pending_output_error
+                    pending_output_error = None
+                else:
+                    try:
+                        item = await asyncio.wait_for(
+                            output.get(), timeout=WEBSOCKET_HEARTBEAT_SECONDS
+                        )
+                    except asyncio.TimeoutError:
+                        await asyncio.wait_for(
+                            websocket.send_json({"type": "ping"}),
+                            timeout=WEBSOCKET_SEND_TIMEOUT_SECONDS,
+                        )
+                        continue
                 if item is None:
                     return
                 if isinstance(item, bytes):
-                    while (
-                        output_ack_enabled
-                        and output_bytes_sent - output_bytes_acknowledged
-                        >= OUTPUT_ACK_WINDOW_BYTES
-                    ):
-                        output_acknowledged.clear()
-                        if (
-                            output_bytes_sent - output_bytes_acknowledged
-                            >= OUTPUT_ACK_WINDOW_BYTES
+                    for chunk in websocket_output_chunks(item):
+                        while (
+                            output_ack_enabled
+                            and output_bytes_sent
+                            - output_bytes_acknowledged
+                            + len(chunk)
+                            > OUTPUT_ACK_WINDOW_BYTES
                         ):
-                            await output_acknowledged.wait()
-                    # Increment before the await so a fast browser ACK cannot
-                    # race ahead of this task's cumulative byte counter.
-                    output_bytes_sent += len(item)
-                    await websocket.send_bytes(item)
+                            output_acknowledged.clear()
+                            if (
+                                output_bytes_sent
+                                - output_bytes_acknowledged
+                                + len(chunk)
+                                > OUTPUT_ACK_WINDOW_BYTES
+                            ):
+                                try:
+                                    await asyncio.wait_for(
+                                        output_acknowledged.wait(),
+                                        timeout=OUTPUT_ACK_TIMEOUT_SECONDS,
+                                    )
+                                except asyncio.TimeoutError as error:
+                                    raise RuntimeError(
+                                        "terminal parser acknowledgement timed out"
+                                    ) from error
+                        # Increment before the await so a fast browser ACK cannot
+                        # race ahead of this task's cumulative byte counter.
+                        output_bytes_sent += len(chunk)
+                        try:
+                            await asyncio.wait_for(
+                                websocket.send_bytes(chunk),
+                                timeout=WEBSOCKET_SEND_TIMEOUT_SECONDS,
+                            )
+                        except asyncio.TimeoutError as error:
+                            raise RuntimeError("terminal WebSocket send timed out") from error
                 else:
-                    await websocket.send_json(item)
+                    await asyncio.wait_for(
+                        websocket.send_json(item), timeout=WEBSOCKET_SEND_TIMEOUT_SECONDS
+                    )
 
         async def report_error(message: str) -> None:
-            await output.put({"type": "error", "message": message})
+            nonlocal pending_output_error
+            error = {"type": "error", "message": message}
+            try:
+                output.put_nowait(error)
+            except asyncio.QueueFull:
+                pending_output_error = error
 
         async def browser_to_pty() -> None:
             nonlocal output_bytes_acknowledged
@@ -1696,7 +2354,7 @@ async def terminal(websocket: WebSocket, backend_id: str) -> None:
                         continue
                     path: Path | None = None
                     try:
-                        path = stage_clipboard_image(extension, data)
+                        path = await stage_clipboard_image_async(extension, data)
                         # Herdr's remote client recognizes an absolute image
                         # path inside bracketed paste and emits ClipboardImage.
                         await write_pty(
@@ -1752,9 +2410,15 @@ async def terminal(websocket: WebSocket, backend_id: str) -> None:
     except WebSocketDisconnect as error:
         logger.info("websocket disconnected backend=%s code=%s", backend.label, error.code)
     except asyncio.TimeoutError:
-        logger.info("websocket initial resize timed out backend=%s", backend.label)
+        logger.info("terminal websocket operation timed out backend=%s", backend.label)
     except RuntimeError as error:
-        await websocket.send_json({"type": "error", "message": str(error)})
+        try:
+            await asyncio.wait_for(
+                websocket.send_json({"type": "error", "message": str(error)}),
+                timeout=WEBSOCKET_SEND_TIMEOUT_SECONDS,
+            )
+        except (asyncio.TimeoutError, WebSocketDisconnect, RuntimeError):
+            logger.info("could not report terminal websocket error backend=%s", backend.label)
     finally:
         if client is not None:
             await client.close()

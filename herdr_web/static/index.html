@@ -56,12 +56,29 @@
         </header>
         <div id="terminal" aria-label="Herdr terminal"></div>
         <section id="panes-view" aria-label="Herdr panes" hidden>
-          <nav id="pane-navigation" aria-label="Workspace and tabs">
-            <label for="pane-workspace">Space</label>
-            <select id="pane-workspace"></select>
-            <div id="pane-tabs" role="tablist" aria-label="Tabs"></div>
-          </nav>
-          <div id="pane-grid"></div>
+          <aside id="pane-sidebar" aria-label="Spaces and agents">
+            <section class="pane-sidebar-section" aria-labelledby="pane-spaces-heading">
+              <h2 id="pane-spaces-heading">spaces</h2>
+              <nav id="pane-workspaces" aria-label="Spaces"></nav>
+            </section>
+            <section class="pane-sidebar-section" aria-labelledby="pane-agents-heading">
+              <h2 id="pane-agents-heading">agents</h2>
+              <nav id="pane-agents" aria-label="Agents"></nav>
+            </section>
+          </aside>
+          <section id="pane-main" aria-label="Selected space">
+            <nav id="pane-navigation" aria-label="Tabs">
+              <button id="pane-sidebar-toggle" type="button" aria-label="Hide sidebar" aria-controls="pane-sidebar" aria-expanded="true">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <rect x="3" y="3" width="18" height="18" rx="2"></rect>
+                  <path d="M9 3v18"></path>
+                  <path class="pane-sidebar-toggle-chevron" d="m15 9-3 3 3 3"></path>
+                </svg>
+              </button>
+              <div id="pane-tabs" role="tablist" aria-label="Tabs"></div>
+            </nav>
+            <div id="pane-grid"></div>
+          </section>
           <nav id="pane-mobile-bar" aria-label="Terminal controls">
             <div id="mobile-primary-row" class="mobile-key-row">
               <button id="pane-browse" type="button" aria-label="Browse" aria-haspopup="dialog" aria-expanded="false">
