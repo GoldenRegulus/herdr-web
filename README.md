@@ -164,15 +164,43 @@ the same precedence as Herdr.
 ## Slow connections
 
 The WebSocket bridge keeps one PTY output chunk in its application queue. It
-coalesces each output burst for at most 2 ms and up to 256 KiB. This reduces
-WebSocket and parser calls without dropping ANSI bytes. The browser always uses
-xterm.js's supported scheduled write queue. It acknowledges each chunk only
-after xterm.js parses it. This queue limits parser work per browser task and
-lets the renderer paint between batches. Cumulative acknowledgements limit data
-waiting in the WebSocket and xterm.js. This early backpressure lets Herdr apply
-its native slow-client frame coalescing. Panes mode acknowledges each pane
-frame after its target xterm parser completes. Each pane stream waits for that
-acknowledgement before it reads another frame.
+coalesces each output burst for at most 2 ms and up to 256 KiB, then sends it as
+ordered 8 KiB WebSocket messages. Full mode permits only one such message in
+its parser-acknowledgement window. Its HTTP fallback also reads one 8 KiB chunk
+at a time and waits for xterm to parse that chunk before the next long poll. It
+does not drop raw ANSI bytes.
+
+The browser always uses xterm.js's supported scheduled write queue. It
+acknowledges output only after xterm.js parses it. Each Panes WebSocket has an
+independent adaptive frame pacer. It uses a smoothed parser-acknowledgement time
+to select a target from 2 to 60 frames per second. Interactive input wakes the
+pacer immediately. Browsers that support the Compression Streams API negotiate
+explicit deflate compression for pane frames; older clients keep raw frames.
+Large compression jobs yield between bounded chunks, so they do not add an
+unsafe persistent thread before a later Full-mode PTY fork.
+
+Panes keeps one pending frame per stream and permits only one frame awaiting
+browser parser acknowledgement across the complete WebSocket. An active-aware
+round-robin scheduler gives recent input short priority and then gives service
+to background panes. A dedicated receive task processes parser ACKs without
+waiting for resize, Paste, image, mouse, or other ordered terminal commands. A
+hard command-queue limit closes an overloaded connection instead of blocking
+ACK intake or increasing server memory without a bound. After disconnect,
+admitted commands have one five-second total drain budget. A stalled drain is
+canceled so it cannot retain a controller indefinitely. Delivery of input
+already sent across a broken connection is uncertain; it is not automatically
+replayed.
+
+Panes uses a one-second freshness budget with a half-second resynchronization
+trigger. If a frame waits or parses too slowly, or buffered history persists
+toward that trigger, Herdr Web requests a new full frame through the public
+terminal-session resize command. Full-frame requests share the connection's
+adaptive pacing budget. Herdr Web discards only superseded framed updates while
+it waits for that full replacement. A slow read-only observer reconnects
+without taking control to obtain the same safe full replacement. WebSocket send
+and parser-acknowledgement waits have finite deadlines. No implementation can
+keep the display within one second if the link itself needs more than one
+second to carry one complete current frame.
 
 Herdr wraps rendered frames in DEC 2026 synchronized-output markers. The local
 xterm.js patch paints a completed synchronized frame before the next frame can
@@ -193,15 +221,35 @@ so non-disposable input stays ordered and lossless. Input stays queued while
 the connection attaches. The HTTP fallback sends one input request at a time,
 so requests cannot pass each other.
 
+Full and Panes use the same authentication-aware WebSocket recovery path. Both
+retry with bounded exponential backoff and retain queued input while a new
+connection attaches. Full retries two failed WebSocket connections before it
+uses HTTP fallback, and it uses fallback only when the HTTP service is
+reachable. If the network is unavailable, it continues the WebSocket retry
+sequence instead of stopping after a failed fallback request. A failed HTTP
+session also returns to this recovery path. A healthy HTTP-only connection
+remains on fallback until it fails or the user requests a reconnect.
+
 ## Panes mode
 
 Select **Panes** in the session header. The browser reads structured state from
 `herdr api snapshot`; it does not parse terminal ANSI to find navigation or
 pane boundaries.
 
-On a wide screen, the active tab displays all its panes with Herdr's split
-geometry. Each pane has an independent xterm surface and terminal-session
-stream. Only the active tab is attached through the web client.
+On a wide screen, Panes follows the structure of Herdr's Full layout. A left
+sidebar puts spaces in its top half and agents in its bottom half. The right
+side has a compact web-style tab bar for the selected space, followed by the
+active tab's pane layout. Only a theme-accent bottom border marks the active tab. The
+tab-bar control collapses or restores the sidebar and saves that choice in the
+browser. Sidebar rows are flat and edge-to-edge, with the same one-pixel left
+edge and three-pixel current left edge as mobile Browse. Status uses a separate
+right edge: working pulses a neutral edge, while done, blocked, and error use
+solid green, yellow, and red edges. Idle stays neutral. Reduced-motion mode
+uses a static neutral working edge. Mobile Browse uses the same right-edge
+status treatment and keeps its plain status text. Screen readers also receive
+the status as text. Each pane has an independent xterm surface and
+terminal-session stream. Only the active tab is attached through the web
+client.
 
 On a narrow or coarse-pointer screen, Panes is the only presentation mode and
 one pane fills the available area. The top title shows
@@ -273,25 +321,45 @@ of converting each line break to an Enter key. Herdr Web uses only xterm's
 internal keyboard helper. When mouse input is off, the transparent 16 px helper
 covers the complete terminal row that contains the cursor. The keyboard lock
 blocks terminal taps from focusing it. Bottom control buttons preserve an
-already-open keyboard but do not open a closed keyboard. When iOS reports
-`deleteWordBackward`, Herdr Web sends
-Meta+Backspace as `ESC DEL`. Some iOS versions report only repeated Backspace
-keys because xterm prevents native text edits. For these versions, Herdr Web
-keeps the first 22 deletions as single-character Backspace and sends `ESC DEL`
-from the 23rd continuous deletion. A 400 ms pause resets this count. The
-terminal application applies its normal Option+Backspace or Alt+Backspace
-binding.
+already-open keyboard but do not open a closed keyboard.
+
+On iOS, Herdr Web gives each text event to one input path. Its xterm custom key
+handler rejects unmodified printable keydown and keypress events. The
+application then sends the corresponding native helper-value change once.
+Other mobile platforms keep xterm's normal input path. xterm continues to
+handle explicit terminal keys and iOS composition outside browser-owned text.
+
+Herdr Web keeps bounded browser-owned text and its caret position. It never
+copies terminal output into this text. Native typing, swipe input, autocorrect,
+composition, and dictation update it. Herdr Web preserves unchanged text on
+both sides of an edit. It sends ordered cursor movement, deletion, and new text,
+then moves the terminal cursor to the native caret. Duplicate events do not
+repeat the edit. Prediction is enabled only after the rendered text around the
+terminal cursor confirms the complete owned text.
+Navigation, control input, Paste, a submitted line, or a pane lifecycle change
+discards text ownership.
+
+When the owned text is empty, Herdr Web inserts an `x` marker through the
+browser's native text-edit command. This initializes the iOS editor state that
+controls Backspace repeat. Safari applies the first native text edit before
+Herdr Web removes the marker from the helper value. Capture handlers stop the
+marker before xterm or Herdr can receive it. During Backspace,
+the helper stays nonempty and iOS supplies the repeat events. Herdr Web does
+not implement a second repeat timer.
 
 Herdr Web follows the iOS visual viewport while the keyboard opens and closes.
 The control bar stays above the keyboard, xterm fits the available area, and
 Herdr receives the new row and column size. Herdr Web combines adjacent scroll
 steps before it sends them to reduce scroll-command backlog.
 
-iOS does not give a web page the raw movement distance from its spacebar
-trackpad. It moves a caret inside an editable text model. Xterm's keyboard
-helper has no matching terminal-line model, so Herdr Web cannot convert that
-gesture to matching terminal cursor movement. Use the repeatable arrow
-controls for terminal cursor movement.
+The iOS spacebar trackpad moves the native caret inside the browser-owned text.
+Herdr Web follows collapsed caret changes with ordered terminal Left and Right
+input. It does not draw a second cursor or change the helper selection during
+the gesture. The terminal cursor updates when Herdr returns the resulting frame.
+This requires an application that supports normal terminal cursor movement and
+text editing. The gesture cannot reach text outside the browser-owned range.
+Backspace, Paste, explicit terminal controls, and pane lifecycle changes end
+that range. Use the arrow controls to move beyond it.
 
 Selecting a pane or tab replaces only the web streams. It does not stop the
 terminal processes in Herdr. If another direct client controls a pane, Panes

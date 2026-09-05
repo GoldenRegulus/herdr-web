@@ -16,4 +16,6 @@ The live mobile terminal does not permit text selection. Terminal Snapshot provi
 
 Panes captures text Paste before xterm processes it. It normalizes CRLF and CR to LF, then sends the text through Herdr's public `pane.send_input` API. Herdr applies the server terminal's bracketed-paste state. Full mode continues to use xterm's Paste path and therefore still needs the vendored WebKit fixes.
 
+Herdr Web keeps mobile input routing in `../app.js`, with pure suffix operations in `../mobile-prediction.js`. The xterm custom key handler rejects unmodified printable iOS key events before xterm sends them, and the application handles the matching native helper-value update once. The bounded browser-owned suffix never contains arbitrary terminal output.
+
 Remove the JavaScript patches when a released xterm.js version contains equivalent Paste behavior. Keep the Herdr-specific Mouse, helper, and Terminal Snapshot policies unless that release provides equivalent explicit controls that pass the mobile acceptance tests.

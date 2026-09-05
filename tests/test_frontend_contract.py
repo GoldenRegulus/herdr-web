@@ -11,8 +11,10 @@ class FrontendContractTests(unittest.TestCase):
         application = (STATIC_DIRECTORY / "app.js").read_text(encoding="utf-8")
 
         self.assertNotIn("_core.writeSync", application)
+        self.assertIn("return new Promise((resolve) =>", application)
         self.assertIn("activeTerminal.write(bytes, () =>", application)
         self.assertIn("noteParsedOutput(flow, bytes.length)", application)
+        self.assertIn("await queueTerminalOutput(base64ToBytes(message.data_base64))", application)
 
     def test_mouse_motion_is_coalesced_without_delaying_keys(self) -> None:
         application = (STATIC_DIRECTORY / "app.js").read_text(encoding="utf-8")
@@ -21,6 +23,27 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("pendingMouseMotion = data", application)
         self.assertIn("queuePendingMouseMotion();\n      inputBuffer.append(data)", application)
         self.assertIn("MOUSE_MOTION_INTERVAL_MS = 16", application)
+
+    def test_full_and_panes_share_auth_aware_reconnect(self) -> None:
+        application = (STATIC_DIRECTORY / "app.js").read_text(encoding="utf-8")
+        recovery_start = application.index("  async function recoverWebSocket(backend, expectedMode)")
+        recovery_end = application.index("  function scheduleWebSocketReconnect(backend)", recovery_start)
+        recovery = application[recovery_start:recovery_end]
+        full_start = application.index("  function startWebSocket(backend)")
+        full_end = application.index("  function attachFull(backend)", full_start)
+        full_connection = application[full_start:full_end]
+
+        self.assertIn("recoverWebSocket(backend, 'panes')", application)
+        self.assertIn("recoverWebSocket(backend, 'full')", application)
+        self.assertNotIn("recoverPaneWebSocket", application)
+        self.assertIn("response.type === 'opaqueredirect'", recovery)
+        self.assertIn("requiresAuthentication(response)", recovery)
+        self.assertIn("expectedMode === 'full' && httpReachable", recovery)
+        self.assertIn("FULL_WEBSOCKET_RETRIES_BEFORE_HTTP_FALLBACK = 2", application)
+        self.assertNotIn("startHttpFallback(backend)", full_connection)
+        self.assertIn("if (socket === nextSocket && !opened) nextSocket.close()", full_connection)
+        self.assertIn("if (attached && !sessionId) scheduleWebSocketReconnect(backend)", full_connection)
+        self.assertIn("scheduleWebSocketReconnect(backend);", application)
 
     def test_webgl_renderer_has_dom_fallback(self) -> None:
         application = (STATIC_DIRECTORY / "app.js").read_text(encoding="utf-8")
@@ -45,6 +68,120 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("#back {", stylesheet)
         self.assertIn("flex: 0 0 auto;", stylesheet)
         self.assertNotIn("#back { margin-left: auto; }", stylesheet)
+
+    def test_desktop_panes_follow_the_full_navigation_frame(self) -> None:
+        application = (STATIC_DIRECTORY / "app.js").read_text(encoding="utf-8")
+        document = (STATIC_DIRECTORY / "index.html").read_text(encoding="utf-8")
+        stylesheet = (STATIC_DIRECTORY / "style.css").read_text(encoding="utf-8")
+
+        sidebar = document.index('id="pane-sidebar"')
+        spaces = document.index('id="pane-workspaces"', sidebar)
+        agents = document.index('id="pane-agents"', spaces)
+        main = document.index('id="pane-main"', agents)
+        toggle = document.index('id="pane-sidebar-toggle"', main)
+        tabs = document.index('id="pane-tabs"', toggle)
+        grid = document.index('id="pane-grid"', tabs)
+        self.assertLess(sidebar, spaces)
+        self.assertLess(spaces, agents)
+        self.assertLess(agents, main)
+        self.assertLess(main, toggle)
+        self.assertLess(toggle, tabs)
+        self.assertLess(tabs, grid)
+        self.assertNotIn('id="pane-workspace"', document)
+        self.assertIn("function desktopPaneNavigationItem(", application)
+        self.assertGreaterEqual(
+            application.count("button.dataset.status = statusValue"), 2
+        )
+        self.assertIn("status.className = 'visually-hidden'", application)
+        self.assertNotIn("pane-sidebar-item-status", application)
+        self.assertIn("paneWorkspaces.replaceChildren()", application)
+        self.assertIn("paneAgents.replaceChildren()", application)
+        self.assertIn("DESKTOP_PANE_SIDEBAR_COLLAPSED_KEY", application)
+        self.assertIn("function setDesktopPaneSidebarCollapsed(collapsed)", application)
+        self.assertIn("panesView.dataset.sidebarCollapsed", application)
+        self.assertIn("setDesktopPaneSidebarCollapsed(!desktopPaneSidebarCollapsed)", application)
+        self.assertIn("() => selectPaneWorkspace(workspace.workspace_id)", application)
+        self.assertIn("() => selectPaneTarget(agent.pane_id)", application)
+        navigation_start = stylesheet.index("#panes-view {")
+        navigation_end = stylesheet.index("#pane-grid {", navigation_start)
+        navigation_style = stylesheet[navigation_start:navigation_end]
+        self.assertIn(
+            "grid-template-columns: clamp(13rem, 18vw, 17rem) minmax(0, 1fr);",
+            stylesheet,
+        )
+        self.assertIn("grid-template-rows: repeat(2, minmax(0, 1fr));", navigation_style)
+        self.assertIn("#pane-main {", navigation_style)
+        self.assertIn("grid-template-rows: 2.35rem minmax(0, 1fr);", navigation_style)
+        self.assertIn('#panes-view[data-sidebar-collapsed="true"]', navigation_style)
+        self.assertIn('#pane-sidebar-toggle {', navigation_style)
+        self.assertIn("height: 1.75rem;", navigation_style)
+        self.assertIn("min-width: 7rem;", navigation_style)
+        self.assertIn("padding: .35rem 0 .45rem;", navigation_style)
+        self.assertIn("border-radius: 0;", navigation_style)
+        self.assertIn("border-right: 3px solid transparent;", navigation_style)
+        self.assertIn("box-shadow: inset 1px 0 var(--theme-accent);", navigation_style)
+        self.assertIn("box-shadow: inset 3px 0 var(--theme-accent);", navigation_style)
+        self.assertNotIn('.pane-sidebar-item::before', navigation_style)
+        self.assertNotIn('.pane-sidebar-item-status', navigation_style)
+        working_start = navigation_style.index(
+            '.pane-sidebar-item[data-status="working"]'
+        )
+        working_end = navigation_style.index(
+            '.pane-sidebar-item[data-status="done"]', working_start
+        )
+        working_style = navigation_style[working_start:working_end]
+        self.assertIn('@keyframes working-status-edge-pulse', navigation_style)
+        self.assertIn(
+            'animation: working-status-edge-pulse 1.4s ease-in-out infinite;',
+            working_style,
+        )
+        self.assertNotIn('background:', working_style)
+        self.assertIn(
+            '.pane-sidebar-item[data-status="done"] { border-right-color: var(--theme-green); }',
+            navigation_style,
+        )
+        self.assertIn(
+            '.pane-sidebar-item[data-status="blocked"] { border-right-color: var(--theme-yellow); }',
+            navigation_style,
+        )
+        self.assertIn(
+            '.pane-sidebar-item[data-status="error"] { border-right-color: var(--theme-red); }',
+            navigation_style,
+        )
+        self.assertNotIn('.pane-sidebar-item[data-status="idle"]', navigation_style)
+        self.assertNotIn('--theme-mauve', stylesheet)
+        self.assertNotIn('.agent-status[data-status=', stylesheet)
+        self.assertGreaterEqual(
+            stylesheet.count('border-right: 3px solid transparent;'), 2
+        )
+        self.assertIn('.sheet-item[data-status="working"]', stylesheet)
+        self.assertIn(
+            '.sheet-item[data-status="done"] { border-right-color: var(--theme-green); }',
+            stylesheet,
+        )
+        self.assertIn(
+            '.sheet-item[data-status="blocked"] { border-right-color: var(--theme-yellow); }',
+            stylesheet,
+        )
+        self.assertIn('animation: none;', stylesheet)
+        self.assertIn('border-right-color: var(--theme-overlay-1);', stylesheet)
+        self.assertIn('.visually-hidden {', stylesheet)
+        self.assertIn('#pane-sidebar { display: none; }', stylesheet)
+        tab_start = navigation_style.index('#pane-tabs button {')
+        selected_tab_start = navigation_style.index(
+            '#pane-tabs button[aria-selected="true"]', tab_start
+        )
+        tab_style = navigation_style[tab_start:selected_tab_start]
+        selected_tab_style = navigation_style[selected_tab_start:]
+        self.assertIn('background: transparent;', tab_style)
+        self.assertIn('border-bottom: 2px solid transparent;', tab_style)
+        self.assertIn('border-radius: 0;', tab_style)
+        self.assertIn('background: transparent;', selected_tab_style)
+        self.assertIn('border-bottom-color: var(--theme-accent);', selected_tab_style)
+        self.assertIn('color: inherit;', selected_tab_style)
+        self.assertNotIn('background: var(--theme-surface-1);', selected_tab_style)
+        self.assertNotIn("Herdr MesloLGS NF", navigation_style)
+        self.assertNotIn("--terminal-column-24", stylesheet)
 
     def test_desktop_panes_keep_xterm_focus_after_output(self) -> None:
         application = (STATIC_DIRECTORY / "app.js").read_text(encoding="utf-8")
@@ -145,6 +282,9 @@ class FrontendContractTests(unittest.TestCase):
         application = (STATIC_DIRECTORY / "app.js").read_text(encoding="utf-8")
         document = (STATIC_DIRECTORY / "index.html").read_text(encoding="utf-8")
         stylesheet = (STATIC_DIRECTORY / "style.css").read_text(encoding="utf-8")
+        mobile_input = (STATIC_DIRECTORY / "mobile-prediction.js").read_text(
+            encoding="utf-8"
+        )
 
         self.assertIn("if (mobileQuery.matches) return 'panes'", application)
         self.assertNotIn("Open Full mode", application)
@@ -239,7 +379,7 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("normalizeTerminalPasteText(text)", application)
         self.assertIn("kind: 'pane-paste'", application)
         self.assertIn("type: 'pane-paste'", application)
-        self.assertIn("event.inputType !== 'insertFromPaste'", application)
+        self.assertIn("event.inputType === 'insertFromPaste'", application)
         self.assertIn("Turn mouse input off to Paste", application)
         self.assertIn("sendClipboardImage(image, record)", application)
         self.assertIn("stream_id: operation.streamId", application)
@@ -251,13 +391,11 @@ class FrontendContractTests(unittest.TestCase):
         self.assertNotIn("cursorInput = document.createElement('input')", application)
         self.assertIn("function syncPaneKeyboardHelper(pane)", application)
         self.assertIn("function focusPaneKeyboard(pane)", application)
-        self.assertIn("function handleMobileTerminalKeyDown(event)", application)
-        self.assertIn("terminalDataForRepeatedMobileBackspace(pane.mobileBackspaceCount)", application)
-        self.assertIn("MOBILE_BACKSPACE_RESET_MS = 400", application)
-        self.assertIn("function handleMobileTerminalBeforeInput(event)", application)
-        self.assertIn("terminalDataForBeforeInput(event.inputType)", application)
-        self.assertIn("document.addEventListener('keydown', handleMobileTerminalKeyDown, true)", application)
-        self.assertIn("document.addEventListener('beforeinput', handleMobileTerminalBeforeInput, true)", application)
+        self.assertIn("function handleMobileTextInput(pane, event)", application)
+        self.assertIn("applyMobileTextValue(pane, helper.value, mobileHelperCaret(helper)", application)
+        self.assertIn("Do not also let xterm", application)
+        self.assertIn("MOBILE_BACKSPACE_RESET_MS", application)
+        self.assertIn("terminalDataForRepeatedMobileBackspace", application)
         self.assertIn("pane.terminal.buffer.active.cursorX", application)
         self.assertIn("pane.terminal.buffer.active.cursorY", application)
         self.assertIn("sendTerminalMouseClick(record, 0, touchPointerX, touchPointerY);", application)
@@ -308,7 +446,7 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("function requiresAuthentication(response)", application)
         self.assertIn("function beginAuthenticationReload()", application)
         self.assertIn("function reloadForAuthentication(response)", application)
-        self.assertIn("function recoverPaneWebSocket(backend)", application)
+        self.assertIn("function recoverWebSocket(backend, expectedMode)", application)
         self.assertIn("response.type === 'opaqueredirect'", application)
         self.assertIn("if (reloadForAuthentication(response))", application)
         self.assertIn("setStatus('Authentication expired', 'disconnected')", application)
@@ -316,7 +454,7 @@ class FrontendContractTests(unittest.TestCase):
         self.assertNotIn("reconnect.textContent = 'Reconnect terminal'", application)
         self.assertIn("button:focus-visible { background: var(--theme-surface-1); outline: none; }", stylesheet)
         self.assertIn("@media (hover: hover) and (pointer: fine)", stylesheet)
-        self.assertIn("button:hover { background: var(--theme-surface-1); outline: none; }", stylesheet)
+        self.assertIn("button:enabled:hover { background: var(--theme-surface-1); outline: none; }", stylesheet)
         self.assertNotIn("button:hover, button:focus-visible", stylesheet)
         self.assertIn("-webkit-touch-callout: none;", stylesheet)
         self.assertIn("touch-action: none;", stylesheet)
@@ -349,6 +487,20 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("type: 'panes.attach'", application)
         self.assertIn("navigationSnapshot?.layouts", application)
         self.assertIn("PANE_FRAME_MAGIC", application)
+        self.assertIn("PANE_FRAME_FLAG_DEFLATE", application)
+        self.assertIn("paneDeflateSupported", application)
+        self.assertIn("function decompressPaneFrame(frame)", application)
+        self.assertIn("new DecompressionStream('deflate')", application)
+        self.assertIn("const reader = stream.getReader()", application)
+        self.assertIn("if (size > MAX_PANE_FRAME_BYTES)", application)
+        self.assertIn("await reader.cancel('decompressed pane frame is too large')", application)
+        self.assertIn("frameChain: Promise.resolve()", application)
+        self.assertIn("compression: paneDeflateSupported ? 'deflate' : undefined", application)
+        self.assertIn("function acknowledgePaneFrame(frame, flow)", application)
+        self.assertIn("frame.width === pane.terminal.cols", application)
+        self.assertIn("frame.height === pane.terminal.rows", application)
+        self.assertIn("pane.awaitingFull && !frame.full", application)
+        self.assertIn("pane.awaitingFull = true;", application)
         self.assertIn("stream_id: pane.streamId", application)
         self.assertIn("Queued input was discarded because this pane is read-only", application)
         self.assertIn("pendingPaneActivation = streamId", application)
@@ -361,6 +513,77 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("function paneAcceptsInput(pane, announce = true)", application)
         self.assertIn("pane.terminal.options.disableStdin = true", application)
         self.assertIn("pane.mode === 'control' && !pane.closed", application)
+
+    def test_mobile_input_uses_only_a_bounded_browser_owned_suffix(self) -> None:
+        application = (STATIC_DIRECTORY / "app.js").read_text(encoding="utf-8")
+        prediction = (STATIC_DIRECTORY / "mobile-prediction.js").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("function handleMobileTextInput(pane, event)", application)
+        self.assertIn("pane.mobilePredictionText, text, pane.mobilePredictionCursor, cursor", application)
+        self.assertIn("MOBILE_PREDICTION_TEXT_LIMIT = 1024", prediction)
+        self.assertIn("terminalHasEditableText(pane.terminal, text)", application)
+        self.assertIn("event.inputType === 'insertReplacementText'", application)
+        self.assertIn("event.inputType !== 'insertReplacementText'", application)
+        self.assertIn("discard the first swipe insertion", application)
+        self.assertIn("if (!edit)", application)
+        self.assertIn("if (input)", application)
+        self.assertIn("Do not also let xterm", application)
+        self.assertIn("event.type === 'keydown' || event.type === 'keypress'", application)
+        self.assertIn("function resetMobilePaneInput(pane, blur = false)", application)
+        self.assertNotIn("mobilePredictionSynthetic", application)
+        self.assertIn("export function terminalTextInputDelta(", prediction)
+        self.assertNotIn("minimumMatch", prediction)
+        self.assertNotIn("._core", prediction)
+        self.assertNotIn("._core", application)
+
+    def test_flat_controls_keep_mobile_terminal_space(self) -> None:
+        stylesheet = (STATIC_DIRECTORY / "style.css").read_text(encoding="utf-8")
+        button = stylesheet.split("\nbutton {", 1)[1].split("}", 1)[0]
+        self.assertIn("border-radius: 0;", button)
+        header = stylesheet.split("#terminal-view > header {", 1)[1].split("}", 1)[0]
+        self.assertIn("font-size: .875rem;", header)
+        self.assertIn("height: 40px;", header)
+        for selector in ("#view-modes button {", "#back {", "#telemetry {"):
+            control = stylesheet.split(selector, 1)[1].split("}", 1)[0]
+            self.assertIn("height: 28px;", control)
+        mobile = stylesheet.split("#pane-mobile-bar button {", 1)[1].split("}", 1)[0]
+        self.assertIn("font-size: .75rem;", mobile)
+        self.assertIn("height: calc(var(--terminal-row-2) - 2px);", mobile)
+        telemetry = stylesheet.split("#telemetry {", 1)[1].split("}", 1)[0]
+        self.assertIn("background: transparent;", telemetry)
+        self.assertIn("border: 1px solid transparent;", telemetry)
+        self.assertIn('border-color: var(--theme-red);', stylesheet)
+        self.assertIn("button:disabled { cursor: default;", stylesheet)
+        self.assertIn('[aria-busy="true"] button:disabled { cursor: wait; }', stylesheet)
+        self.assertIn("border-radius: 1rem 1rem 0 0;", stylesheet)
+
+    def test_mobile_caret_moves_the_terminal_through_ordered_input(self) -> None:
+        application = (STATIC_DIRECTORY / "app.js").read_text(encoding="utf-8")
+        self.assertIn("'selectionchange', handleMobileCaretSelection, true", application)
+        self.assertIn("'select', handleMobileCaretSelection, true", application)
+        self.assertIn("function followMobileCaret(pane, beforeBlur = false)", application)
+        self.assertIn("followMobileCaret(pane, true)", application)
+        self.assertIn("pane.mobilePredictionInvalidated ? edit.inserted : edit.data", application)
+        self.assertIn("helper.value !== pane.mobilePredictionText", application)
+        self.assertIn("helper.selectionStart !== helper.selectionEnd", application)
+        self.assertIn("pane.mobilePredictionComposition || pane.mobileBackspaceSentinel", application)
+        self.assertIn("if (sendMobilePaneKeyboardData(pane, data)) pane.mobilePredictionCursor = cursor", application)
+        self.assertIn("pane.terminal.modes?.applicationCursorKeysMode", application)
+        self.assertNotIn("cursor-overlay", application)
+
+    def test_mobile_backspace_keeps_a_native_marker_without_a_repeat_timer(self) -> None:
+        application = (STATIC_DIRECTORY / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("MOBILE_BACKSPACE_SENTINEL = 'x'", application)
+        self.assertIn("document.execCommand('insertText'", application)
+        self.assertIn("mobileBackspaceSentinelInsertion", application)
+        self.assertIn("event.inputType !== 'deleteContentBackward'", application)
+        self.assertIn("terminalDataForBeforeInput(event.inputType)", application)
+        self.assertIn("terminalDataForRepeatedMobileBackspace", application)
+        self.assertIn("preserveMobileHelperForBackspace(pane)", application)
+        self.assertNotIn("startManagedMobileBackspaceRepeat", application)
 
     def test_xterm_contains_synchronized_output_render_fix(self) -> None:
         xterm = (STATIC_DIRECTORY / "vendor" / "xterm.js").read_text(

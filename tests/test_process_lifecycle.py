@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 from pathlib import Path
 import signal
@@ -8,13 +9,19 @@ from unittest.mock import patch
 
 from herdr_web.app import (
     Backend,
+    BrowserSession,
+    OUTPUT_ACK_WINDOW_BYTES,
+    OUTPUT_WEBSOCKET_CHUNK_BYTES,
+    read_pty,
     read_pty_chunk,
     remove_stale_staged_images,
     schedule_staged_image_removal,
     staged_image_cleanup_tasks,
     start_client,
     start_named_backend,
+    terminal as terminal_websocket,
     validate_session_name,
+    websocket_output_chunks,
     write_pty,
 )
 
@@ -40,6 +47,360 @@ class PtyClientTests(unittest.IsolatedAsyncioTestCase):
         output = await asyncio.wait_for(read_pty_chunk(client.master_fd), timeout=1)
 
         self.assertEqual(output, b"round trip")
+
+    def test_output_chunks_fit_the_acknowledgement_window(self) -> None:
+        payload = b"x" * (OUTPUT_WEBSOCKET_CHUNK_BYTES * 2 + 37)
+        chunks = list(websocket_output_chunks(payload))
+
+        self.assertEqual(b"".join(chunks), payload)
+        self.assertEqual(
+            [len(chunk) for chunk in chunks],
+            [OUTPUT_WEBSOCKET_CHUNK_BYTES, OUTPUT_WEBSOCKET_CHUNK_BYTES, 37],
+        )
+        self.assertEqual(OUTPUT_ACK_WINDOW_BYTES, OUTPUT_WEBSOCKET_CHUNK_BYTES)
+
+    async def test_http_output_queue_uses_acknowledgement_sized_chunks(self) -> None:
+        payload = b"x" * (OUTPUT_WEBSOCKET_CHUNK_BYTES * 2 + 37)
+
+        class FakeClient:
+            master_fd = 1
+
+        session = BrowserSession(client=FakeClient())
+        output = iter((payload, b""))
+
+        async def fake_read_pty_chunk(_fd: int) -> bytes:
+            return next(output)
+
+        with patch(
+            "herdr_web.app.read_pty_chunk", side_effect=fake_read_pty_chunk
+        ):
+            reader = asyncio.create_task(read_pty(session))
+            chunks = [
+                await asyncio.wait_for(session.output.get(), timeout=1)
+                for _ in range(3)
+            ]
+            await asyncio.wait_for(reader, timeout=1)
+
+        self.assertTrue(session.closed)
+        self.assertEqual(b"".join(chunks), payload)
+        self.assertTrue(
+            all(len(chunk) <= OUTPUT_WEBSOCKET_CHUNK_BYTES for chunk in chunks)
+        )
+
+    async def test_full_websocket_waits_for_each_output_chunk_ack(self) -> None:
+        payload = b"x" * (OUTPUT_WEBSOCKET_CHUNK_BYTES * 2 + 37)
+        backend = Backend("backend", "test", Path("/unused.sock"))
+
+        class FakeClient:
+            master_fd = 1
+
+            def __init__(self) -> None:
+                self.closed = False
+
+            async def close(self) -> None:
+                self.closed = True
+
+            def resize(self, _cols: int, _rows: int) -> None:
+                pass
+
+        class FakeWebSocket:
+            headers: dict[str, str] = {}
+
+            def __init__(self) -> None:
+                self.incoming: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+                self.sent_bytes: list[bytes] = []
+                self.sent_json: list[dict[str, object]] = []
+                self.accepted = False
+
+            async def accept(self) -> None:
+                self.accepted = True
+
+            async def receive_json(self) -> dict[str, object]:
+                return {
+                    "type": "resize",
+                    "cols": 80,
+                    "rows": 24,
+                    "output_ack": True,
+                }
+
+            async def receive(self) -> dict[str, object]:
+                return await self.incoming.get()
+
+            async def send_bytes(self, data: bytes) -> None:
+                self.sent_bytes.append(data)
+
+            async def send_json(self, data: dict[str, object]) -> None:
+                self.sent_json.append(data)
+
+            async def close(self, **_options: object) -> None:
+                pass
+
+        websocket = FakeWebSocket()
+        client = FakeClient()
+        output = iter((payload, b""))
+
+        async def fake_read_pty_chunk(_fd: int) -> bytes:
+            return next(output)
+
+        async def wait_for_chunks(count: int) -> None:
+            for _ in range(200):
+                if len(websocket.sent_bytes) >= count:
+                    return
+                await asyncio.sleep(0.005)
+            self.fail(f"timed out waiting for {count} output chunks")
+
+        with (
+            patch("herdr_web.app.discover_backends", return_value={backend.id: backend}),
+            patch("herdr_web.app.start_client", return_value=client),
+            patch("herdr_web.app.read_pty_chunk", side_effect=fake_read_pty_chunk),
+        ):
+            task = asyncio.create_task(terminal_websocket(websocket, backend.id))
+            await wait_for_chunks(1)
+            await asyncio.sleep(0.03)
+            self.assertEqual(len(websocket.sent_bytes), 1)
+            await websocket.incoming.put(
+                {
+                    "type": "websocket.receive",
+                    "text": json.dumps(
+                        {
+                            "type": "clipboard-image",
+                            "extension": "invalid",
+                            "size": 1,
+                        }
+                    ),
+                }
+            )
+
+            acknowledged = 0
+            for count in (2, 3):
+                acknowledged += len(websocket.sent_bytes[-1])
+                await websocket.incoming.put(
+                    {
+                        "type": "websocket.receive",
+                        "text": json.dumps(
+                            {"type": "output-ack", "bytes": acknowledged}
+                        ),
+                    }
+                )
+                await wait_for_chunks(count)
+
+            acknowledged += len(websocket.sent_bytes[-1])
+            await websocket.incoming.put(
+                {
+                    "type": "websocket.receive",
+                    "text": json.dumps(
+                        {"type": "output-ack", "bytes": acknowledged}
+                    ),
+                }
+            )
+            await asyncio.wait_for(task, timeout=2)
+
+        self.assertTrue(websocket.accepted)
+        self.assertTrue(client.closed)
+        self.assertTrue(
+            any(message.get("type") == "error" for message in websocket.sent_json)
+        )
+        self.assertEqual(b"".join(websocket.sent_bytes), payload)
+        self.assertEqual(
+            [len(chunk) for chunk in websocket.sent_bytes],
+            [OUTPUT_WEBSOCKET_CHUNK_BYTES, OUTPUT_WEBSOCKET_CHUNK_BYTES, 37],
+        )
+
+    async def test_full_websocket_parser_ack_timeout_releases_client(self) -> None:
+        payload = b"x" * (OUTPUT_WEBSOCKET_CHUNK_BYTES * 2)
+        backend = Backend("backend", "test", Path("/unused.sock"))
+
+        class FakeClient:
+            master_fd = 1
+
+            def __init__(self) -> None:
+                self.closed = False
+
+            async def close(self) -> None:
+                self.closed = True
+
+            def resize(self, _cols: int, _rows: int) -> None:
+                pass
+
+        class FakeWebSocket:
+            headers: dict[str, str] = {}
+
+            def __init__(self) -> None:
+                self.incoming: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+                self.sent_bytes: list[bytes] = []
+                self.sent_json: list[dict[str, object]] = []
+
+            async def accept(self) -> None:
+                pass
+
+            async def receive_json(self) -> dict[str, object]:
+                return {
+                    "type": "resize",
+                    "cols": 80,
+                    "rows": 24,
+                    "output_ack": True,
+                }
+
+            async def receive(self) -> dict[str, object]:
+                return await self.incoming.get()
+
+            async def send_bytes(self, data: bytes) -> None:
+                self.sent_bytes.append(data)
+
+            async def send_json(self, data: dict[str, object]) -> None:
+                self.sent_json.append(data)
+
+            async def close(self, **_options: object) -> None:
+                pass
+
+        websocket = FakeWebSocket()
+        client = FakeClient()
+        output = iter((payload, b""))
+
+        async def fake_read_pty_chunk(_fd: int) -> bytes:
+            return next(output)
+
+        with (
+            patch("herdr_web.app.discover_backends", return_value={backend.id: backend}),
+            patch("herdr_web.app.start_client", return_value=client),
+            patch("herdr_web.app.read_pty_chunk", side_effect=fake_read_pty_chunk),
+            patch("herdr_web.app.OUTPUT_ACK_TIMEOUT_SECONDS", 0.02),
+        ):
+            await asyncio.wait_for(
+                terminal_websocket(websocket, backend.id), timeout=2
+            )
+
+        self.assertTrue(client.closed)
+        self.assertEqual(len(websocket.sent_bytes), 1)
+        self.assertTrue(
+            any(
+                message.get("message") == "terminal parser acknowledgement timed out"
+                for message in websocket.sent_json
+            )
+        )
+
+    async def test_full_websocket_blocked_output_and_error_cleanup_client(self) -> None:
+        backend = Backend("backend", "test", Path("/unused.sock"))
+
+        class FakeClient:
+            master_fd = 1
+
+            def __init__(self) -> None:
+                self.closed = False
+
+            async def close(self) -> None:
+                self.closed = True
+
+            def resize(self, _cols: int, _rows: int) -> None:
+                pass
+
+        class BlockedWebSocket:
+            headers: dict[str, str] = {}
+
+            def __init__(self) -> None:
+                self.output_send_cancelled = asyncio.Event()
+                self.error_send_started = asyncio.Event()
+                self.error_send_cancelled = asyncio.Event()
+
+            async def accept(self) -> None:
+                pass
+
+            async def receive_json(self) -> dict[str, object]:
+                return {
+                    "type": "resize",
+                    "cols": 80,
+                    "rows": 24,
+                    "output_ack": True,
+                }
+
+            async def receive(self) -> dict[str, object]:
+                await asyncio.Event().wait()
+
+            async def send_bytes(self, _data: bytes) -> None:
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    self.output_send_cancelled.set()
+
+            async def send_json(self, data: dict[str, object]) -> None:
+                if data.get("type") == "attached":
+                    return
+                self.error_send_started.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    self.error_send_cancelled.set()
+
+            async def close(self, **_options: object) -> None:
+                pass
+
+        websocket = BlockedWebSocket()
+        client = FakeClient()
+        output = iter((b"blocked output", b""))
+
+        async def fake_read_pty_chunk(_fd: int) -> bytes:
+            return next(output)
+
+        with (
+            patch("herdr_web.app.discover_backends", return_value={backend.id: backend}),
+            patch("herdr_web.app.start_client", return_value=client),
+            patch("herdr_web.app.read_pty_chunk", side_effect=fake_read_pty_chunk),
+            patch("herdr_web.app.WEBSOCKET_SEND_TIMEOUT_SECONDS", 0.02),
+        ):
+            await asyncio.wait_for(terminal_websocket(websocket, backend.id), timeout=1)
+
+        self.assertTrue(websocket.output_send_cancelled.is_set())
+        self.assertTrue(websocket.error_send_started.is_set())
+        self.assertTrue(websocket.error_send_cancelled.is_set())
+        self.assertTrue(client.closed)
+
+    async def test_full_websocket_blocked_attached_message_closes_client(self) -> None:
+        backend = Backend("backend", "test", Path("/unused.sock"))
+
+        class FakeClient:
+            master_fd = 1
+
+            def __init__(self) -> None:
+                self.closed = False
+
+            async def close(self) -> None:
+                self.closed = True
+
+            def resize(self, _cols: int, _rows: int) -> None:
+                pass
+
+        class BlockedWebSocket:
+            headers: dict[str, str] = {}
+
+            def __init__(self) -> None:
+                self.attached_send_cancelled = asyncio.Event()
+
+            async def accept(self) -> None:
+                pass
+
+            async def receive_json(self) -> dict[str, object]:
+                return {"type": "resize", "cols": 80, "rows": 24}
+
+            async def send_json(self, _data: dict[str, object]) -> None:
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    self.attached_send_cancelled.set()
+
+            async def close(self, **_options: object) -> None:
+                pass
+
+        websocket = BlockedWebSocket()
+        client = FakeClient()
+        with (
+            patch("herdr_web.app.discover_backends", return_value={backend.id: backend}),
+            patch("herdr_web.app.start_client", return_value=client),
+            patch("herdr_web.app.WEBSOCKET_SEND_TIMEOUT_SECONDS", 0.02),
+        ):
+            await asyncio.wait_for(terminal_websocket(websocket, backend.id), timeout=1)
+
+        self.assertTrue(websocket.attached_send_cancelled.is_set())
+        self.assertTrue(client.closed)
 
     async def test_read_coalesces_a_short_output_burst(self) -> None:
         read_fd, write_fd = os.pipe()
