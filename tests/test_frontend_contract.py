@@ -16,6 +16,13 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("noteParsedOutput(flow, bytes.length)", application)
         self.assertIn("await queueTerminalOutput(base64ToBytes(message.data_base64))", application)
 
+    def test_transport_meter_does_not_repaint_an_unchanged_label(self) -> None:
+        application = (STATIC_DIRECTORY / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("const nextLabel = `${receivedFrames} FPS`", application)
+        self.assertIn("if (fps.textContent !== nextLabel) fps.textContent = nextLabel", application)
+        self.assertNotIn("fps.textContent = `${receivedFrames} FPS`", application)
+
     def test_mouse_motion_is_coalesced_without_delaying_keys(self) -> None:
         application = (STATIC_DIRECTORY / "app.js").read_text(encoding="utf-8")
 
@@ -55,6 +62,19 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("addon?.dispose()", application)
         self.assertTrue((vendor / "xterm-addon-webgl.js").is_file())
         self.assertTrue((vendor / "xterm-addon-webgl.LICENSE").is_file())
+
+    def test_full_disables_unused_xterm_cursor_blink_repaints(self) -> None:
+        application = (STATIC_DIRECTORY / "app.js").read_text(encoding="utf-8")
+        full_start = application.index("  function attachFull(backend)")
+        full_terminal = application.index("terminal = new Terminal({", full_start)
+        full_options = application[full_terminal:application.index("});", full_terminal)]
+        pane_start = application.index("  function createPaneTerminal(")
+        pane_terminal = application.index("const paneTerminal = new Terminal({", pane_start)
+        pane_options = application[pane_terminal:application.index("});", pane_terminal)]
+
+        self.assertIn("cursorBlink: false", full_options)
+        self.assertIn("cursorBlink: true", pane_options)
+        self.assertIn("instead of running its WebGL cursor-blink repaint timer while idle", full_options)
 
     def test_desktop_header_keeps_navigation_left_and_modes_right(self) -> None:
         document = (STATIC_DIRECTORY / "index.html").read_text(encoding="utf-8")
