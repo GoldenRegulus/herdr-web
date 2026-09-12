@@ -371,6 +371,10 @@ the resulting frame. The shell can reject movement or edits outside its input
 buffer. Paste, explicit terminal controls, and pane lifecycle changes rebuild
 the shadow from terminal cells.
 
+Visiting a tab or one of its panes in Panes focuses that Herdr tab through the
+public structured API. Herdr then marks a completed agent as seen and changes
+`done` to `idle`. Desktop and mobile use the same focus behavior.
+
 Selecting a pane or tab replaces only the web streams. It does not stop the
 terminal processes in Herdr. If another direct client controls a pane, Panes
 mode shows that pane through Herdr's read-only observer instead of taking

@@ -140,6 +140,7 @@ const { WebglAddon } = globalThis.WebglAddon;
   let navigationFingerprint;
   let navigationTimer;
   let navigationRequest;
+  let navigationFocusRequest;
   let openSheetName;
   let mobileSheetCloseTimer;
   let mobileSheetOpenFrame;
@@ -1058,12 +1059,16 @@ const { WebglAddon } = globalThis.WebglAddon;
     else mobileSheetCloseTimer = setTimeout(finish, MOBILE_SHEET_ANIMATION_MS);
   }
 
-  async function focusNavigationTarget(kind, targetId, button) {
+  async function requestNavigationFocus(kind, targetId) {
     if (!currentBackend) return;
-    button.disabled = true;
-    try {
+    const backend = currentBackend;
+    const previousFocus = navigationFocusRequest;
+    const operation = (async () => {
+      if (previousFocus) await previousFocus.catch(() => undefined);
+      if (navigationRequest) await navigationRequest;
+      if (currentBackend?.id !== backend.id) return;
       const response = await fetchWithTimeout(
-        backendApiUrl(currentBackend, 'focus'),
+        backendApiUrl(backend, 'focus'),
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1072,13 +1077,36 @@ const { WebglAddon } = globalThis.WebglAddon;
       );
       const result = await response.json();
       if (!response.ok) throw new Error(result.detail || `could not focus ${kind}`);
+      if (currentBackend?.id !== backend.id) return;
       navigationSnapshot = result;
       navigationFingerprint = JSON.stringify(result);
+      if (viewMode === 'panes') renderPaneNavigation();
+      renderMobileSheet();
+    })();
+    navigationFocusRequest = operation;
+    try {
+      await operation;
+    } finally {
+      if (navigationFocusRequest === operation) navigationFocusRequest = undefined;
+    }
+  }
+
+  async function focusNavigationTarget(kind, targetId, button) {
+    button.disabled = true;
+    try {
+      await requestNavigationFocus(kind, targetId);
       closeMobileSheet();
     } catch (error) {
       button.disabled = false;
       showBrowserToast(error.message);
     }
+  }
+
+  function markTabSeen(tabId) {
+    if (!tabId) return;
+    void requestNavigationFocus('tab', tabId).catch((error) => {
+      showBrowserToast(error.message);
+    });
   }
 
   function renderMobileSheet() {
@@ -1166,6 +1194,7 @@ const { WebglAddon } = globalThis.WebglAddon;
 
   async function refreshNavigation() {
     if (!currentBackend || (viewMode !== 'panes' && !mobileQuery.matches) || document.hidden) return;
+    if (navigationFocusRequest) return navigationFocusRequest;
     if (navigationRequest) return navigationRequest;
     const backend = currentBackend;
     navigationRequest = fetchWithTimeout(
@@ -3717,6 +3746,7 @@ const { WebglAddon } = globalThis.WebglAddon;
     closeMobileSheet(false);
     updatePaneLocation();
     renderPaneNavigation();
+    markTabSeen(pane.tab_id);
     if (tabChanged || mobileQuery.matches) rebuildPaneView();
     else {
       const record = [...paneTerminals.values()].find((candidate) => candidate.paneId === paneId);
@@ -3730,6 +3760,7 @@ const { WebglAddon } = globalThis.WebglAddon;
   function selectPaneTab(tabId) {
     const tab = navigationMaps().tabById.get(tabId);
     if (!tab || tab.tab_id === selectedTab) {
+      if (tab) markTabSeen(tab.tab_id);
       closeMobileSheet();
       return;
     }
@@ -3741,6 +3772,7 @@ const { WebglAddon } = globalThis.WebglAddon;
     closeMobileSheet(false);
     updatePaneLocation();
     renderPaneNavigation();
+    markTabSeen(tab.tab_id);
     rebuildPaneView();
   }
 
@@ -3754,6 +3786,7 @@ const { WebglAddon } = globalThis.WebglAddon;
     if (tabId === selectedTab) {
       selectedWorkspace = workspaceId;
       renderPaneNavigation();
+      markTabSeen(tabId);
       closeMobileSheet();
       return;
     }
