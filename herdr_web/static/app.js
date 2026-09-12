@@ -129,6 +129,10 @@ const { WebglAddon } = globalThis.WebglAddon;
   const reducedMotionQuery = matchMedia('(prefers-reduced-motion: reduce)');
   const iosKeyboard = /iPad|iPhone|iPod/.test(navigator.userAgent)
     || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  // A touch-capable device owns the pane gesture in every layout, not only
+  // the mobile layout. The stylesheet reads this marker to set touch-action.
+  const touchInput = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+  document.documentElement.dataset.touchInput = String(touchInput);
   let terminalTheme = {
     background: '#181825',
     foreground: '#cdd6f4',
@@ -2982,7 +2986,7 @@ const { WebglAddon } = globalThis.WebglAddon;
     };
 
     host.addEventListener('touchstart', (event) => {
-      if (!mobileQuery.matches || event.touches.length !== 1) return;
+      if (event.touches.length !== 1) return;
       const touch = event.touches[0];
       if (!mobileMouseMode) {
         const retainKeyboard = document.activeElement === paneKeyboardHelper(record);

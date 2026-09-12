@@ -264,10 +264,10 @@ accent edge, and the active row has a stronger edge. Tab and pane rows are more
 compact than space rows. The sheet stays open until you select a tab or pane leaf. Terminal
 size controls follow the tree, and **Sessions** is in the sheet header. The
 sheet slides in and out unless reduced motion is active. Opening it does not
-resize the terminal. Swipe down to
-read older output and swipe up to move toward newer output. A release keeps the measured touch
-velocity and then decelerates. Reduced-motion settings disable the inertial
-continuation.
+resize the terminal. Swipe scrolling works on any touch-capable device. Swipe
+down to read older output and swipe up to move toward newer output. A release
+keeps the measured touch velocity and then decelerates. Reduced-motion settings
+disable the inertial continuation.
 
 The compact two-row mobile control bar has persistent **Ctrl**, **Alt**, and
 **Shift** toggles, **Esc**, **Tab**, a keyboard lock, and Left, Up, Down, and
