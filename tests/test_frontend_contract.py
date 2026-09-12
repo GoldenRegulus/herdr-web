@@ -168,9 +168,15 @@ class FrontendContractTests(unittest.TestCase):
             '.pane-sidebar-item[data-status="error"] { border-right-color: var(--theme-red); }',
             navigation_style,
         )
-        self.assertNotIn('.pane-sidebar-item[data-status="idle"]', navigation_style)
+        self.assertIn('.pane-sidebar-item[data-status="idle"] { border-right-color: var(--theme-overlay-1); }', navigation_style)
         self.assertNotIn('--theme-mauve', stylesheet)
-        self.assertNotIn('.agent-status[data-status=', stylesheet)
+        self.assertIn('.sheet-item[data-status="idle"] { border-right-color: var(--theme-overlay-1); }', stylesheet)
+        self.assertNotIn('agent-status', stylesheet)
+        self.assertNotIn('agentStatus(', application)
+        self.assertIn("status.textContent = `Status: ${statusValue}`", application)
+        self.assertIn("status.className = 'visually-hidden';", application)
+        self.assertNotIn("badge.textContent = record.agent_status", application)
+        self.assertNotIn("agentStatusValue", application)
         self.assertGreaterEqual(
             stylesheet.count('border-right: 3px solid transparent;'), 2
         )
@@ -536,7 +542,7 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("pendingPaneActivation = streamId", application)
         self.assertIn("function refreshPaneTitles()", application)
         self.assertIn("refreshPaneTitles();", application)
-        self.assertIn("record?.agent_status", application)
+        self.assertIn("// Agent state is carried by the navigation bars and the sheet square.", application)
         self.assertIn("function paneStructureFingerprint(snapshot, tabId)", application)
         self.assertIn("function schedulePaneStructureRebuild()", application)
         self.assertIn("inputBuffer.length || inputOperations.length || pendingMouseMotion", application)

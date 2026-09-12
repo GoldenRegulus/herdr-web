@@ -281,6 +281,7 @@ header {
 .pane-sidebar-item[data-status="done"] { border-right-color: var(--theme-green); }
 .pane-sidebar-item[data-status="blocked"] { border-right-color: var(--theme-yellow); }
 .pane-sidebar-item[data-status="error"] { border-right-color: var(--theme-red); }
+.pane-sidebar-item[data-status="idle"] { border-right-color: var(--theme-overlay-1); }
 .pane-sidebar-item[aria-current="true"] {
   background: var(--theme-surface-0);
   box-shadow: inset 3px 0 var(--theme-accent);
@@ -839,20 +840,13 @@ header {
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .agent-status {
-    color: var(--theme-subtext);
-    font-size: .68rem;
-    grid-column: 2;
-    grid-row: 1;
-    padding: .15rem .4rem;
-  }
-  .sheet-item-has-detail .agent-status { grid-row: 1 / span 2; }
   .sheet-item[data-status="working"] {
     animation: working-status-edge-pulse 1.4s ease-in-out infinite;
   }
   .sheet-item[data-status="done"] { border-right-color: var(--theme-green); }
   .sheet-item[data-status="blocked"] { border-right-color: var(--theme-yellow); }
   .sheet-item[data-status="error"] { border-right-color: var(--theme-red); }
+  .sheet-item[data-status="idle"] { border-right-color: var(--theme-overlay-1); }
   .sheet-tree,
   .sheet-tree ul {
     list-style: none;
