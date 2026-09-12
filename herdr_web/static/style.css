@@ -431,6 +431,16 @@ header {
   overflow: hidden;
   position: relative;
 }
+/* A touch-capable device owns the pane gesture, in the mobile layout and
+   outside it. Mouse and pen input keep normal selection. */
+:root[data-touch-input="true"] .pane-terminal {
+  -webkit-touch-callout: none;
+  touch-action: none;
+}
+:root[data-touch-input="true"] #pane-grid[data-mouse-reporting="off"] .pane-terminal {
+  -webkit-touch-callout: default;
+  touch-action: manipulation;
+}
 .pane-snapshot-view {
   -webkit-touch-callout: default;
   background: var(--theme-background);
@@ -629,14 +639,6 @@ header {
     width: var(--terminal-column-2);
   }
   .mobile-bar-icon[hidden] { display: none; }
-  .pane-terminal {
-    -webkit-touch-callout: none;
-    touch-action: none;
-  }
-  #pane-grid[data-mouse-reporting="off"] .pane-terminal {
-    -webkit-touch-callout: default;
-    touch-action: manipulation;
-  }
   #pane-grid .pane-terminal .xterm,
   #pane-grid .pane-terminal .xterm-rows,
   #pane-grid .pane-terminal .xterm-rows * {

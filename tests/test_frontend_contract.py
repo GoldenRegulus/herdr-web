@@ -313,6 +313,10 @@ class FrontendContractTests(unittest.TestCase):
         )
 
         self.assertIn("if (mobileQuery.matches) return 'panes'", application)
+        self.assertIn("const touchInput = 'ontouchstart' in window || navigator.maxTouchPoints > 0;", application)
+        self.assertIn("document.documentElement.dataset.touchInput", application)
+        self.assertNotIn("if (!mobileQuery.matches || event.touches.length !== 1) return", application)
+        self.assertIn(':root[data-touch-input="true"] .pane-terminal', stylesheet)
         self.assertNotIn("Open Full mode", application)
         self.assertIn("addEventListener('touchmove'", application)
         self.assertIn("touchScrollDistance > 0 ? 'up' : 'down'", application)
