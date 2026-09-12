@@ -346,8 +346,10 @@ const { WebglAddon } = globalThis.WebglAddon;
 
   function startTransportRateMeter() {
     window.setInterval(() => {
-      // Count terminal update messages, not browser canvas repaints.
-      fps.textContent = `${receivedFrames} FPS`;
+      // Count terminal update messages, not browser canvas repaints. Avoid
+      // replacing an unchanged text node because that repaints the idle page.
+      const nextLabel = `${receivedFrames} FPS`;
+      if (fps.textContent !== nextLabel) fps.textContent = nextLabel;
       receivedFrames = 0;
     }, 1000);
   }
@@ -4150,7 +4152,9 @@ const { WebglAddon } = globalThis.WebglAddon;
     terminalHost.replaceChildren();
 
     terminal = new Terminal({
-      cursorBlink: true,
+      // Herdr output drives Full's cursor position. Keep xterm's cursor steady
+      // instead of running its WebGL cursor-blink repaint timer while idle.
+      cursorBlink: false,
       customGlyphs: true,
       fontFamily: terminalFontFamily,
       fontSize: DEFAULT_TERMINAL_FONT_SIZE,

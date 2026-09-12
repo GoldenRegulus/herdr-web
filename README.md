@@ -168,7 +168,8 @@ coalesces each output burst for at most 2 ms and up to 256 KiB, then sends it as
 ordered 8 KiB WebSocket messages. Full mode permits only one such message in
 its parser-acknowledgement window. Its HTTP fallback also reads one 8 KiB chunk
 at a time and waits for xterm to parse that chunk before the next long poll. It
-does not drop raw ANSI bytes.
+does not drop raw ANSI bytes. Full keeps xterm's cursor visible but steady, so
+an idle cursor does not schedule WebGL blink repaints.
 
 The browser always uses xterm.js's supported scheduled write queue. It
 acknowledges output only after xterm.js parses it. Each Panes WebSocket has an
