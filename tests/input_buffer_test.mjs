@@ -3,10 +3,8 @@ import {
   InputByteBuffer,
   isDisposableMouseMotion,
   normalizeTerminalPasteText,
-  terminalDataForBeforeInput,
   terminalDataForModifiedEnter,
   terminalDataForNavigationKey,
-  terminalDataForRepeatedMobileBackspace,
 } from '../herdr_web/static/input-buffer.js';
 
 const encoder = new TextEncoder();
@@ -106,15 +104,6 @@ for (const [key, plain, modified] of navigationKeys) {
 }
 assert.equal(terminalDataForNavigationKey('page-up', { control: true }), '\x1b[5;5~');
 assert.equal(terminalDataForNavigationKey('unknown'), undefined);
-
-assert.equal(terminalDataForBeforeInput('deleteContentBackward'), '\x7f');
-assert.equal(terminalDataForBeforeInput('deleteWordBackward'), '\x1b\x7f');
-assert.equal(terminalDataForBeforeInput('deleteSoftLineBackward'), undefined);
-assert.equal(terminalDataForBeforeInput(''), undefined);
-assert.equal(terminalDataForRepeatedMobileBackspace(1), undefined);
-assert.equal(terminalDataForRepeatedMobileBackspace(22), undefined);
-assert.equal(terminalDataForRepeatedMobileBackspace(23), '\x1b\x7f');
-assert.equal(terminalDataForRepeatedMobileBackspace(100), '\x1b\x7f');
 
 assert.equal(normalizeTerminalPasteText('one\r\ntwo\rthree\nfour'), 'one\ntwo\nthree\nfour');
 assert.equal(normalizeTerminalPasteText('single line'), 'single line');

@@ -394,8 +394,8 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("function handleMobileTextInput(pane, event)", application)
         self.assertIn("applyMobileTextValue(pane, helper.value, mobileHelperCaret(helper)", application)
         self.assertIn("Do not also let xterm", application)
-        self.assertIn("MOBILE_BACKSPACE_RESET_MS", application)
-        self.assertIn("terminalDataForRepeatedMobileBackspace", application)
+        self.assertIn("The native textarea owns Backspace and its repeat", application)
+        self.assertNotIn("MOBILE_BACKSPACE_RESET_MS", application)
         self.assertIn("pane.terminal.buffer.active.cursorX", application)
         self.assertIn("pane.terminal.buffer.active.cursorY", application)
         self.assertIn("sendTerminalMouseClick(record, 0, touchPointerX, touchPointerY);", application)
@@ -514,7 +514,7 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("pane.terminal.options.disableStdin = true", application)
         self.assertIn("pane.mode === 'control' && !pane.closed", application)
 
-    def test_mobile_input_uses_only_a_bounded_browser_owned_suffix(self) -> None:
+    def test_mobile_input_shadows_the_visible_line_and_leaves_editability_to_the_shell(self) -> None:
         application = (STATIC_DIRECTORY / "app.js").read_text(encoding="utf-8")
         prediction = (STATIC_DIRECTORY / "mobile-prediction.js").read_text(
             encoding="utf-8"
@@ -522,11 +522,20 @@ class FrontendContractTests(unittest.TestCase):
 
         self.assertIn("function handleMobileTextInput(pane, event)", application)
         self.assertIn("pane.mobilePredictionText, text, pane.mobilePredictionCursor, cursor", application)
+        self.assertIn("mobilePredictionPrefix: ''", application)
+        self.assertIn("function replaceMobilePredictionFromTerminal(pane, helper)", application)
+        self.assertIn("terminalTextAtCursor(pane.terminal)", application)
+        self.assertIn("The shell decides whether an edit is valid", application)
+        self.assertIn("Keep the complete known input-session shadow", application)
+        self.assertIn("mobilePredictionPending", application)
+        self.assertIn("mobileTextWithoutRedundantSeparator(", application)
+        self.assertIn("terminalPredictionPrefix(", application)
         self.assertIn("MOBILE_PREDICTION_TEXT_LIMIT = 1024", prediction)
-        self.assertIn("terminalHasEditableText(pane.terminal, text)", application)
+        self.assertIn("export function terminalTextAtCursor(", prediction)
+        self.assertIn("export function terminalPredictionPrefix(", prediction)
         self.assertIn("event.inputType === 'insertReplacementText'", application)
         self.assertIn("event.inputType !== 'insertReplacementText'", application)
-        self.assertIn("discard the first swipe insertion", application)
+        self.assertIn("Let Safari mutate the helper", application)
         self.assertIn("if (!edit)", application)
         self.assertIn("if (input)", application)
         self.assertIn("Do not also let xterm", application)
@@ -565,24 +574,29 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("'select', handleMobileCaretSelection, true", application)
         self.assertIn("function followMobileCaret(pane, beforeBlur = false)", application)
         self.assertIn("followMobileCaret(pane, true)", application)
-        self.assertIn("pane.mobilePredictionInvalidated ? edit.inserted : edit.data", application)
-        self.assertIn("helper.value !== pane.mobilePredictionText", application)
+        self.assertNotIn("mobilePredictionInvalidated", application)
+        self.assertIn("helper.value !== mobilePredictionHelperValue(pane)", application)
         self.assertIn("helper.selectionStart !== helper.selectionEnd", application)
         self.assertIn("pane.mobilePredictionComposition || pane.mobileBackspaceSentinel", application)
         self.assertIn("if (sendMobilePaneKeyboardData(pane, data)) pane.mobilePredictionCursor = cursor", application)
         self.assertIn("pane.terminal.modes?.applicationCursorKeysMode", application)
         self.assertNotIn("cursor-overlay", application)
 
-    def test_mobile_backspace_keeps_a_native_marker_without_a_repeat_timer(self) -> None:
+    def test_mobile_backspace_uses_native_text_edits_with_an_empty_helper_fallback(self) -> None:
         application = (STATIC_DIRECTORY / "app.js").read_text(encoding="utf-8")
 
-        self.assertIn("MOBILE_BACKSPACE_SENTINEL = 'x'", application)
+        self.assertIn("MOBILE_BACKSPACE_SENTINEL = ' '", application)
         self.assertIn("document.execCommand('insertText'", application)
         self.assertIn("mobileBackspaceSentinelInsertion", application)
         self.assertIn("event.inputType !== 'deleteContentBackward'", application)
-        self.assertIn("terminalDataForBeforeInput(event.inputType)", application)
-        self.assertIn("terminalDataForRepeatedMobileBackspace", application)
-        self.assertIn("preserveMobileHelperForBackspace(pane)", application)
+        self.assertIn("The native textarea owns Backspace and its repeat", application)
+        self.assertIn("pane.mobilePredictionConfirmed || pane.mobilePredictionPending", application)
+        self.assertIn("Let Safari mutate the helper", application)
+        self.assertNotIn("MOBILE_EDIT_RECONCILE_MS", application)
+        self.assertNotIn("scheduleMobilePredictionReconciliation", application)
+        self.assertNotIn("terminalDataForRepeatedMobileBackspace", application)
+        self.assertNotIn("preserveMobileHelperForBackspace", application)
+        self.assertNotIn("mobileBackspaceBaselineText", application)
         self.assertNotIn("startManagedMobileBackspaceRepeat", application)
 
     def test_xterm_contains_synchronized_output_render_fix(self) -> None:

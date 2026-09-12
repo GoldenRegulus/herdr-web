@@ -2,16 +2,15 @@ import {
   InputByteBuffer,
   isDisposableMouseMotion,
   normalizeTerminalPasteText,
-  terminalDataForBeforeInput,
   terminalDataForModifiedEnter,
   terminalDataForNavigationKey,
-  terminalDataForRepeatedMobileBackspace,
 } from './input-buffer.js';
 import {
   MOBILE_PREDICTION_TEXT_LIMIT,
+  mobileTextWithoutRedundantSeparator,
   terminalCaretInput,
-  terminalHasEditableText,
-  terminalPredictionReplacement,
+  terminalPredictionPrefix,
+  terminalTextAtCursor,
   terminalTextInputDelta,
 } from './mobile-prediction.js';
 import './vendor/xterm.js';
@@ -100,9 +99,10 @@ const { WebglAddon } = globalThis.WebglAddon;
   const MOBILE_LONG_PRESS_MS = 500;
   const MOBILE_LONG_PRESS_MOVE_PX = 10;
   const MOBILE_NATIVE_MENU_CLICK_SUPPRESSION_MS = 750;
-  const MOBILE_BACKSPACE_RESET_MS = 400;
   const MOBILE_BACKSPACE_BEFORE_INPUT_SUPPRESSION_MS = 200;
-  const MOBILE_BACKSPACE_SENTINEL = 'x';
+  // A space initializes native Backspace state without becoming a word.
+  // A word character would show in the iOS prediction bar.
+  const MOBILE_BACKSPACE_SENTINEL = ' ';
   const MOBILE_MOUSE_DRAG_HOLD_MS = 180;
   const MOBILE_SCROLL_MAX_VELOCITY = 2.2;
   const MOBILE_SCROLL_DECAY_MS = 240;
@@ -1816,7 +1816,7 @@ const { WebglAddon } = globalThis.WebglAddon;
   function setMobileKeyboardLocked(locked, announce = true) {
     mobileKeyboardLocked = locked;
     if (locked) {
-      for (const pane of paneTerminals.values()) resetMobileBackspaceAcceleration(pane);
+      for (const pane of paneTerminals.values()) pane.suppressDeletionBeforeInputUntil = 0;
     }
     renderMobileKeyboardLock();
     if (announce) {
@@ -1840,13 +1840,12 @@ const { WebglAddon } = globalThis.WebglAddon;
     };
   }
 
-  // Mobile input has one owner for each event type:
-  // - native iOS text and replacement input: this application;
-  // - native caret movement and composition inside owned text: this application;
-  // - other composition and explicit terminal keys: xterm;
-  // - Backspace: the keydown path when present, with beforeinput as the
-  //   keydown-free fallback; only native repeat events drive acceleration.
-  // The native marker initializes WebKit repeat state. It is never terminal data.
+  // The native iOS helper owns text, replacement, composition, caret, and
+  // deletion edits for the complete visible input line. This application sends
+  // each proposed line delta once. The shell decides whether an edit is valid,
+  // and returned terminal cells replace a rejected proposal. xterm owns
+  // explicit terminal controls. The native marker is only an empty-helper
+  // Backspace fallback. It is never terminal data.
   function paneKeyboardHelper(pane) {
     return pane?.terminal.textarea;
   }
@@ -1925,71 +1924,102 @@ const { WebglAddon } = globalThis.WebglAddon;
     else helper.removeAttribute('enterkeyhint');
   }
 
+  function mobilePredictionHelperValue(pane) {
+    return `${pane?.mobilePredictionPrefix || ''}${pane?.mobilePredictionText || ''}`;
+  }
+
+  function restoreMobilePredictionHelper(pane) {
+    const helper = paneKeyboardHelper(pane);
+    if (!helper) return;
+    const prefixLength = (pane.mobilePredictionPrefix || '').length;
+    const cursor = prefixLength + pane.mobilePredictionCursor;
+    helper.value = mobilePredictionHelperValue(pane);
+    helper.setSelectionRange(cursor, cursor);
+  }
+
   function clearMobilePredictionState(pane, clearHelper = false) {
     if (!pane) return;
+    pane.mobilePredictionPending = false;
+    pane.mobilePredictionPrefix = '';
     pane.mobilePredictionText = '';
     pane.mobilePredictionCursor = 0;
     pane.mobilePredictionConfirmed = false;
-    pane.mobilePredictionInvalidated = false;
     pane.mobilePredictionComposition = undefined;
     const helper = paneKeyboardHelper(pane);
     setMobilePredictionAttributes(helper, false);
     if (clearHelper) {
-      pane.mobileBackspacePreservedHelper = false;
       resetMobileBackspaceSentinelState(pane);
       if (helper) helper.value = '';
     }
   }
 
-  function preserveMobileHelperForBackspace(pane) {
-    if (!pane) return;
-    pane.mobilePredictionText = '';
-    pane.mobilePredictionCursor = 0;
-    pane.mobilePredictionConfirmed = false;
-    pane.mobilePredictionInvalidated = false;
-    pane.mobilePredictionComposition = undefined;
-    const helper = paneKeyboardHelper(pane);
-    if (helper && !helper.value && pane.mobileBackspaceSentinel) {
-      helper.value = MOBILE_BACKSPACE_SENTINEL;
-      helper.setSelectionRange(helper.value.length, helper.value.length);
-    }
-    pane.mobileBackspacePreservedHelper = Boolean(helper?.value);
-    setMobilePredictionAttributes(helper, false);
-  }
-
-  function clearPreservedMobileBackspaceHelper(pane) {
-    if (!pane?.mobileBackspacePreservedHelper) return;
-    pane.mobileBackspacePreservedHelper = false;
-    resetMobileBackspaceSentinelState(pane);
-    const helper = paneKeyboardHelper(pane);
-    if (helper) helper.value = '';
+  function replaceMobilePredictionFromTerminal(pane, helper) {
+    pane.mobilePredictionPending = false;
+    const shadow = terminalTextAtCursor(pane.terminal);
+    pane.mobilePredictionPrefix = '';
+    pane.mobilePredictionText = shadow.text;
+    pane.mobilePredictionCursor = shadow.cursor;
+    pane.mobilePredictionConfirmed = true;
+    setMobilePredictionAttributes(helper, true);
+    if (helper && !pane.mobileBackspaceSentinel) restoreMobilePredictionHelper(pane);
   }
 
   function syncMobilePredictionFromTerminal(pane) {
-    const text = pane?.mobilePredictionText;
-    if (!text || pane.mobilePredictionComposition) return;
-    // Keep the native baseline to suppress duplicate input after output changes.
-    // Once confirmed text disappears, that baseline cannot authorize cursor
-    // movement or deletion. A pending, not-yet-confirmed edit is not a mismatch.
-    const confirmed = terminalHasEditableText(pane.terminal, text);
-    if (pane.mobilePredictionConfirmed && !confirmed) pane.mobilePredictionInvalidated = true;
-    pane.mobilePredictionConfirmed = !pane.mobilePredictionInvalidated && confirmed;
+    if (!pane || pane.mobilePredictionComposition) return;
+    const oldPrefix = pane.mobilePredictionPrefix || '';
+    const oldValue = mobilePredictionHelperValue(pane);
+    const helper = paneKeyboardHelper(pane);
+    if (!oldValue) {
+      if (pane.mobilePredictionPending) return;
+      replaceMobilePredictionFromTerminal(pane, helper);
+      return;
+    }
+    const selectionStart = helper?.selectionStart;
+    const selectionEnd = helper?.selectionEnd;
+    const selectionDirection = helper?.selectionDirection;
+    const prefix = terminalPredictionPrefix(
+      pane.terminal, pane.mobilePredictionText, pane.mobilePredictionCursor, oldPrefix,
+    );
+    if (prefix === undefined) {
+      // Keep the complete known input-session shadow across partial echoes and
+      // physical line wraps. A terminal control ends that session explicitly.
+      if (pane.mobilePredictionPending) return;
+      replaceMobilePredictionFromTerminal(pane, helper);
+      return;
+    }
+    pane.mobilePredictionPending = false;
+    pane.mobilePredictionConfirmed = true;
+    pane.mobilePredictionPrefix = prefix;
+    setMobilePredictionAttributes(helper, true);
+    if (
+      !helper || pane.mobileBackspaceSentinel || helper.value !== oldValue
+      || oldPrefix === prefix
+    ) return;
+    const relativeStart = Math.max(0, selectionStart - oldPrefix.length);
+    const relativeEnd = Math.max(0, selectionEnd - oldPrefix.length);
+    helper.value = mobilePredictionHelperValue(pane);
+    helper.setSelectionRange(
+      prefix.length + relativeStart,
+      prefix.length + relativeEnd,
+      selectionDirection,
+    );
   }
 
   function prepareMobilePredictionFocus(pane) {
     const helper = paneKeyboardHelper(pane);
     if (!helper || !iosKeyboard || !mobileQuery.matches) return;
     syncMobilePredictionFromTerminal(pane);
-    setMobilePredictionAttributes(helper, pane.mobilePredictionConfirmed);
+    setMobilePredictionAttributes(
+      helper, pane.mobilePredictionConfirmed || pane.mobilePredictionPending,
+    );
     if (
-      pane.mobilePredictionConfirmed
-      && pane.mobilePredictionText
+      (pane.mobilePredictionConfirmed || pane.mobilePredictionPending)
+      && mobilePredictionHelperValue(pane)
       && !pane.mobilePredictionComposition
     ) {
       resetMobileBackspaceSentinelState(pane);
-      if (helper.value !== pane.mobilePredictionText) {
-        helper.value = pane.mobilePredictionText;
-        helper.setSelectionRange(pane.mobilePredictionCursor, pane.mobilePredictionCursor);
+      if (helper.value !== mobilePredictionHelperValue(pane)) {
+        restoreMobilePredictionHelper(pane);
       }
     } else {
       ensureMobileBackspaceSentinel(pane);
@@ -2002,29 +2032,24 @@ const { WebglAddon } = globalThis.WebglAddon;
     // Safari may queue selectionchange behind blur. Send that final movement
     // before xterm clears the helper, then retain the last sent caret position.
     followMobileCaret(pane, true);
-    if (pane.mobileBackspacePreservedHelper) {
-      clearPreservedMobileBackspaceHelper(pane);
-      return;
-    }
     if (pane.mobileBackspaceSentinel) {
       clearMobileBackspaceSentinel(pane);
       return;
     }
-    if (!helper.value) return;
-    if (helper.value.length > MOBILE_PREDICTION_TEXT_LIMIT) {
+    if (helper.value !== mobilePredictionHelperValue(pane)) {
       clearMobilePredictionState(pane);
       return;
     }
-    const confirmed = !pane.mobilePredictionInvalidated
-      && helper.value === pane.mobilePredictionText
-      && terminalHasEditableText(pane.terminal, helper.value);
-    if (!confirmed) {
-      // xterm clears the helper after this blur listener. Do not retain an
-      // unconfirmed baseline that cannot be restored on the next focus.
+    const prefix = terminalPredictionPrefix(
+      pane.terminal, pane.mobilePredictionText, pane.mobilePredictionCursor,
+      pane.mobilePredictionPrefix || '',
+    );
+    if (prefix === undefined) {
+      if (pane.mobilePredictionPending) return;
       clearMobilePredictionState(pane);
       return;
     }
-    pane.mobilePredictionText = helper.value;
+    pane.mobilePredictionPrefix = prefix;
     pane.mobilePredictionConfirmed = true;
   }
 
@@ -2039,10 +2064,12 @@ const { WebglAddon } = globalThis.WebglAddon;
       || !helper || (!beforeBlur && document.activeElement !== helper)
       || !paneAcceptsInput(pane, false) || pane.snapshot
       || pane.mobilePredictionComposition || pane.mobileBackspaceSentinel
-      || pane.mobileBackspacePreservedHelper || !pane.mobilePredictionConfirmed
-      || helper.value !== pane.mobilePredictionText
+      || (!pane.mobilePredictionConfirmed && !pane.mobilePredictionPending)
+      || helper.value !== mobilePredictionHelperValue(pane)
       || helper.selectionStart !== helper.selectionEnd) return;
-    const cursor = helper.selectionStart;
+    const prefixLength = (pane.mobilePredictionPrefix || '').length;
+    if (helper.selectionStart < prefixLength) return;
+    const cursor = helper.selectionStart - prefixLength;
     if (cursor === pane.mobilePredictionCursor) return;
     const data = terminalCaretInput(
       pane.mobilePredictionText, pane.mobilePredictionCursor, cursor,
@@ -2057,19 +2084,46 @@ const { WebglAddon } = globalThis.WebglAddon;
     if (pane) followMobileCaret(pane);
   }
 
-  function applyMobileTextValue(pane, text, cursor, useModifiers = false) {
+  function normalizeMobileHelperText(pane, helperValue, helperCursor) {
+    const prefix = pane.mobilePredictionPrefix || '';
+    if (!helperValue.startsWith(prefix)) return { helperValue, helperCursor };
+    const normalized = mobileTextWithoutRedundantSeparator(
+      pane.mobilePredictionText,
+      helperValue.slice(prefix.length),
+      helperCursor - prefix.length,
+      prefix,
+    );
+    if (!normalized) return { helperValue, helperCursor };
+    return {
+      helperValue: prefix + normalized.text,
+      helperCursor: prefix.length + normalized.cursor,
+    };
+  }
+
+  function applyMobileTextValue(pane, helperValue, helperCursor, useModifiers = false) {
+    const prefix = pane.mobilePredictionPrefix || '';
+    if (!helperValue.startsWith(prefix) || helperCursor < prefix.length) {
+      restoreMobilePredictionHelper(pane);
+      return false;
+    }
+    const text = helperValue.slice(prefix.length);
+    const cursor = helperCursor - prefix.length;
     const edit = terminalTextInputDelta(
       pane.mobilePredictionText, text, pane.mobilePredictionCursor, cursor,
       pane.terminal.modes?.applicationCursorKeysMode,
     );
-    if (!edit) return false;
-    // After unrelated terminal output, retain the native baseline but send only
-    // newly inserted text. Never move or delete against the invalidated range.
-    const input = pane.mobilePredictionInvalidated ? edit.inserted : edit.data;
+    if (!edit) {
+      restoreMobilePredictionHelper(pane);
+      return false;
+    }
+    const input = edit.data;
     if (input) {
       const data = useModifiers && input === edit.inserted
         ? applyMobileModifiers(input) : input;
-      if (!sendMobilePaneKeyboardData(pane, data)) return false;
+      if (!sendMobilePaneKeyboardData(pane, data)) {
+        restoreMobilePredictionHelper(pane);
+        return false;
+      }
       if (data !== input) {
         // Modifier keys can send controls or different text. Do not keep the
         // native helper value as an editable model of that terminal input.
@@ -2079,8 +2133,10 @@ const { WebglAddon } = globalThis.WebglAddon;
     }
     pane.mobilePredictionText = text;
     pane.mobilePredictionCursor = cursor;
-    pane.mobilePredictionConfirmed = !pane.mobilePredictionInvalidated && Boolean(text)
-      && terminalHasEditableText(pane.terminal, text);
+    pane.mobilePredictionConfirmed = terminalPredictionPrefix(
+      pane.terminal, text, cursor, prefix,
+    ) !== undefined;
+    pane.mobilePredictionPending = !pane.mobilePredictionConfirmed;
     return true;
   }
 
@@ -2093,16 +2149,6 @@ const { WebglAddon } = globalThis.WebglAddon;
       || !mobileQuery.matches
       || event.inputType === 'insertFromPaste'
     ) return false;
-    if (
-      pane.mobileBackspacePreservedHelper
-      && (
-        event.inputType === 'deleteContentBackward'
-        || event.inputType === 'deleteWordBackward'
-      )
-    ) {
-      ensureMobileBackspaceSentinel(pane);
-      return false;
-    }
     if (pane.mobilePredictionComposition) {
       event.stopImmediatePropagation();
       return true;
@@ -2117,48 +2163,28 @@ const { WebglAddon } = globalThis.WebglAddon;
       event.inputType
       && event.inputType !== 'insertText'
       && event.inputType !== 'insertReplacementText'
+      && event.inputType !== 'deleteContentBackward'
+      && event.inputType !== 'deleteWordBackward'
     ) return false;
 
     clearMobileBackspaceSentinel(pane);
-    if (pane.mobileBackspacePreservedHelper) {
-      pane.mobileBackspacePreservedHelper = false;
-      pane.mobilePredictionText = '';
-      pane.mobilePredictionCursor = 0;
-      pane.mobilePredictionConfirmed = false;
-      pane.mobilePredictionInvalidated = false;
-    }
-
     event.stopImmediatePropagation();
     if (!paneAcceptsInput(pane, false) || mobileKeyboardLocked || pane.snapshot) return true;
-    if (!applyMobileTextValue(pane, helper.value, mobileHelperCaret(helper), true)
-      && helper.value.length > MOBILE_PREDICTION_TEXT_LIMIT) {
+    const normalized = normalizeMobileHelperText(
+      pane, helper.value, mobileHelperCaret(helper),
+    );
+    if (normalized.helperValue !== helper.value) {
+      helper.value = normalized.helperValue;
+      helper.setSelectionRange(normalized.helperCursor, normalized.helperCursor);
+    }
+    const useModifiers = event.inputType === 'insertText'
+      || event.inputType === 'insertReplacementText';
+    if (!applyMobileTextValue(
+      pane, normalized.helperValue, normalized.helperCursor, useModifiers,
+    ) && normalized.helperValue.length > MOBILE_PREDICTION_TEXT_LIMIT) {
       clearMobilePredictionState(pane, true);
       showBrowserToast('Mobile input was too long');
     }
-    return true;
-  }
-
-  function sendMobilePredictionReplacement(pane, state, replacement) {
-    const helper = paneKeyboardHelper(pane);
-    if (!helper || !paneAcceptsInput(pane, false)) return false;
-    const result = terminalPredictionReplacement({
-      text: state.text,
-      selectionStart: state.selectionStart,
-      selectionEnd: state.selectionEnd,
-      replacement,
-      cursor: pane.mobilePredictionCursor,
-      applicationCursorKeys: pane.terminal.modes?.applicationCursorKeysMode,
-      editable: state.editable
-        && terminalHasEditableText(pane.terminal, state.text),
-    });
-    if (!result || !setActivePane(pane.streamId)) return false;
-    pane.terminal.clearSelection();
-    sendInput(result.data);
-    pane.mobilePredictionText = result.text;
-    pane.mobilePredictionCursor = result.cursor;
-    pane.mobilePredictionConfirmed = false;
-    helper.value = result.text;
-    helper.setSelectionRange(result.cursor, result.cursor);
     return true;
   }
 
@@ -2167,21 +2193,23 @@ const { WebglAddon } = globalThis.WebglAddon;
     const pane = paneForKeyboardTarget(event.target);
     const helper = paneKeyboardHelper(pane);
     if (!pane || !helper) return;
-    clearPreservedMobileBackspaceHelper(pane);
     clearMobileBackspaceSentinel(pane);
     followMobileCaret(pane);
-    const selectionStart = helper.selectionStart;
-    const selectionEnd = helper.selectionEnd;
+    const prefixLength = (pane.mobilePredictionPrefix || '').length;
+    const selectionStart = helper.selectionStart - prefixLength;
+    const selectionEnd = helper.selectionEnd - prefixLength;
     if (
-      !pane.mobilePredictionText || helper.value !== pane.mobilePredictionText
+      helper.value !== mobilePredictionHelperValue(pane)
       || !Number.isInteger(selectionStart) || !Number.isInteger(selectionEnd)
+      || selectionStart < 0 || selectionEnd < selectionStart
       || !paneAcceptsInput(pane, false) || pane.snapshot
     ) {
-      clearMobilePredictionState(pane);
+      restoreMobilePredictionHelper(pane);
       return;
     }
     pane.mobilePredictionComposition = {
-      text: helper.value,
+      text: pane.mobilePredictionText,
+      helperValue: helper.value,
       selectionStart,
       selectionEnd,
     };
@@ -2204,21 +2232,19 @@ const { WebglAddon } = globalThis.WebglAddon;
       if (pane.mobilePredictionComposition !== state) return;
       pane.mobilePredictionComposition = undefined;
       if (!paneAcceptsInput(pane, false) || pane.snapshot || mobileKeyboardLocked) return;
-      if (!terminalHasEditableText(pane.terminal, state.text)) {
-        pane.mobilePredictionInvalidated = true;
-        pane.mobilePredictionConfirmed = false;
-      }
       // Native composition can revise the full helper value. Read it only
       // after the final input event. Do not move its selection during IME use.
-      if (helper.value !== state.text) {
+      if (helper.value !== state.helperValue) {
         applyMobileTextValue(pane, helper.value, mobileHelperCaret(helper));
       } else if (typeof eventData === 'string' && eventData) {
         const text = state.text.slice(0, state.selectionStart)
           + eventData + state.text.slice(state.selectionEnd);
         const cursor = state.selectionStart + eventData.length;
-        if (applyMobileTextValue(pane, text, cursor)) {
-          helper.value = text;
-          helper.setSelectionRange(cursor, cursor);
+        const helperValue = `${pane.mobilePredictionPrefix || ''}${text}`;
+        const helperCursor = (pane.mobilePredictionPrefix || '').length + cursor;
+        if (applyMobileTextValue(pane, helperValue, helperCursor)) {
+          helper.value = helperValue;
+          helper.setSelectionRange(helperCursor, helperCursor);
         }
       }
     }, 0);
@@ -2226,10 +2252,8 @@ const { WebglAddon } = globalThis.WebglAddon;
 
   function noteMobilePredictionTerminalData(pane, data) {
     if (!iosKeyboard || !mobileQuery.matches) return;
-    if (data === '\x7f' || data === '\x1b\x7f') {
-      preserveMobileHelperForBackspace(pane);
-      return;
-    }
+    // Native text input owns Backspace on iOS. Any control that still reaches
+    // xterm is an explicit terminal operation and ends the editable shadow.
     if (/[\x00-\x1f\x7f]/u.test(data)) clearMobilePredictionState(pane, true);
   }
 
@@ -2260,7 +2284,9 @@ const { WebglAddon } = globalThis.WebglAddon;
       return;
     }
     syncMobilePredictionFromTerminal(pane);
-    setMobilePredictionAttributes(helper, pane.mobilePredictionConfirmed);
+    setMobilePredictionAttributes(
+      helper, pane.mobilePredictionConfirmed || pane.mobilePredictionPending,
+    );
     const screen = pane.terminal.element?.querySelector('.xterm-screen');
     const screenBounds = screen?.getBoundingClientRect();
     const terminalBounds = pane.terminal.element?.getBoundingClientRect();
@@ -2316,15 +2342,8 @@ const { WebglAddon } = globalThis.WebglAddon;
     return true;
   }
 
-  function resetMobileBackspaceAcceleration(pane) {
-    clearTimeout(pane.mobileBackspaceResetTimer);
-    pane.mobileBackspaceResetTimer = undefined;
-    pane.mobileBackspaceCount = 0;
-    pane.suppressDeletionBeforeInputUntil = 0;
-  }
-
   function resetMobilePaneInput(pane, blur = false) {
-    resetMobileBackspaceAcceleration(pane);
+    pane.suppressDeletionBeforeInputUntil = 0;
     clearMobilePredictionState(pane, true);
     const helper = paneKeyboardHelper(pane);
     if (blur && document.activeElement === helper) helper.blur();
@@ -2336,38 +2355,34 @@ const { WebglAddon } = globalThis.WebglAddon;
     if (!pane) return;
     if (event.key !== 'Backspace') {
       // iOS can report software-keyboard edits as Unidentified/keyCode 229.
-      // Keep the native marker until beforeinput identifies the operation.
+      // Keep the native marker until Safari applies the text mutation.
       if (event.key === 'Unidentified' || event.keyCode === 229) {
         if (!event.isComposing) event.stopImmediatePropagation();
         return;
       }
-      clearPreservedMobileBackspaceHelper(pane);
-      clearMobileBackspaceSentinel(pane);
-      resetMobileBackspaceAcceleration(pane);
+      pane.suppressDeletionBeforeInputUntil = 0;
       return;
     }
     if (event.isComposing) return;
     followMobileCaret(pane);
-    if (event.altKey || event.ctrlKey || event.metaKey) {
-      resetMobileBackspaceAcceleration(pane);
+    const helper = paneKeyboardHelper(pane);
+    const atNativeStart = (
+      pane.mobilePredictionConfirmed || pane.mobilePredictionPending
+    ) && helper?.value === mobilePredictionHelperValue(pane)
+      && helper.selectionStart === helper.selectionEnd
+      && helper.selectionStart === 0;
+    if (pane.mobileBackspaceSentinel || atNativeStart) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
       pane.suppressDeletionBeforeInputUntil = performance.now()
         + MOBILE_BACKSPACE_BEFORE_INPUT_SUPPRESSION_MS;
+      sendMobilePaneKeyboardData(pane, '\x7f');
       return;
     }
-    clearTimeout(pane.mobileBackspaceResetTimer);
-    pane.mobileBackspaceCount = (pane.mobileBackspaceCount || 0) + 1;
-    pane.mobileBackspaceResetTimer = setTimeout(
-      () => resetMobileBackspaceAcceleration(pane),
-      MOBILE_BACKSPACE_RESET_MS,
-    );
-    const data = terminalDataForRepeatedMobileBackspace(pane.mobileBackspaceCount);
-    if (!data || !event.cancelable) return;
-    event.preventDefault();
+    // The native textarea owns Backspace and its repeat. Stop xterm from
+    // sending the same key, but let Safari apply the native deletion.
     event.stopImmediatePropagation();
-    pane.suppressDeletionBeforeInputUntil = performance.now()
-      + MOBILE_BACKSPACE_BEFORE_INPUT_SUPPRESSION_MS;
-    preserveMobileHelperForBackspace(pane);
-    sendMobilePaneKeyboardData(pane, data);
+    pane.suppressDeletionBeforeInputUntil = 0;
   }
 
   function handleMobileTerminalBeforeInput(event) {
@@ -2378,44 +2393,28 @@ const { WebglAddon } = globalThis.WebglAddon;
       event.stopImmediatePropagation();
       return;
     }
-    if (event.isComposing || !event.cancelable) return;
+    if (event.isComposing) return;
     // Safari can deliver the final caret change just before the text edit,
     // before its queued selectionchange event reaches this document.
     followMobileCaret(pane);
-    if (
-      iosKeyboard
-      && event.inputType !== 'deleteContentBackward'
-      && event.inputType !== 'deleteWordBackward'
-    ) {
-      clearPreservedMobileBackspaceHelper(pane);
-      // Keep a fresh native marker until Safari applies the text edit. Changing
-      // the helper during beforeinput can discard the first swipe insertion.
-      resetMobileBackspaceAcceleration(pane);
-    }
-    if (iosKeyboard && event.inputType === 'insertReplacementText') {
-      const helper = paneKeyboardHelper(pane);
-      const state = {
-        text: pane.mobilePredictionText,
-        selectionStart: helper?.selectionStart,
-        selectionEnd: helper?.selectionEnd,
-        editable: pane.mobilePredictionConfirmed
-          && helper?.value === pane.mobilePredictionText,
-      };
-      if (!sendMobilePredictionReplacement(pane, state, event.data)) return;
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      return;
-    }
-    const data = terminalDataForBeforeInput(event.inputType);
-    if (!data) return;
-    event.preventDefault();
-    event.stopImmediatePropagation();
-    preserveMobileHelperForBackspace(pane);
-    if ((pane.suppressDeletionBeforeInputUntil || 0) >= performance.now()) {
+    const deletesBackward = event.inputType === 'deleteContentBackward'
+      || event.inputType === 'deleteWordBackward';
+    if (!deletesBackward) {
       pane.suppressDeletionBeforeInputUntil = 0;
       return;
     }
-    sendMobilePaneKeyboardData(pane, data);
+    if (
+      pane.mobileBackspaceSentinel
+      || (pane.suppressDeletionBeforeInputUntil || 0) >= performance.now()
+    ) {
+      if (event.cancelable) event.preventDefault();
+      event.stopImmediatePropagation();
+      pane.suppressDeletionBeforeInputUntil = 0;
+      return;
+    }
+    // Let Safari mutate the helper. The input handler sends the full shadow
+    // delta once and stops xterm from seeing it.
+    event.stopImmediatePropagation();
   }
 
   function terminalMouseButtonCode(button, motion = false) {
@@ -2745,14 +2744,13 @@ const { WebglAddon } = globalThis.WebglAddon;
       closed: false,
       awaitingFull: true,
       absorbedRemainder: 0,
-      mobileBackspaceCount: 0,
       suppressDeletionBeforeInputUntil: 0,
+      mobilePredictionPrefix: '',
       mobilePredictionText: '',
       mobilePredictionCursor: 0,
       mobilePredictionConfirmed: false,
-      mobilePredictionInvalidated: false,
       mobilePredictionComposition: undefined,
-      mobileBackspacePreservedHelper: false,
+      mobilePredictionPending: false,
       mobileBackspaceSentinel: false,
       mobileBackspaceSentinelInsertion: false,
       mobileBackspaceSentinelNative: false,
@@ -2799,7 +2797,6 @@ const { WebglAddon } = globalThis.WebglAddon;
         event.inputType !== 'insertFromPaste'
         || event.target !== paneKeyboardHelper(record)
       ) return;
-      clearPreservedMobileBackspaceHelper(record);
       clearMobileBackspaceSentinel(record);
       const text = event.target.value;
       if (!text) return;

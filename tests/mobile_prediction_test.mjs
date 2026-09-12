@@ -2,10 +2,12 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   MOBILE_PREDICTION_TEXT_LIMIT,
+  mobileTextWithoutRedundantSeparator,
   terminalCaretInput,
   terminalHasEditableSuffix,
   terminalHasEditableText,
-  terminalPredictionReplacement,
+  terminalPredictionPrefix,
+  terminalTextAtCursor,
   terminalTextInputDelta,
 } from '../herdr_web/static/mobile-prediction.js';
 
@@ -60,6 +62,54 @@ function terminalWithRows(rows, cursorX = rows.at(-1).length, cursorY = rows.len
     },
   } } };
 }
+
+test('terminal line shadow includes text on both sides of the cursor', () => {
+  assert.deepEqual(terminalTextAtCursor(
+    terminalWithRows(['prompt> abc def   '], 11),
+  ), { text: 'prompt> abc def', cursor: 11 });
+});
+
+test('terminal shadow prefix excludes the owned editable suffix', () => {
+  assert.equal(terminalPredictionPrefix(
+    terminalWithRows(['prompt> hello']), 'hello', 5,
+  ), 'prompt> ');
+  assert.equal(terminalPredictionPrefix(
+    terminalWithRows(['prompt> hello'], 9), 'hello', 2,
+  ), 'prompt> ');
+  assert.equal(terminalPredictionPrefix(
+    terminalWithRows(['prompt> git ch', 'ekout']), 'git chekout', 11, 'prompt> ',
+  ), 'prompt> ');
+  assert.equal(terminalPredictionPrefix(
+    terminalWithRows(['prompt> hello', ''], 0, 1), 'hello', 5, 'prompt> ',
+  ), 'prompt> ');
+  assert.equal(terminalPredictionPrefix(
+    terminalWithRows(['prompt> ']), '', 0,
+  ), 'prompt> ');
+  assert.equal(terminalPredictionPrefix(
+    terminalWithRows(['unrelated output']), 'hello', 5,
+  ), undefined);
+});
+
+test('native automatic separators are removed only after existing whitespace', () => {
+  assert.deepEqual(mobileTextWithoutRedundantSeparator('', ' hello', 6, 'prompt> '), {
+    text: 'hello', cursor: 5,
+  });
+  assert.deepEqual(mobileTextWithoutRedundantSeparator('one ', 'one  swipe', 10, 'prompt> '), {
+    text: 'one swipe', cursor: 9,
+  });
+  assert.deepEqual(mobileTextWithoutRedundantSeparator('one', 'one swipe', 9, 'prompt> '), {
+    text: 'one swipe', cursor: 9,
+  });
+  assert.deepEqual(mobileTextWithoutRedundantSeparator('hello', ' hello', 6, 'prompt> '), {
+    text: 'hello', cursor: 5,
+  });
+  assert.deepEqual(mobileTextWithoutRedundantSeparator('one ', 'one  ', 5, 'prompt> '), {
+    text: 'one ', cursor: 4,
+  });
+  assert.deepEqual(mobileTextWithoutRedundantSeparator('', ' ', 1, 'prompt> '), {
+    text: '', cursor: 0,
+  });
+});
 
 test('native input preserves unchanged text on both sides of the edit', () => {
   assert.deepEqual(checkEdit('th', 'they are being'), {
@@ -121,25 +171,6 @@ test('all small bounded text edits preserve unknown terminal text and final care
   }
 });
 
-test('prediction replaces only a bounded selected owned range', () => {
-  for (const [text, start, end, replacement, cursor] of [
-    ['git chekout', 4, 11, 'checkout', 11],
-    ['the old word', 4, 7, 'new', 2],
-    ['ab👍🏽cd', 2, 6, 'X', 0],
-  ]) {
-    const result = terminalPredictionReplacement({ text, selectionStart: start,
-      selectionEnd: end, replacement, cursor, editable: true });
-    assert.ok(result);
-    const state = applyTerminalData({ text: prefix + text + suffix, cursor: prefix.length + cursor }, result.data);
-    assert.equal(state.text, prefix + result.text + suffix);
-    assert.equal(state.cursor, prefix.length + result.cursor);
-  }
-  assert.equal(terminalPredictionReplacement({ text: 'abc', selectionStart: 0,
-    selectionEnd: 2, replacement: 'X', editable: false }), undefined);
-  assert.equal(terminalPredictionReplacement({ text: '👍🏽', selectionStart: 1,
-    selectionEnd: 4, replacement: 'X', editable: true }), undefined);
-});
-
 test('confirmation requires complete owned text across physical rows and the cursor', () => {
   const text = 'git chekout';
   assert.equal(terminalHasEditableSuffix(terminalWithRows(['prompt> git ch', 'ekout']), text), true);
@@ -162,6 +193,4 @@ test('invalid text, caret offsets, and oversized replacements produce no input',
     assert.equal(terminalTextInputDelta('abc', 'abc', cursor, 0), undefined);
     assert.equal(terminalCaretInput('abc', 0, cursor), undefined);
   }
-  assert.equal(terminalPredictionReplacement({ text: 'abcd', selectionStart: 1,
-    selectionEnd: 2, replacement: 'x'.repeat(1024), editable: true }), undefined);
 });
