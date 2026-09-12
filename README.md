@@ -245,10 +245,11 @@ tab-bar control collapses or restores the sidebar and saves that choice in the
 browser. Sidebar rows are flat and edge-to-edge, with the same one-pixel left
 edge and three-pixel current left edge as mobile Browse. Status uses a separate
 right edge: working pulses a neutral edge, while done, blocked, and error use
-solid green, yellow, and red edges. Idle stays neutral. Reduced-motion mode
-uses a static neutral working edge. Mobile Browse uses the same right-edge
-status treatment and keeps its plain status text. Screen readers also receive
-the status as text. Each pane has an independent xterm surface and
+solid green, yellow, and red edges. Idle uses a solid neutral edge, so a row
+keeps the agent presence mark after the work stops. Reduced-motion mode uses a
+static neutral working edge. The mobile sheet keeps the same right-edge status
+treatment. Screen readers also receive the status as text. Each pane has an
+independent xterm surface and
 terminal-session stream. Only the active tab is attached through the web
 client.
 

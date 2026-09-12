@@ -561,14 +561,6 @@ const { WebglAddon } = globalThis.WebglAddon;
     return paneCompact ? paneBreadcrumbLabel(record) : paneRecordLabel(record);
   }
 
-  function agentStatus(record) {
-    const badge = document.createElement('span');
-    badge.className = 'agent-status';
-    badge.dataset.status = record.agent_status || 'unknown';
-    badge.textContent = record.agent_status || 'unknown';
-    return badge;
-  }
-
   function navigationMaps() {
     const workspaces = navigationSnapshot?.workspaces || [];
     const tabs = navigationSnapshot?.tabs || [];
@@ -761,14 +753,13 @@ const { WebglAddon } = globalThis.WebglAddon;
       pane.label.textContent = label;
       pane.tile.setAttribute('aria-label', label);
     }
-    const agentStatusValue = record?.agent_status;
+    // Agent state is carried by the navigation bars and the sheet square.
+    // The title keeps only states that change what input is possible.
     pane.state.textContent = pane.closed
       ? 'Closed'
       : pane.mode === 'observe'
         ? 'Read-only'
-        : agentStatusValue && agentStatusValue !== 'unknown'
-          ? agentStatusValue
-          : '';
+        : '';
     syncPaneKeyboardHelper(pane);
   }
 
@@ -1036,7 +1027,12 @@ const { WebglAddon } = globalThis.WebglAddon;
     }
     if (statusValue && statusValue !== 'unknown') {
       button.dataset.status = statusValue;
-      button.append(agentStatus({ agent_status: statusValue }));
+      // The row edge carries the state visually. Keep the text for assistive
+      // technology only.
+      const status = document.createElement('span');
+      status.className = 'visually-hidden';
+      status.textContent = `Status: ${statusValue}`;
+      button.append(status);
     }
     button.addEventListener('click', action);
     return button;
@@ -2747,7 +2743,7 @@ const { WebglAddon } = globalThis.WebglAddon;
     label.textContent = paneDisplayLabel(paneRecord);
     const state = document.createElement('span');
     state.className = 'pane-title-state';
-    state.textContent = paneRecord.agent_status === 'unknown' ? '' : paneRecord.agent_status || '';
+    state.textContent = paneRecord.mode === 'observe' ? 'Read-only' : '';
     const connection = document.createElement('button');
     connection.type = 'button';
     connection.className = 'pane-connection';
