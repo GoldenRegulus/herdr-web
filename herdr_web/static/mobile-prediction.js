@@ -42,20 +42,40 @@ export function terminalCaretInput(text, from, to, applicationCursorKeys = false
 }
 
 export function terminalTextBeforeCursor(terminal) {
-  const buffer = terminal?.buffer?.active;
-  if (!buffer) return '';
-  let row = buffer.baseY + buffer.cursorY;
-  let line = buffer.getLine(row);
-  if (!line) return '';
+  const shadow = terminalTextAtCursor(terminal);
+  return shadow.text.slice(0, shadow.cursor);
+}
 
-  const parts = [line.translateToString(false, 0, buffer.cursorX)];
-  while (line.isWrapped && row > 0 && parts.join('').length < MOBILE_PREDICTION_TEXT_LIMIT) {
+export function terminalTextAtCursor(terminal) {
+  const buffer = terminal?.buffer?.active;
+  if (!buffer) return { text: '', cursor: 0 };
+  const cursorRow = buffer.baseY + buffer.cursorY;
+  let row = cursorRow;
+  let line = buffer.getLine(row);
+  if (!line) return { text: '', cursor: 0 };
+
+  const beforeParts = [line.translateToString(false, 0, buffer.cursorX)];
+  while (line.isWrapped && row > 0 && beforeParts.join('').length < MOBILE_PREDICTION_TEXT_LIMIT) {
     row -= 1;
     line = buffer.getLine(row);
     if (!line) break;
-    parts.unshift(line.translateToString(false));
+    beforeParts.unshift(line.translateToString(false));
   }
-  return parts.join('');
+  const before = beforeParts.join('');
+  const afterParts = [buffer.getLine(cursorRow).translateToString(true, buffer.cursorX)];
+  row = cursorRow + 1;
+  line = buffer.getLine(row);
+  while (line?.isWrapped && before.length + afterParts.join('').length < MOBILE_PREDICTION_TEXT_LIMIT) {
+    afterParts.push(line.translateToString(true));
+    row += 1;
+    line = buffer.getLine(row);
+  }
+  const after = afterParts.join('').trimEnd();
+  const start = Math.max(0, before.length + after.length - MOBILE_PREDICTION_TEXT_LIMIT);
+  return {
+    text: (before + after).slice(start, start + MOBILE_PREDICTION_TEXT_LIMIT),
+    cursor: Math.max(0, before.length - start),
+  };
 }
 
 // Read only enough physical rows to confirm the owned text. Herdr's explicit
@@ -99,6 +119,59 @@ export function terminalHasEditableText(terminal, text) {
     && start + text.length >= around.before.length;
 }
 
+export function terminalPredictionPrefix(
+  terminal, text = '', cursor = text.length, existingPrefix,
+) {
+  if (!validText(text) || terminalCaretInput(text, cursor, cursor) === undefined) return undefined;
+  let before = terminalTextBeforeCursor(terminal);
+  const maximumPrefixLength = MOBILE_PREDICTION_TEXT_LIMIT - text.length;
+  if (!text) return before.slice(-maximumPrefixLength);
+  if (!terminalHasEditableText(terminal, text)) return undefined;
+  // If Herdr used explicit cursor positioning for a wrapped row, xterm might
+  // not have an isWrapped marker. Keep the known prefix when the current
+  // physical row contains only an ending fragment of the editable text.
+  if (!before || text.endsWith(before)) {
+    if (typeof existingPrefix === 'string') {
+      if (maximumPrefixLength === 0) return '';
+      return existingPrefix.slice(-maximumPrefixLength);
+    }
+    before = textAroundCursor(terminal, MOBILE_PREDICTION_TEXT_LIMIT)?.before || before;
+  }
+  let editableBeforeCursor = '';
+  let candidate = '';
+  for (const part of graphemes(text)) {
+    candidate += part;
+    if (before.endsWith(candidate)) editableBeforeCursor = candidate;
+  }
+  if (maximumPrefixLength === 0) return '';
+  return before.slice(0, before.length - editableBeforeCursor.length).slice(-maximumPrefixLength);
+}
+
+export function mobileTextWithoutRedundantSeparator(
+  previousText, nextText, nextCursor, staticPrefix = '',
+) {
+  if (!validText(previousText) || !validText(nextText)
+    || terminalCaretInput(nextText, nextCursor, nextCursor) === undefined) return undefined;
+  const previous = graphemes(previousText);
+  const next = graphemes(nextText);
+  let shared = 0;
+  while (shared < previous.length && shared < next.length
+    && previous[shared] === next[shared]) shared += 1;
+  let tail = 0;
+  while (tail < previous.length - shared && tail < next.length - shared
+    && previous[previous.length - tail - 1] === next[next.length - tail - 1]) tail += 1;
+  const inserted = next.slice(shared, next.length - tail);
+  const before = shared > 0 ? previous[shared - 1] : graphemes(staticPrefix).at(-1);
+  if (inserted[0] !== ' ' || !/^\s$/u.test(before || '')) {
+    return { text: nextText, cursor: nextCursor };
+  }
+  const separatorOffset = next.slice(0, shared).join('').length;
+  return {
+    text: next.slice(0, shared).join('') + next.slice(shared + 1).join(''),
+    cursor: nextCursor > separatorOffset ? nextCursor - 1 : nextCursor,
+  };
+}
+
 export function terminalTextInputDelta(
   previousText, nextText,
   previousCursor = previousText?.length, nextCursor = nextText?.length,
@@ -128,21 +201,4 @@ export function terminalTextInputDelta(
     removed,
     inserted,
   };
-}
-
-export function terminalPredictionReplacement({
-  text, selectionStart, selectionEnd, replacement, editable,
-  cursor = text?.length, applicationCursorKeys = false,
-}) {
-  if (!editable || !validText(text) || !validText(replacement)
-    || !Number.isInteger(selectionStart) || !Number.isInteger(selectionEnd)
-    || selectionStart < 0 || selectionStart >= selectionEnd
-    || selectionEnd > text.length
-    || terminalCaretInput(text, selectionStart, selectionEnd) === undefined) return undefined;
-  const nextText = text.slice(0, selectionStart) + replacement + text.slice(selectionEnd);
-  if (nextText === text) return undefined;
-  const nextCursor = selectionStart + replacement.length;
-  const edit = terminalTextInputDelta(text, nextText, cursor, nextCursor, applicationCursorKeys);
-  if (!edit) return undefined;
-  return { data: edit.data, text: nextText, cursor: nextCursor };
 }

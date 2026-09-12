@@ -323,43 +323,52 @@ covers the complete terminal row that contains the cursor. The keyboard lock
 blocks terminal taps from focusing it. Bottom control buttons preserve an
 already-open keyboard but do not open a closed keyboard.
 
-On iOS, Herdr Web gives each text event to one input path. Its xterm custom key
-handler rejects unmodified printable keydown and keypress events. The
-application then sends the corresponding native helper-value change once.
-Other mobile platforms keep xterm's normal input path. xterm continues to
-handle explicit terminal keys and iOS composition outside browser-owned text.
+On iOS, the native xterm helper owns typing, swipe input, replacement,
+composition, caret movement, and Backspace. Herdr Web validates each completed
+native edit and sends the corresponding helper-value change once. It stops
+xterm from also sending the same printable or Backspace key. Other mobile
+platforms keep xterm's normal input path. xterm continues to handle explicit
+terminal controls.
 
-Herdr Web keeps bounded browser-owned text and its caret position. It never
-copies terminal output into this text. Native typing, swipe input, autocorrect,
-composition, and dictation update it. Herdr Web preserves unchanged text on
-both sides of an edit. It sends ordered cursor movement, deletion, and new text,
-then moves the terminal cursor to the native caret. Duplicate events do not
-repeat the edit. Prediction is enabled only after the rendered text around the
-terminal cursor confirms the complete owned text.
+Herdr Web keeps a bounded shadow of the visible terminal input line in xterm's
+keyboard helper. The complete line gives iOS context for swipe input,
+autocorrect, composition, and dictation. Native changes are proposals. Herdr
+Web sends each proposal as ordered cursor movement, deletion, and new text. The
+shell decides which cells are editable. Herdr Web keeps the complete known
+shadow while incremental shell frames echo a fast input sequence or a wrapped
+line. A matching frame confirms the proposal. A submitted line or another
+terminal control ends that input session and rebuilds the shadow from terminal
+cells. Duplicate events do not repeat an edit. If QuickPath adds a separator
+where the shadow already has whitespace, Herdr Web removes the duplicate
+separator after the native edit.
 Navigation, control input, Paste, a submitted line, or a pane lifecycle change
-discards text ownership.
+rebuilds the shadow from terminal cells.
 
-When the owned text is empty, Herdr Web inserts an `x` marker through the
-browser's native text-edit command. This initializes the iOS editor state that
-controls Backspace repeat. Safari applies the first native text edit before
+When the shadow is empty, Herdr Web inserts a space marker through
+the browser's native text-edit command. This initializes the iOS editor state
+that controls Backspace repeat. Safari applies the first native text edit before
 Herdr Web removes the marker from the helper value. Capture handlers stop the
-marker before xterm or Herdr can receive it. During Backspace,
-the helper stays nonempty and iOS supplies the repeat events. Herdr Web does
-not implement a second repeat timer.
+marker before xterm or Herdr can receive it. During Backspace, Safari changes
+the native helper and supplies the repeat events. Herdr Web converts each
+native deletion into one terminal delta. It retains the known input-session
+shadow while continuous deletion crosses physical line boundaries. If the
+native shadow reaches its start while the shell session is still pending,
+Herdr Web continues to pass native Backspace events to the shell. Thus,
+autocorrect and the terminal use the same updated shadow. Herdr Web does not
+implement a second repeat timer.
 
 Herdr Web follows the iOS visual viewport while the keyboard opens and closes.
 The control bar stays above the keyboard, xterm fits the available area, and
 Herdr receives the new row and column size. Herdr Web combines adjacent scroll
 steps before it sends them to reduce scroll-command backlog.
 
-The iOS spacebar trackpad moves the native caret inside the browser-owned text.
+The iOS spacebar trackpad can move the native caret across the complete shadow.
 Herdr Web follows collapsed caret changes with ordered terminal Left and Right
-input. It does not draw a second cursor or change the helper selection during
-the gesture. The terminal cursor updates when Herdr returns the resulting frame.
-This requires an application that supports normal terminal cursor movement and
-text editing. The gesture cannot reach text outside the browser-owned range.
-Backspace, Paste, explicit terminal controls, and pane lifecycle changes end
-that range. Use the arrow controls to move beyond it.
+input. Herdr Web does not draw a second cursor or change a valid helper
+selection during the gesture. The terminal cursor updates when Herdr returns
+the resulting frame. The shell can reject movement or edits outside its input
+buffer. Paste, explicit terminal controls, and pane lifecycle changes rebuild
+the shadow from terminal cells.
 
 Selecting a pane or tab replaces only the web streams. It does not stop the
 terminal processes in Herdr. If another direct client controls a pane, Panes

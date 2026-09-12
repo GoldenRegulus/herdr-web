@@ -1,8 +1,5 @@
 const MAX_RETAINED_CAPACITY = 64 * 1024;
 const SGR_MOUSE_EVENT = /^\x1b\[<(\d+);\d+;\d+M$/;
-const DELETE_CHARACTER = '\x7f';
-const META_BACKSPACE = '\x1b\x7f';
-const IOS_CHARACTER_BACKSPACES_BEFORE_WORDS = 22;
 const CSI_FINAL_NAVIGATION_KEYS = {
   left: 'D',
   right: 'C',
@@ -37,16 +34,6 @@ export function terminalDataForNavigationKey(key, modifiers = {}) {
   return final === undefined
     ? `\x1b[${tilde};${modifier}~`
     : `\x1b[1;${modifier}${final}`;
-}
-
-export function terminalDataForBeforeInput(inputType) {
-  if (inputType === 'deleteContentBackward') return DELETE_CHARACTER;
-  if (inputType === 'deleteWordBackward') return META_BACKSPACE;
-  return undefined;
-}
-
-export function terminalDataForRepeatedMobileBackspace(count) {
-  return count > IOS_CHARACTER_BACKSPACES_BEFORE_WORDS ? META_BACKSPACE : undefined;
 }
 
 export function normalizeTerminalPasteText(text) {
