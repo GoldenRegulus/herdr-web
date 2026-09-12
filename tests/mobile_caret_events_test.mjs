@@ -16,7 +16,7 @@ const keydownHandler = app.slice(
   app.indexOf('  function handleMobileTerminalBeforeInput(event)'),
 );
 
-function harness(text = 'abcdef', cursor = text.length, staticPrefix = '') {
+function harness(text = 'abcdef', cursor = text.length, staticPrefix = '', options = {}) {
   const sent = [];
   const timers = [];
   let value = staticPrefix + text;
@@ -60,6 +60,7 @@ function harness(text = 'abcdef', cursor = text.length, staticPrefix = '') {
     ...prediction, pane, helper,
     document: { activeElement: helper },
     iosKeyboard: true,
+    nativeKeyboardInput: true,
     mobileQuery: { matches: true },
     mobileKeyboardLocked: false,
     performance: { now: () => 1000 },
@@ -78,6 +79,7 @@ function harness(text = 'abcdef', cursor = text.length, staticPrefix = '') {
     showBrowserToast() {},
     clearTimeout() {},
     setTimeout: (callback) => timers.push(callback),
+    ...options,
   });
   vm.runInContext(handlers, context);
   vm.runInContext(keydownHandler, context);
@@ -268,6 +270,30 @@ test('an empty shadow uses a space marker that never becomes a word', () => {
   h.input(' hello', 6, { data: 'hello' });
   assert.deepEqual(h.sent, ['hello']);
   assert.equal(h.helper.value, 'hello');
+});
+
+test('an Android profile keeps the empty helper free of a marker', () => {
+  const h = harness('', 0, '', { iosKeyboard: false });
+  h.render('', 0);
+  h.context.prepareMobilePredictionFocus(h.pane);
+  assert.equal(h.helper.value, '');
+  assert.ok(!h.pane.mobileBackspaceSentinel);
+});
+
+test('an IME key event is stopped only while the shadow owns composition', () => {
+  const h = harness();
+  const event = (stopped) => ({
+    target: h.helper, key: 'Unidentified', keyCode: 229, isComposing: true,
+    stopImmediatePropagation() { stopped.value = true; },
+  });
+  const stopped = { value: false };
+  h.pane.mobilePredictionComposition = {};
+  h.context.handleMobileTerminalKeyDown(event(stopped));
+  assert.equal(stopped.value, true);
+  stopped.value = false;
+  h.pane.mobilePredictionComposition = undefined;
+  h.context.handleMobileTerminalKeyDown(event(stopped));
+  assert.equal(stopped.value, false);
 });
 
 test('returned terminal cells replace a rejected native proposal', () => {

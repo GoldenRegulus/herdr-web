@@ -129,6 +129,11 @@ const { WebglAddon } = globalThis.WebglAddon;
   const reducedMotionQuery = matchMedia('(prefers-reduced-motion: reduce)');
   const iosKeyboard = /iPad|iPhone|iPod/.test(navigator.userAgent)
     || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  // Android soft keyboards report keyCode 229 and can omit a Backspace key
+  // event, so the native helper owns text and deletion there too.
+  const androidKeyboard = /Android/.test(navigator.userAgent)
+    || navigator.userAgentData?.platform === 'Android';
+  const nativeKeyboardInput = iosKeyboard || androidKeyboard;
   // A touch-capable device owns the pane gesture in every layout, not only
   // the mobile layout. The stylesheet reads this marker to set touch-action.
   const touchInput = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
@@ -1930,6 +1935,9 @@ const { WebglAddon } = globalThis.WebglAddon;
   }
 
   function ensureMobileBackspaceSentinel(pane) {
+    // WebKit needs a native character for Backspace repeat. Android IMEs
+    // treat the marker as real text, so the marker stays iOS-only.
+    if (!iosKeyboard) return;
     const helper = paneKeyboardHelper(pane);
     if (!helper || pane.mobilePredictionText) return;
     if (pane.mobileBackspaceSentinel) {
@@ -2042,7 +2050,7 @@ const { WebglAddon } = globalThis.WebglAddon;
 
   function prepareMobilePredictionFocus(pane) {
     const helper = paneKeyboardHelper(pane);
-    if (!helper || !iosKeyboard || !mobileQuery.matches) return;
+    if (!helper || !nativeKeyboardInput || !mobileQuery.matches) return;
     syncMobilePredictionFromTerminal(pane);
     setMobilePredictionAttributes(
       helper, pane.mobilePredictionConfirmed || pane.mobilePredictionPending,
@@ -2063,7 +2071,7 @@ const { WebglAddon } = globalThis.WebglAddon;
 
   function preserveMobilePredictionBeforeBlur(pane) {
     const helper = paneKeyboardHelper(pane);
-    if (!helper || !iosKeyboard || !mobileQuery.matches) return;
+    if (!helper || !nativeKeyboardInput || !mobileQuery.matches) return;
     // Safari may queue selectionchange behind blur. Send that final movement
     // before xterm clears the helper, then retain the last sent caret position.
     followMobileCaret(pane, true);
@@ -2095,6 +2103,9 @@ const { WebglAddon } = globalThis.WebglAddon;
 
   function followMobileCaret(pane, beforeBlur = false) {
     const helper = paneKeyboardHelper(pane);
+    // Android IMEs move the native selection without a user gesture. The
+    // ordered delta already carries a real caret change, so caret following
+    // stays iOS-only until a device validates it.
     if (!iosKeyboard || !mobileQuery.matches || mobileKeyboardLocked
       || !helper || (!beforeBlur && document.activeElement !== helper)
       || !paneAcceptsInput(pane, false) || pane.snapshot
@@ -2180,7 +2191,7 @@ const { WebglAddon } = globalThis.WebglAddon;
     if (
       !helper
       || event.target !== helper
-      || !iosKeyboard
+      || !nativeKeyboardInput
       || !mobileQuery.matches
       || event.inputType === 'insertFromPaste'
     ) return false;
@@ -2224,7 +2235,7 @@ const { WebglAddon } = globalThis.WebglAddon;
   }
 
   function handleMobilePredictionCompositionStart(event) {
-    if (!iosKeyboard || !mobileQuery.matches || mobileKeyboardLocked) return;
+    if (!nativeKeyboardInput || !mobileQuery.matches || mobileKeyboardLocked) return;
     const pane = paneForKeyboardTarget(event.target);
     const helper = paneKeyboardHelper(pane);
     if (!pane || !helper) return;
@@ -2286,9 +2297,10 @@ const { WebglAddon } = globalThis.WebglAddon;
   }
 
   function noteMobilePredictionTerminalData(pane, data) {
-    if (!iosKeyboard || !mobileQuery.matches) return;
-    // Native text input owns Backspace on iOS. Any control that still reaches
-    // xterm is an explicit terminal operation and ends the editable shadow.
+    if (!nativeKeyboardInput || !mobileQuery.matches) return;
+    // Native text input owns Backspace on iOS and Android. Any control that
+    // still reaches xterm is an explicit terminal operation and ends the
+    // editable shadow.
     if (/[\x00-\x1f\x7f]/u.test(data)) clearMobilePredictionState(pane, true);
   }
 
@@ -2385,14 +2397,18 @@ const { WebglAddon } = globalThis.WebglAddon;
   }
 
   function handleMobileTerminalKeyDown(event) {
-    if (!iosKeyboard || !mobileQuery.matches || mobileKeyboardLocked) return;
+    if (!nativeKeyboardInput || !mobileQuery.matches || mobileKeyboardLocked) return;
     const pane = paneForKeyboardTarget(event.target);
     if (!pane) return;
     if (event.key !== 'Backspace') {
-      // iOS can report software-keyboard edits as Unidentified/keyCode 229.
-      // Keep the native marker until Safari applies the text mutation.
+      // iOS and Android can report software-keyboard edits as
+      // Unidentified/keyCode 229. Keep the native marker until the browser
+      // applies the text mutation, and stop the event before xterm can read
+      // the textarea itself.
       if (event.key === 'Unidentified' || event.keyCode === 229) {
-        if (!event.isComposing) event.stopImmediatePropagation();
+        if (!event.isComposing || pane.mobilePredictionComposition) {
+          event.stopImmediatePropagation();
+        }
         return;
       }
       pane.suppressDeletionBeforeInputUntil = 0;
@@ -2675,17 +2691,20 @@ const { WebglAddon } = globalThis.WebglAddon;
     return terminalDataForModifiedEnter(modifiers);
   }
 
-  function paneTerminalKeyHandler(event) {
+  function paneTerminalKeyHandler(pane, event) {
+    const imeKey = event.key === 'Unidentified' || event.keyCode === 229;
     if (
-      iosKeyboard
+      nativeKeyboardInput
       && mobileQuery.matches
       && !mobileKeyboardLocked
-      && !event.isComposing
       && !event.ctrlKey
       && !event.altKey
       && !event.metaKey
       && (event.type === 'keydown' || event.type === 'keypress')
-      && (event.key?.length === 1 || event.key === 'Unidentified' || event.keyCode === 229)
+      && (
+        (!event.isComposing && (event.key?.length === 1 || imeKey))
+        || (imeKey && Boolean(pane?.mobilePredictionComposition))
+      )
     ) {
       // The helper input event owns native mobile text. Do not also let xterm
       // send a printable keydown or keypress, including the Space key.
@@ -2757,7 +2776,7 @@ const { WebglAddon } = globalThis.WebglAddon;
     paneTerminal.loadAddon(paneFitAddon);
     paneTerminal.open(host);
     paneTerminal.parser.registerOscHandler(52, handleOsc52);
-    paneTerminal.attachCustomKeyEventHandler(paneTerminalKeyHandler);
+    paneTerminal.attachCustomKeyEventHandler((event) => paneTerminalKeyHandler(record, event));
     paneTerminal.element.addEventListener('contextmenu', (event) => {
       if (mobileQuery.matches && !mobileMouseMode) {
         if (mobileKeyboardLocked) event.stopImmediatePropagation();
