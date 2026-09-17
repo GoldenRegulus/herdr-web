@@ -114,6 +114,7 @@ test('native automatic separators are removed only after existing whitespace', (
 test('native input preserves unchanged text on both sides of the edit', () => {
   assert.deepEqual(checkEdit('th', 'they are being'), {
     data: 'ey are being', removed: 0, inserted: 'ey are being',
+    insertedStart: 2, insertedEnd: 14,
   });
   const edit = checkEdit('they are being', "they're being");
   assert.equal(edit.removed, 2);

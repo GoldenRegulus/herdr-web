@@ -247,8 +247,10 @@ edge and three-pixel current left edge as mobile Browse. Status uses a separate
 right edge: working pulses a neutral edge, while done, blocked, and error use
 solid green, yellow, and red edges. Idle uses a solid neutral edge, so a row
 keeps the agent presence mark after the work stops. Reduced-motion mode uses a
-static neutral working edge. The mobile sheet keeps the same right-edge status
-treatment. Screen readers also receive the status as text. Each pane has an
+static neutral working edge. The mobile sheet tints the row background by
+status instead of drawing an edge, and the pane title bar uses the same light
+tint, so a pane with an idle agent differs from a pane with no agent. Screen
+readers also receive the status as text. Each pane has an
 independent xterm surface and
 terminal-session stream. Only the active tab is attached through the web
 client.
@@ -272,9 +274,10 @@ disable the inertial continuation.
 
 The compact two-row mobile control bar has persistent **Ctrl**, **Alt**, and
 **Shift** toggles, **Esc**, **Tab**, a keyboard lock, and Left, Up, Down, and
-Right buttons. Select **Nav** to replace the lower row with Terminal Snapshot,
-Home, Page Up, Page Down, End, and forward Delete. **Nav** is a display-layer
-control; Herdr Web does not send it to the terminal as a modifier. The
+Right buttons. Select the three-dot button to replace the lower row with mouse
+mode, Home, Page Up, Page Down, End, and forward Delete. The three-dot button
+is a display-layer control; Herdr Web does not send it to the terminal as a
+modifier. The
 modifiers apply to arrow and navigation buttons and to a single character from
 the software keyboard. Shift+Tab sends Backtab. A modified software-keyboard
 Enter sends CSI-u with the active Ctrl, Alt, and Shift combination. Thus,
@@ -309,13 +312,13 @@ structured WebSocket operations and writes them with Herdr's public
 `pane.send_text` API. These clicks do not apply the terminal-session
 controller's keyboard follow-to-bottom policy.
 
-The camera button in the mobile **Nav** row opens a terminal snapshot. Herdr Web
-copies the visible cells, colors, rows, and columns into a disconnected,
-read-only xterm instance. The live terminal continues to parse and acknowledge
-output behind it. The snapshot does not send keyboard or mouse input, and its
-text stays fixed for native selection and Copy. Close the snapshot to return
-to the latest live view. Herdr Web does not create an image screenshot, text
-area, or fake terminal text layer.
+A long press on a pane freezes it into a terminal snapshot and selects the word
+under the press. Herdr Web copies the visible cells, colors, rows, and columns
+into a disconnected, read-only xterm instance. The live terminal continues to
+parse and acknowledge output behind it. The snapshot does not send keyboard or
+mouse input, and its text stays fixed for native selection and Copy. Clear the
+selection to return to the latest live view. Herdr Web does not create an image
+screenshot, text area, or fake terminal text layer.
 
 Text Paste in Panes uses Herdr's public `pane.send_input` API. This keeps LF
 line breaks and lets Herdr apply its server-side bracketed-paste state instead

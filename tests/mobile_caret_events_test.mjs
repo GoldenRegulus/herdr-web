@@ -18,6 +18,8 @@ const keydownHandler = app.slice(
 
 function harness(text = 'abcdef', cursor = text.length, staticPrefix = '', options = {}) {
   const sent = [];
+  const modifierInputs = [];
+  const modifierConsumed = [];
   const timers = [];
   let value = staticPrefix + text;
   const helper = {
@@ -63,6 +65,9 @@ function harness(text = 'abcdef', cursor = text.length, staticPrefix = '', optio
     nativeKeyboardInput: true,
     mobileQuery: { matches: true },
     mobileKeyboardLocked: false,
+    mobileModifierState: { control: false, alt: false, shift: false },
+    mobileModifierMode: { control: 'off', alt: 'off', shift: 'off' },
+    consumeMobileModifiers: () => { modifierConsumed.push(true); },
     performance: { now: () => 1000 },
     MOBILE_BACKSPACE_SENTINEL: ' ',
     MOBILE_BACKSPACE_BEFORE_INPUT_SUPPRESSION_MS: 200,
@@ -75,7 +80,10 @@ function harness(text = 'abcdef', cursor = text.length, staticPrefix = '', optio
       sent.push(data);
       return true;
     },
-    applyMobileModifiers: (data) => data,
+    applyMobileModifiers: (data) => {
+      modifierInputs.push(data);
+      return options.modifierConversion ? options.modifierConversion(data) : data;
+    },
     showBrowserToast() {},
     clearTimeout() {},
     setTimeout: (callback) => timers.push(callback),
@@ -87,7 +95,7 @@ function harness(text = 'abcdef', cursor = text.length, staticPrefix = '', optio
     target: helper, stopImmediatePropagation() {}, ...fields,
   });
   return {
-    pane, helper, context, sent,
+    pane, helper, context, sent, modifierInputs, modifierConsumed,
     render(next, at = next.length) { rendered = next; buffer.cursorX = at; },
     selection(at) {
       helper.setSelectionRange(at, at);
@@ -126,7 +134,6 @@ test('barriers and non-collapsed selections do not move the terminal', () => {
     (h) => { h.pane.mode = 'observe'; },
     (h) => { h.pane.closed = true; },
     (h) => { h.pane.snapshot = {}; },
-    (h) => { h.pane.mobileBackspaceSentinel = true; },
     (h) => { h.pane.mobilePredictionComposition = {}; },
     (h) => { h.context.mobileKeyboardLocked = true; },
     (h) => { h.context.iosKeyboard = false; },
@@ -261,13 +268,12 @@ test('Backspace passes through when a pending known shadow reaches its start', (
   assert.deepEqual(h.sent, ['\x7f']);
 });
 
-test('an empty shadow uses a space marker that never becomes a word', () => {
+test('an empty shadow keeps the helper empty until typing', () => {
   const h = harness('', 0);
   h.render('', 0);
   h.context.prepareMobilePredictionFocus(h.pane);
-  assert.equal(h.helper.value, ' ');
-  assert.equal(h.pane.mobileBackspaceSentinel, true);
-  h.input(' hello', 6, { data: 'hello' });
+  assert.equal(h.helper.value, '');
+  h.input('hello', 5, { data: 'hello' });
   assert.deepEqual(h.sent, ['hello']);
   assert.equal(h.helper.value, 'hello');
 });
@@ -354,6 +360,70 @@ test('owned composition commits once at the moved caret', () => {
   h.flush();
   assert.deepEqual(h.sent, ['\x1b[D'.repeat(4), '日本']);
   assert.equal(h.pane.mobilePredictionCursor, 4);
+});
+
+test('a composition start never rewrites the helper', () => {
+  const h = harness('', 0, '', { iosKeyboard: true });
+  h.render('', 0);
+  h.context.prepareMobilePredictionFocus(h.pane);
+  assert.equal(h.helper.value, '');
+  // The IME applies the first character, then reports the composition.
+  h.helper.value = ' h';
+  h.helper.setSelectionRange(2, 2);
+  h.context.handleMobilePredictionCompositionStart(h.event());
+  assert.equal(h.helper.value, ' h');
+  assert.equal(h.pane.mobilePredictionComposition, true);
+  assert.deepEqual(h.sent, []);
+});
+
+test('a composition commits the first letter once', () => {
+  const h = harness('', 0, '', { iosKeyboard: true });
+  h.render('', 0);
+  h.context.prepareMobilePredictionFocus(h.pane);
+  h.context.handleMobilePredictionCompositionStart(h.event());
+  assert.ok(h.pane.mobilePredictionComposition);
+  h.input('h', 1, { inputType: 'insertCompositionText', isComposing: true });
+  h.context.handleMobilePredictionCompositionEnd(h.event({ data: 'h' }));
+  h.flush();
+  assert.deepEqual(h.sent, ['h']);
+  assert.equal(h.helper.value, 'h');
+});
+
+test('an IME caret before the typed character does not pull the cursor back', () => {
+  const h = harness('', 0, '', { iosKeyboard: true });
+  h.render('', 0);
+  h.context.prepareMobilePredictionFocus(h.pane);
+  assert.equal(h.helper.value, '');
+  // The IME writes the letter and reports the caret before it.
+  h.input('y', 0);
+  assert.deepEqual(h.sent, ['y']);
+  assert.equal(h.pane.mobilePredictionCursor, 1);
+});
+
+test('a modifier converts one inserted character after a caret anomaly', () => {
+  const h = harness('', 0, '', {
+    iosKeyboard: true,
+    mobileModifierState: { control: true, alt: false, shift: false },
+    modifierConversion: (data) => (data === 'y' ? '\x19' : data),
+  });
+  h.render('', 0);
+  h.context.prepareMobilePredictionFocus(h.pane);
+  h.input('y', 0);
+  assert.deepEqual(h.sent, ['\x19']);
+  assert.equal(h.modifierConsumed.length, 1);
+});
+
+test('a modifier drops the separator space an IME appends', () => {
+  const h = harness('', 0, '', {
+    iosKeyboard: true,
+    mobileModifierState: { control: true, alt: false, shift: false },
+    modifierConversion: (data) => (data === 'y' ? '\x19' : data),
+  });
+  h.render('', 0);
+  h.context.prepareMobilePredictionFocus(h.pane);
+  h.input('y ', 2);
+  assert.deepEqual(h.sent, ['\x19']);
+  assert.equal(h.modifierConsumed.length, 1);
 });
 
 test('composition keeps the known input-session shadow across concurrent output', () => {
