@@ -187,18 +187,27 @@ export function terminalTextInputDelta(
   while (shared < previous.length && shared < next.length
     && previous[shared] === next[shared]) shared += 1;
   if (shared === previous.length && shared === next.length) {
-    return { data: moveCaret(from, to, applicationCursorKeys), removed: 0, inserted: '' };
+    return {
+      data: moveCaret(from, to, applicationCursorKeys),
+      removed: 0,
+      inserted: '',
+      insertedStart: 0,
+      insertedEnd: 0,
+    };
   }
   let tail = 0;
   while (tail < previous.length - shared && tail < next.length - shared
     && previous[previous.length - tail - 1] === next[next.length - tail - 1]) tail += 1;
   const removed = previous.length - shared - tail;
   const inserted = next.slice(shared, next.length - tail).join('');
+  const insertedStart = next.slice(0, shared).join('').length;
   return {
     data: moveCaret(from, shared + removed, applicationCursorKeys)
       + DELETE_CHARACTER.repeat(removed) + inserted
       + moveCaret(next.length - tail, to, applicationCursorKeys),
     removed,
     inserted,
+    insertedStart,
+    insertedEnd: insertedStart + inserted.length,
   };
 }

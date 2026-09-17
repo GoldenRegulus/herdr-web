@@ -48,7 +48,6 @@ const { WebglAddon } = globalThis.WebglAddon;
   const mobileNavigationModeButton = document.querySelector('#mobile-navigation-mode');
   const mobileDefaultRow = document.querySelector('#mobile-default-row');
   const mobileNavigationRow = document.querySelector('#mobile-navigation-row');
-  const mobileSnapshotButton = document.querySelector('#mobile-snapshot');
   const paneMobileBar = document.querySelector('#pane-mobile-bar');
   const fullModeButton = document.querySelector('#full-mode');
   const panesModeButton = document.querySelector('#panes-mode');
@@ -100,9 +99,6 @@ const { WebglAddon } = globalThis.WebglAddon;
   const MOBILE_LONG_PRESS_MOVE_PX = 10;
   const MOBILE_NATIVE_MENU_CLICK_SUPPRESSION_MS = 750;
   const MOBILE_BACKSPACE_BEFORE_INPUT_SUPPRESSION_MS = 200;
-  // A space initializes native Backspace state without becoming a word.
-  // A word character would show in the iOS prediction bar.
-  const MOBILE_BACKSPACE_SENTINEL = ' ';
   const MOBILE_MOUSE_DRAG_HOLD_MS = 180;
   const MOBILE_SCROLL_MAX_VELOCITY = 2.2;
   const MOBILE_SCROLL_DECAY_MS = 240;
@@ -170,6 +166,8 @@ const { WebglAddon } = globalThis.WebglAddon;
   let currentPaneRequests = [];
   const paneTerminals = new Map();
   const mobileModifierState = { control: false, alt: false, shift: false };
+  // Tap once for one shot, twice to hold, three times to clear.
+  const mobileModifierMode = { control: 'off', alt: 'off', shift: 'off' };
   let mobileMouseMode = false;
   let mobileKeyboardLocked = false;
   let mobileNavigationMode = false;
@@ -1500,22 +1498,30 @@ const { WebglAddon } = globalThis.WebglAddon;
 
   function renderMobileModifierState() {
     for (const button of mobileModifiers.querySelectorAll('[data-modifier]')) {
+      const name = button.dataset.modifier;
+      const mode = mobileModifierMode[name] || 'off';
+      const label = button.textContent.trim() || name;
+      button.setAttribute('aria-pressed', String(mode !== 'off'));
+      button.dataset.mode = mode;
       button.setAttribute(
-        'aria-pressed',
-        String(mobileModifierState[button.dataset.modifier] === true),
+        'aria-label',
+        `${label}, ${mode === 'hold' ? 'held' : mode === 'once' ? 'one shot' : 'off'}`,
       );
     }
   }
 
   function resetMobileModifiers() {
-    for (const name of Object.keys(mobileModifierState)) mobileModifierState[name] = false;
+    for (const name of Object.keys(mobileModifierState)) {
+      mobileModifierState[name] = false;
+      mobileModifierMode[name] = 'off';
+    }
     renderMobileModifierState();
   }
 
   function renderMobileNavigationMode() {
     mobileNavigationModeButton.setAttribute('aria-pressed', String(mobileNavigationMode));
     mobileNavigationModeButton.setAttribute(
-      'aria-label', mobileNavigationMode ? 'Show primary keys' : 'Show navigation keys',
+      'aria-label', mobileNavigationMode ? 'Show primary keys' : 'Show more keys',
     );
     mobileDefaultRow.hidden = mobileNavigationMode;
     mobileNavigationRow.hidden = !mobileNavigationMode;
@@ -1542,9 +1548,23 @@ const { WebglAddon } = globalThis.WebglAddon;
 
   function toggleMobileModifier(name) {
     if (!(name in mobileModifierState)) return;
-    mobileModifierState[name] = !mobileModifierState[name];
+    const next = { off: 'once', once: 'hold', hold: 'off' };
+    mobileModifierMode[name] = next[mobileModifierMode[name]] || 'off';
+    mobileModifierState[name] = mobileModifierMode[name] !== 'off';
     renderMobileModifierState();
     focusTerminalAfterControl();
+  }
+
+  // One-shot modifiers clear after the input that used them.
+  function consumeMobileModifiers() {
+    let changed = false;
+    for (const name of Object.keys(mobileModifierState)) {
+      if (mobileModifierMode[name] !== 'once') continue;
+      mobileModifierMode[name] = 'off';
+      mobileModifierState[name] = false;
+      changed = true;
+    }
+    if (changed) renderMobileModifierState();
   }
 
   function applyMobileModifiers(data) {
@@ -1611,6 +1631,7 @@ const { WebglAddon } = globalThis.WebglAddon;
     }
     clearMobilePredictionState(pane, true);
     sendInput(data);
+    consumeMobileModifiers();
     focusTerminalAfterControl();
   }
 
@@ -1620,6 +1641,7 @@ const { WebglAddon } = globalThis.WebglAddon;
     if (!data || !pane) return;
     clearMobilePredictionState(pane, true);
     sendInput(data);
+    consumeMobileModifiers();
     focusTerminalAfterControl();
   }
 
@@ -1697,31 +1719,13 @@ const { WebglAddon } = globalThis.WebglAddon;
     return { ansi, cols: source.cols, rows: source.rows };
   }
 
-  function renderMobileSnapshotButton(active) {
-    const pane = selectedPaneTerminal();
-    const open = pane?.snapshot !== undefined;
-    mobileSnapshotButton.dataset.active = String(open);
-    mobileSnapshotButton.setAttribute('aria-pressed', String(open));
-    mobileSnapshotButton.setAttribute(
-      'aria-label', open ? 'Close terminal snapshot' : 'Open terminal snapshot',
-    );
-    mobileSnapshotButton.title = open ? 'Close snapshot' : 'Terminal snapshot';
-    mobileSnapshotButton.disabled = !pane || (active && !open);
-    for (const icon of mobileSnapshotButton.querySelectorAll('[data-snapshot-icon]')) {
-      icon.toggleAttribute(
-        'hidden', icon.dataset.snapshotIcon !== (open ? 'close' : 'capture'),
-      );
-    }
-  }
-
   function syncTerminalSnapshotControls() {
     const active = [...paneTerminals.values()].some((pane) => pane.snapshot !== undefined);
     paneGrid.dataset.snapshotActive = String(active);
     panesView.dataset.snapshotActive = String(active);
     for (const button of paneMobileBar.querySelectorAll('button')) {
-      if (button !== paneBrowse && button !== mobileSnapshotButton) button.disabled = active;
+      if (button !== paneBrowse) button.disabled = active;
     }
-    renderMobileSnapshotButton(active);
   }
 
   function closeTerminalSnapshot(pane, syncControls = true) {
@@ -1736,7 +1740,7 @@ const { WebglAddon } = globalThis.WebglAddon;
     if (syncControls) syncTerminalSnapshotControls();
   }
 
-  function openTerminalSnapshot(pane) {
+  function openTerminalSnapshot(pane, auto = false, point = undefined) {
     if (!pane || pane.snapshot) return;
     pane.cancelTouchScroll?.();
     stopMobileKeyRepeat();
@@ -1773,7 +1777,17 @@ const { WebglAddon } = globalThis.WebglAddon;
       scrollback: 0,
       theme: terminalTheme,
     });
-    pane.snapshot = { terminal: snapshotTerminal, view };
+    pane.snapshot = {
+      auto, openedAt: performance.now(), selected: false, closeTimer: undefined,
+      terminal: snapshotTerminal, view,
+    };
+    view.addEventListener('click', () => {
+      if (!pane.snapshot?.auto || pane.snapshot.selected) return;
+      // The tap that ends the long press must not close the new snapshot.
+      if (performance.now() - pane.snapshot.openedAt < 700) return;
+      if (String(document.getSelection() || '').trim()) return;
+      closeTerminalSnapshot(pane);
+    });
     syncTerminalSnapshotControls();
     syncPaneKeyboardHelper(pane);
     snapshotTerminal.open(snapshotHost);
@@ -1784,14 +1798,65 @@ const { WebglAddon } = globalThis.WebglAddon;
     }
     snapshotTerminal.write(capture.ansi, () => {
       requestAnimationFrame(() => {
-        if (pane.snapshot?.terminal === snapshotTerminal) view.dataset.ready = 'true';
+        if (pane.snapshot?.terminal !== snapshotTerminal) return;
+        view.dataset.ready = 'true';
+        if (point) selectSnapshotWordAt(pane, point.x, point.y);
       });
     });
   }
 
-  function toggleTerminalSnapshot(pane) {
-    if (pane?.snapshot) closeTerminalSnapshot(pane);
-    else openTerminalSnapshot(pane);
+  // The live pane paints to a canvas, so it has no selectable text. The
+  // snapshot is a DOM copy; select the word under the pressed point so one
+  // long press both freezes the pane and starts the selection.
+  function selectSnapshotWordAt(pane, x, y, attempt = 0) {
+    const document = pane.tile.ownerDocument;
+    let range;
+    if (typeof document.caretRangeFromPoint === 'function') {
+      range = document.caretRangeFromPoint(x, y);
+    } else if (typeof document.caretPositionFromPoint === 'function') {
+      const position = document.caretPositionFromPoint(x, y);
+      if (position) {
+        range = document.createRange();
+        range.setStart(position.offsetNode, position.offset);
+      }
+    }
+    const node = range?.startContainer;
+    if (node && node.nodeType === Node.TEXT_NODE) {
+      const text = node.textContent || '';
+      let offset = range.startOffset;
+      const wordAt = (index) => {
+        let start = index;
+        let end = index;
+        while (start > 0 && !/\s/.test(text[start - 1])) start -= 1;
+        while (end < text.length && !/\s/.test(text[end])) end += 1;
+        return start === end ? undefined : { start, end };
+      };
+      // Rows pad with spaces to the column count. Fall back to the nearest
+      // word on the same row when the tap lands on that padding.
+      let word = wordAt(offset);
+      if (!word) {
+        while (!word && offset > 0) {
+          offset -= 1;
+          if (/\s/.test(text[offset])) continue;
+          word = wordAt(offset);
+        }
+      }
+      if (word) {
+        range.setStart(node, word.start);
+        range.setEnd(node, word.end);
+        const selection = document.getSelection();
+        if (selection) {
+          selection.removeAllRanges();
+          selection.addRange(range);
+        }
+        return;
+      }
+    }
+    // The snapshot renders after this callback. Retry until its rows carry
+    // text at the pressed point.
+    if (attempt < 25) {
+      setTimeout(() => selectSnapshotWordAt(pane, x, y, attempt + 1), 80);
+    }
   }
 
   function renderMobileMouseMode() {
@@ -1886,73 +1951,6 @@ const { WebglAddon } = globalThis.WebglAddon;
     return pane?.terminal.textarea;
   }
 
-  function resetMobileBackspaceSentinelState(pane) {
-    pane.mobileBackspaceSentinel = false;
-    pane.mobileBackspaceSentinelInsertion = false;
-    pane.mobileBackspaceSentinelNative = false;
-  }
-
-  function clearMobileBackspaceSentinel(pane) {
-    if (!pane?.mobileBackspaceSentinel) return;
-    resetMobileBackspaceSentinelState(pane);
-    const helper = paneKeyboardHelper(pane);
-    if (!helper) return;
-    if (helper.value.startsWith(MOBILE_BACKSPACE_SENTINEL)) {
-      const start = Math.max(0, helper.selectionStart - MOBILE_BACKSPACE_SENTINEL.length);
-      const end = Math.max(0, helper.selectionEnd - MOBILE_BACKSPACE_SENTINEL.length);
-      const direction = helper.selectionDirection;
-      helper.value = helper.value.slice(MOBILE_BACKSPACE_SENTINEL.length);
-      helper.setSelectionRange(start, end, direction);
-    }
-  }
-
-  function insertNativeMobileBackspaceSentinel(pane) {
-    const helper = paneKeyboardHelper(pane);
-    if (!helper || document.activeElement !== helper) return false;
-    pane.mobileBackspaceSentinel = true;
-    pane.mobileBackspaceSentinelInsertion = true;
-    pane.mobileBackspaceSentinelNative = false;
-    helper.value = '';
-    helper.setSelectionRange(0, 0);
-    let inserted = false;
-    try {
-      inserted = document.execCommand('insertText', false, MOBILE_BACKSPACE_SENTINEL);
-    } catch (_error) {
-      inserted = false;
-    } finally {
-      pane.mobileBackspaceSentinelInsertion = false;
-    }
-    if (helper.value !== MOBILE_BACKSPACE_SENTINEL) {
-      helper.value = MOBILE_BACKSPACE_SENTINEL;
-    }
-    helper.setSelectionRange(helper.value.length, helper.value.length);
-    pane.mobileBackspaceSentinelNative = inserted;
-    return inserted;
-  }
-
-  function ensureMobileBackspaceSentinel(pane) {
-    // WebKit needs a native character for Backspace repeat. Android IMEs
-    // treat the marker as real text, so the marker stays iOS-only.
-    if (!iosKeyboard) return;
-    const helper = paneKeyboardHelper(pane);
-    if (!helper || pane.mobilePredictionText) return;
-    if (pane.mobileBackspaceSentinel) {
-      if (document.activeElement === helper && !pane.mobileBackspaceSentinelNative) {
-        insertNativeMobileBackspaceSentinel(pane);
-      } else if (!helper.value) {
-        helper.value = MOBILE_BACKSPACE_SENTINEL;
-        helper.setSelectionRange(helper.value.length, helper.value.length);
-      }
-      return;
-    }
-    if (helper.value) return;
-    pane.mobileBackspaceSentinel = true;
-    if (!insertNativeMobileBackspaceSentinel(pane)) {
-      helper.value = MOBILE_BACKSPACE_SENTINEL;
-      helper.setSelectionRange(helper.value.length, helper.value.length);
-    }
-  }
-
   function setMobilePredictionAttributes(helper, enabled) {
     if (!helper) return;
     helper.setAttribute('autocorrect', enabled ? 'on' : 'off');
@@ -1987,7 +1985,6 @@ const { WebglAddon } = globalThis.WebglAddon;
     const helper = paneKeyboardHelper(pane);
     setMobilePredictionAttributes(helper, false);
     if (clearHelper) {
-      resetMobileBackspaceSentinelState(pane);
       if (helper) helper.value = '';
     }
   }
@@ -2000,7 +1997,7 @@ const { WebglAddon } = globalThis.WebglAddon;
     pane.mobilePredictionCursor = shadow.cursor;
     pane.mobilePredictionConfirmed = true;
     setMobilePredictionAttributes(helper, true);
-    if (helper && !pane.mobileBackspaceSentinel) restoreMobilePredictionHelper(pane);
+    if (helper) restoreMobilePredictionHelper(pane);
   }
 
   function syncMobilePredictionFromTerminal(pane) {
@@ -2031,7 +2028,7 @@ const { WebglAddon } = globalThis.WebglAddon;
     pane.mobilePredictionPrefix = prefix;
     setMobilePredictionAttributes(helper, true);
     if (
-      !helper || pane.mobileBackspaceSentinel || helper.value !== oldValue
+      !helper || helper.value !== oldValue
       || oldPrefix === prefix
     ) return;
     const relativeStart = Math.max(0, selectionStart - oldPrefix.length);
@@ -2055,13 +2052,9 @@ const { WebglAddon } = globalThis.WebglAddon;
       (pane.mobilePredictionConfirmed || pane.mobilePredictionPending)
       && mobilePredictionHelperValue(pane)
       && !pane.mobilePredictionComposition
+      && helper.value !== mobilePredictionHelperValue(pane)
     ) {
-      resetMobileBackspaceSentinelState(pane);
-      if (helper.value !== mobilePredictionHelperValue(pane)) {
-        restoreMobilePredictionHelper(pane);
-      }
-    } else {
-      ensureMobileBackspaceSentinel(pane);
+      restoreMobilePredictionHelper(pane);
     }
   }
 
@@ -2071,10 +2064,6 @@ const { WebglAddon } = globalThis.WebglAddon;
     // Safari may queue selectionchange behind blur. Send that final movement
     // before xterm clears the helper, then retain the last sent caret position.
     followMobileCaret(pane, true);
-    if (pane.mobileBackspaceSentinel) {
-      clearMobileBackspaceSentinel(pane);
-      return;
-    }
     if (helper.value !== mobilePredictionHelperValue(pane)) {
       clearMobilePredictionState(pane);
       return;
@@ -2105,8 +2094,8 @@ const { WebglAddon } = globalThis.WebglAddon;
     if (!iosKeyboard || !mobileQuery.matches || mobileKeyboardLocked
       || !helper || (!beforeBlur && document.activeElement !== helper)
       || !paneAcceptsInput(pane, false) || pane.snapshot
-      || pane.mobilePredictionComposition || pane.mobileBackspaceSentinel
-      || (!pane.mobilePredictionConfirmed && !pane.mobilePredictionPending)
+      || pane.mobilePredictionComposition
+      || !pane.mobilePredictionConfirmed
       || helper.value !== mobilePredictionHelperValue(pane)
       || helper.selectionStart !== helper.selectionEnd) return;
     const prefixLength = (pane.mobilePredictionPrefix || '').length;
@@ -2126,6 +2115,29 @@ const { WebglAddon } = globalThis.WebglAddon;
     if (pane) followMobileCaret(pane);
   }
 
+  // A long press freezes a pane into snapshot mode for native selection. Clear
+  // the selection to return to the live pane.
+  function syncAutoSnapshotSelection() {
+    const text = String(document.getSelection() || '').trim();
+    for (const pane of paneTerminals.values()) {
+      const snapshot = pane.snapshot;
+      if (!snapshot?.auto) continue;
+      if (text) {
+        snapshot.selected = true;
+        clearTimeout(snapshot.closeTimer);
+        snapshot.closeTimer = undefined;
+        continue;
+      }
+      if (!snapshot.selected || snapshot.closeTimer) continue;
+      snapshot.closeTimer = setTimeout(() => {
+        snapshot.closeTimer = undefined;
+        if (pane.snapshot !== snapshot) return;
+        if (String(document.getSelection() || '').trim()) return;
+        closeTerminalSnapshot(pane);
+      }, 250);
+    }
+  }
+
   function normalizeMobileHelperText(pane, helperValue, helperCursor) {
     const prefix = pane.mobilePredictionPrefix || '';
     if (!helperValue.startsWith(prefix)) return { helperValue, helperCursor };
@@ -2142,14 +2154,29 @@ const { WebglAddon } = globalThis.WebglAddon;
     };
   }
 
-  function applyMobileTextValue(pane, helperValue, helperCursor, useModifiers = false) {
+  // Apply the active modifier to one inserted character. Some keyboards append
+  // a separator space when they commit a word; a modifier gesture must not
+  // send that space.
+  function mobileModifiedInsertion(inserted) {
+    if (!mobileQuery.matches
+      || !Object.values(mobileModifierState).some(Boolean)) return undefined;
+    const parts = [...inserted];
+    if (!parts.length || parts.length > 2) return undefined;
+    if (parts.length === 2 && !/^\s$/u.test(parts[1])) return undefined;
+    const converted = applyMobileModifiers(parts[0]);
+    return converted === parts[0] ? undefined : converted;
+  }
+
+  function applyMobileTextValue(
+    pane, helperValue, helperCursor, useModifiers = false, viaComposition = false,
+  ) {
     const prefix = pane.mobilePredictionPrefix || '';
     if (!helperValue.startsWith(prefix) || helperCursor < prefix.length) {
       restoreMobilePredictionHelper(pane);
       return false;
     }
     const text = helperValue.slice(prefix.length);
-    const cursor = helperCursor - prefix.length;
+    let cursor = helperCursor - prefix.length;
     const edit = terminalTextInputDelta(
       pane.mobilePredictionText, text, pane.mobilePredictionCursor, cursor,
       pane.terminal.modes?.applicationCursorKeysMode,
@@ -2160,18 +2187,33 @@ const { WebglAddon } = globalThis.WebglAddon;
     }
     const input = edit.data;
     if (input) {
-      const data = useModifiers && input === edit.inserted
-        ? applyMobileModifiers(input) : input;
+      // A pure IME insertion always leaves the native caret after the text it
+      // wrote. Some keyboards report the caret at its start, which would add
+      // a spurious backward move and hide the insertion from the modifier.
+      let applied = edit;
+      if (edit.removed === 0 && edit.inserted
+        && cursor >= edit.insertedStart && cursor < edit.insertedEnd) {
+        cursor = edit.insertedEnd;
+        applied = terminalTextInputDelta(
+          pane.mobilePredictionText, text, pane.mobilePredictionCursor, cursor,
+          pane.terminal.modes?.applicationCursorKeysMode,
+        ) || edit;
+      }
+      const data = useModifiers && applied.data === applied.inserted
+        ? mobileModifiedInsertion(applied.inserted) ?? applied.data
+        : applied.data;
       if (!sendMobilePaneKeyboardData(pane, data)) {
         restoreMobilePredictionHelper(pane);
         return false;
       }
-      if (data !== input) {
+      if (data !== applied.data) {
         // Modifier keys can send controls or different text. Do not keep the
         // native helper value as an editable model of that terminal input.
         clearMobilePredictionState(pane, true);
+        consumeMobileModifiers();
         return true;
       }
+    } else {
     }
     pane.mobilePredictionText = text;
     pane.mobilePredictionCursor = cursor;
@@ -2209,7 +2251,6 @@ const { WebglAddon } = globalThis.WebglAddon;
       && event.inputType !== 'deleteWordBackward'
     ) return false;
 
-    clearMobileBackspaceSentinel(pane);
     event.stopImmediatePropagation();
     if (!paneAcceptsInput(pane, false) || mobileKeyboardLocked || pane.snapshot) return true;
     const normalized = normalizeMobileHelperText(
@@ -2233,28 +2274,13 @@ const { WebglAddon } = globalThis.WebglAddon;
   function handleMobilePredictionCompositionStart(event) {
     if (!nativeKeyboardInput || !mobileQuery.matches || mobileKeyboardLocked) return;
     const pane = paneForKeyboardTarget(event.target);
-    const helper = paneKeyboardHelper(pane);
-    if (!pane || !helper) return;
-    clearMobileBackspaceSentinel(pane);
-    followMobileCaret(pane);
-    const prefixLength = (pane.mobilePredictionPrefix || '').length;
-    const selectionStart = helper.selectionStart - prefixLength;
-    const selectionEnd = helper.selectionEnd - prefixLength;
-    if (
-      helper.value !== mobilePredictionHelperValue(pane)
-      || !Number.isInteger(selectionStart) || !Number.isInteger(selectionEnd)
-      || selectionStart < 0 || selectionEnd < selectionStart
-      || !paneAcceptsInput(pane, false) || pane.snapshot
-    ) {
-      restoreMobilePredictionHelper(pane);
-      return;
-    }
-    pane.mobilePredictionComposition = {
-      text: pane.mobilePredictionText,
-      helperValue: helper.value,
-      selectionStart,
-      selectionEnd,
-    };
+    if (!pane || !paneKeyboardHelper(pane)) return;
+    if (!paneAcceptsInput(pane, false) || pane.snapshot) return;
+    // The native shadow owns the text. Do not rewrite the helper here: the
+    // IME has already applied its first native edit, and a value change
+    // cancels that edit. Stop xterm from reading the composition and read the
+    // committed value at compositionend instead.
+    pane.mobilePredictionComposition = true;
     event.stopImmediatePropagation();
   }
 
@@ -2266,29 +2292,15 @@ const { WebglAddon } = globalThis.WebglAddon;
   function handleMobilePredictionCompositionEnd(event) {
     const pane = paneForKeyboardTarget(event.target);
     const helper = paneKeyboardHelper(pane);
-    const state = pane?.mobilePredictionComposition;
-    if (!pane || !helper || !state) return;
+    if (!pane || !helper || !pane.mobilePredictionComposition) return;
     event.stopImmediatePropagation();
-    const eventData = event.data;
     setTimeout(() => {
-      if (pane.mobilePredictionComposition !== state) return;
+      if (!pane.mobilePredictionComposition) return;
       pane.mobilePredictionComposition = undefined;
       if (!paneAcceptsInput(pane, false) || pane.snapshot || mobileKeyboardLocked) return;
-      // Native composition can revise the full helper value. Read it only
-      // after the final input event. Do not move its selection during IME use.
-      if (helper.value !== state.helperValue) {
-        applyMobileTextValue(pane, helper.value, mobileHelperCaret(helper));
-      } else if (typeof eventData === 'string' && eventData) {
-        const text = state.text.slice(0, state.selectionStart)
-          + eventData + state.text.slice(state.selectionEnd);
-        const cursor = state.selectionStart + eventData.length;
-        const helperValue = `${pane.mobilePredictionPrefix || ''}${text}`;
-        const helperCursor = (pane.mobilePredictionPrefix || '').length + cursor;
-        if (applyMobileTextValue(pane, helperValue, helperCursor)) {
-          helper.value = helperValue;
-          helper.setSelectionRange(helperCursor, helperCursor);
-        }
-      }
+      // The IME has committed the final value. Send what the helper holds,
+      // with any active modifier applied to a single inserted character.
+      applyMobileTextValue(pane, helper.value, mobileHelperCaret(helper), true, true);
     }, 0);
   }
 
@@ -2418,7 +2430,7 @@ const { WebglAddon } = globalThis.WebglAddon;
     ) && helper?.value === mobilePredictionHelperValue(pane)
       && helper.selectionStart === helper.selectionEnd
       && helper.selectionStart === 0;
-    if (pane.mobileBackspaceSentinel || atNativeStart) {
+    if (atNativeStart) {
       event.preventDefault();
       event.stopImmediatePropagation();
       pane.suppressDeletionBeforeInputUntil = performance.now()
@@ -2436,10 +2448,6 @@ const { WebglAddon } = globalThis.WebglAddon;
     if (!mobileQuery.matches || mobileKeyboardLocked) return;
     const pane = paneForKeyboardTarget(event.target);
     if (!pane) return;
-    if (pane.mobileBackspaceSentinelInsertion) {
-      event.stopImmediatePropagation();
-      return;
-    }
     if (event.isComposing) return;
     // Safari can deliver the final caret change just before the text edit,
     // before its queued selectionchange event reaches this document.
@@ -2450,10 +2458,7 @@ const { WebglAddon } = globalThis.WebglAddon;
       pane.suppressDeletionBeforeInputUntil = 0;
       return;
     }
-    if (
-      pane.mobileBackspaceSentinel
-      || (pane.suppressDeletionBeforeInputUntil || 0) >= performance.now()
-    ) {
+    if ((pane.suppressDeletionBeforeInputUntil || 0) >= performance.now()) {
       if (event.cancelable) event.preventDefault();
       event.stopImmediatePropagation();
       pane.suppressDeletionBeforeInputUntil = 0;
@@ -2801,9 +2806,6 @@ const { WebglAddon } = globalThis.WebglAddon;
       mobilePredictionConfirmed: false,
       mobilePredictionComposition: undefined,
       mobilePredictionPending: false,
-      mobileBackspaceSentinel: false,
-      mobileBackspaceSentinelInsertion: false,
-      mobileBackspaceSentinelNative: false,
     };
     paneTerminal.element.addEventListener('focus', (event) => {
       if (event.target === paneKeyboardHelper(record)) prepareMobilePredictionFocus(record);
@@ -2835,19 +2837,11 @@ const { WebglAddon } = globalThis.WebglAddon;
       queuePaneTextPaste(record, text);
     }, true);
     paneTerminal.element.addEventListener('input', (event) => {
-      if (
-        event.target === paneKeyboardHelper(record)
-        && record.mobileBackspaceSentinelInsertion
-      ) {
-        event.stopImmediatePropagation();
-        return;
-      }
       if (handleMobileTextInput(record, event)) return;
       if (
         event.inputType !== 'insertFromPaste'
         || event.target !== paneKeyboardHelper(record)
       ) return;
-      clearMobileBackspaceSentinel(record);
       const text = event.target.value;
       if (!text) return;
       event.stopImmediatePropagation();
@@ -3112,6 +3106,9 @@ const { WebglAddon } = globalThis.WebglAddon;
         if (!touchMoved) {
           if (touchDuration >= MOBILE_LONG_PRESS_MS) {
             suppressClipboardClickUntil = now + MOBILE_NATIVE_MENU_CLICK_SUPPRESSION_MS;
+            // A long press is the selection gesture. Freeze the pane so its
+            // text can be selected and copied.
+            openTerminalSnapshot(record, true, { x: touchPointerX, y: touchPointerY });
           }
           cancelTouchScroll();
           return;
@@ -4408,14 +4405,9 @@ const { WebglAddon } = globalThis.WebglAddon;
   mobileNavigationModeButton.addEventListener('click', () => {
     setMobileNavigationMode(!mobileNavigationMode);
   });
-  mobileSnapshotButton.addEventListener('pointerdown', (event) => event.preventDefault());
-  mobileSnapshotButton.addEventListener('click', () => {
-    toggleTerminalSnapshot(selectedPaneTerminal());
-  });
   renderMobileMouseMode();
   renderMobileKeyboardLock();
   renderMobileNavigationMode();
-  renderMobileSnapshotButton(false);
   for (const button of mobileArrows.querySelectorAll('[data-arrow]')) {
     bindRepeatableMobileKey(button, () => sendMobileArrow(button.dataset.arrow));
   }
@@ -4434,7 +4426,10 @@ const { WebglAddon } = globalThis.WebglAddon;
   document.querySelector('#sheet-close').addEventListener('click', () => closeMobileSheet());
   document.addEventListener('keydown', handleMobileTerminalKeyDown, true);
   document.addEventListener('beforeinput', handleMobileTerminalBeforeInput, true);
-  document.addEventListener('selectionchange', handleMobileCaretSelection, true);
+  document.addEventListener('selectionchange', () => {
+    handleMobileCaretSelection();
+    syncAutoSnapshotSelection();
+  }, true);
   document.addEventListener('select', handleMobileCaretSelection, true);
   document.addEventListener(
     'compositionstart', handleMobilePredictionCompositionStart, true,
