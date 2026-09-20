@@ -311,7 +311,7 @@ for line in sys.stdin:
                 base64.b64decode(input_record["bytes"], validate=True), b"browser input"
             )
 
-    async def test_only_one_pane_frame_is_unacknowledged_across_streams(self) -> None:
+    async def test_pane_frames_use_a_bounded_window_across_streams(self) -> None:
         with tempfile.TemporaryDirectory(dir="/tmp") as directory_name:
             directory = Path(directory_name)
             executable = directory / "fake-herdr"
@@ -364,17 +364,19 @@ for line in sys.stdin:
                         initial,
                     )
                 )
-                await self.wait_for_frames(websocket, 1)
-                await asyncio.sleep(0.05)
-                self.assertEqual(len(websocket.sent_bytes), 1)
-                await self.acknowledge_frame(websocket, websocket.sent_bytes[0])
+                # Both streams deliver without waiting for an acknowledgement,
+                # because each stream owns a window instead of one shared slot.
                 await self.wait_for_frames(websocket, 2)
+                await self.acknowledge_frame(websocket, websocket.sent_bytes[0])
                 await self.acknowledge_frame(websocket, websocket.sent_bytes[1])
                 await websocket.incoming.put(
                     {"type": "websocket.disconnect", "code": 1000}
                 )
                 await asyncio.wait_for(task, timeout=5)
 
+            # Each stream sends one frame without waiting for the other's
+            # acknowledgement, so both frames reach the browser.
+            self.assertEqual(len(websocket.sent_bytes), 2)
             stream_ids = {
                 PANE_FRAME_HEADER.unpack(data[: PANE_FRAME_HEADER.size])[1]
                 for data in websocket.sent_bytes
@@ -822,7 +824,7 @@ for line in sys.stdin:
             )
             self.assertEqual((resize["cols"], resize["rows"]), (80, 24))
 
-    async def test_slow_observer_reopens_only_as_an_observer(self) -> None:
+    async def test_slow_observer_keeps_its_observer_stream(self) -> None:
         with tempfile.TemporaryDirectory(dir="/tmp") as directory_name:
             directory = Path(directory_name)
             launches_path = directory / "launches.json"
@@ -899,7 +901,7 @@ for line in sys.stdin:
                         initial,
                     )
                 )
-                await self.wait_for_frames(websocket, 2)
+                await self.wait_for_frames(websocket, 1)
                 await websocket.incoming.put(
                     {"type": "websocket.disconnect", "code": 1000}
                 )
@@ -908,11 +910,13 @@ for line in sys.stdin:
             payloads = [
                 data[PANE_FRAME_HEADER.size :] for data in websocket.sent_bytes
             ]
-            self.assertEqual(payloads, [b"observe-1", b"observe-2"])
+            # A slow acknowledgement no longer forces a reopen. The observer
+            # keeps streaming until its backlog ages or its window stalls.
+            self.assertEqual(payloads, [b"observe-1"])
             launches = json.loads(launches_path.read_text(encoding="utf-8"))
             self.assertEqual(
                 [record["mode"] for record in launches],
-                ["control", "observe", "observe"],
+                ["control", "observe"],
             )
             self.assertFalse(
                 any(
@@ -1488,6 +1492,115 @@ for line in sys.stdin:
                 )
 
             self.assertEqual(websocket.closed, (1011, "pane parser acknowledgement timed out"))
+
+
+    async def test_hidden_pane_pauses_frames_and_resumes_from_a_full_frame(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as directory_name:
+            directory = Path(directory_name)
+            executable = directory / "fake-herdr"
+            executable.write_text(
+                f"""#!{sys.executable}
+import base64
+import json
+import sys
+import time
+
+
+def frame(seq, full, data):
+    print(json.dumps({{
+        'type': 'terminal.frame', 'seq': seq, 'width': 80, 'height': 24,
+        'full': full, 'encoding': 'ansi',
+        'bytes': base64.b64encode(data).decode('ascii'),
+    }}), flush=True)
+
+
+frame(1, True, b'initial')
+for seq in range(2, 200):
+    frame(seq, False, f'incremental {{seq}}'.encode())
+    time.sleep(0.01)
+for line in sys.stdin:
+    record = json.loads(line)
+    if record['type'] == 'terminal.resize':
+        frame(2000, True, b'resynced')
+    if record['type'] == 'terminal.release':
+        break
+""",
+                encoding="utf-8",
+            )
+            executable.chmod(0o700)
+            snapshot = {
+                "tabs": [{"tab_id": "t1"}],
+                "panes": [{"pane_id": "p1", "tab_id": "t1"}],
+            }
+            initial = {
+                "type": "panes.attach",
+                "tab_id": "t1",
+                "panes": [
+                    {"stream_id": 1, "pane_id": "p1", "cols": 80, "rows": 24}
+                ],
+            }
+            websocket = FakeWebSocket(after_frame=[])
+            with (
+                patch.dict(os.environ, {"HERDR_BINARY": str(executable)}),
+                patch(
+                    "herdr_web.app.navigation_snapshot",
+                    AsyncMock(return_value=snapshot),
+                ),
+                patch("herdr_web.app.PANE_FULL_RESYNC_TIMEOUT_SECONDS", 3),
+            ):
+                task = asyncio.create_task(
+                    run_panes_websocket(
+                        websocket,
+                        Backend("backend", "test", directory / "herdr-client.sock"),
+                        initial,
+                    )
+                )
+                await self.wait_for_frames(websocket, 2)
+                await websocket.incoming.put(
+                    {
+                        "type": "websocket.receive",
+                        "text": json.dumps(
+                            {
+                                "type": "pane-visibility",
+                                "stream_id": 1,
+                                "visible": False,
+                            }
+                        ),
+                    }
+                )
+                await asyncio.sleep(0.3)
+                paused_count = len(websocket.sent_bytes)
+                await asyncio.sleep(0.3)
+                self.assertEqual(len(websocket.sent_bytes), paused_count)
+                await websocket.incoming.put(
+                    {
+                        "type": "websocket.receive",
+                        "text": json.dumps(
+                            {
+                                "type": "pane-visibility",
+                                "stream_id": 1,
+                                "visible": True,
+                            }
+                        ),
+                    }
+                )
+                for _ in range(600):
+                    if len(websocket.sent_bytes) > paused_count:
+                        break
+                    await asyncio.sleep(0.005)
+                else:
+                    self.fail("pane did not resume after it became visible")
+                await websocket.incoming.put(
+                    {"type": "websocket.disconnect", "code": 1000}
+                )
+                await asyncio.wait_for(task, timeout=5)
+
+            resync = websocket.sent_bytes[-1]
+            header = PANE_FRAME_HEADER.unpack(resync[: PANE_FRAME_HEADER.size])
+            self.assertEqual(header[3], PANE_FRAME_FLAG_FULL)
+            self.assertEqual(resync[PANE_FRAME_HEADER.size :], b'resynced')
 
 
 if __name__ == "__main__":

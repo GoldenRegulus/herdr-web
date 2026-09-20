@@ -105,6 +105,16 @@ OUTPUT_ACK_WINDOW_BYTES: Final = OUTPUT_WEBSOCKET_CHUNK_BYTES
 WEBSOCKET_HEARTBEAT_SECONDS: Final = 15
 PANE_OUTPUT_FRESHNESS_BUDGET_SECONDS: Final = 1.0
 PANE_RESYNC_TRIGGER_SECONDS: Final = PANE_OUTPUT_FRESHNESS_BUDGET_SECONDS / 2
+# A pane may keep several frames in flight. The window grows on clean round
+# trips and halves when a client falls too far behind, so throughput follows
+# the link instead of the round-trip time.
+PANE_WINDOW_MIN_BYTES: Final = 64 * 1024
+PANE_WINDOW_MAX_BYTES: Final = 2 * 1024 * 1024
+PANE_WINDOW_STEP_BYTES: Final = 32 * 1024
+PANE_WINDOW_MAX_FRAMES: Final = 8
+PANE_LAG_RESYNC_SECONDS: Final = 2.0
+PANE_PAUSED_POLL_SECONDS: Final = 0.1
+PANE_FULL_FRAME_DEFLATE_LEVEL: Final = 6
 PANE_BUFFERED_FRAME_SECONDS: Final = 0.005
 PANE_FULL_RESYNC_TIMEOUT_SECONDS: Final = 5.0
 PANE_MAX_SEND_FRAMES_PER_SECOND: Final = 60.0
@@ -316,6 +326,106 @@ class PaneStreamRequest:
     rows: int
 
 
+class PaneStreamWindow:
+    """Bytes and frames in flight for one pane stream.
+
+    The pump reads ahead only while this window has room, so a slow client
+    limits read-ahead instead of forcing one round trip per frame.
+    """
+
+    def __init__(self, stream_id: int) -> None:
+        self.stream_id = stream_id
+        self.window_bytes = PANE_WINDOW_MIN_BYTES
+        self.inflight_bytes = 0
+        self.inflight_frames = 0
+        self.oldest_sent_at: float | None = None
+        self.first_unacked_at: float | None = None
+        self.lagged = False
+        self.paused = False
+        self.needs_resync = False
+        self.room = asyncio.Event()
+        self.room.set()
+
+    def has_room(self) -> bool:
+        if self.paused:
+            return False
+        return (
+            self.inflight_bytes < self.window_bytes
+            and self.inflight_frames < PANE_WINDOW_MAX_FRAMES
+        )
+
+    def note_sent(self, size: int, now: float) -> None:
+        if self.inflight_frames == 0:
+            self.first_unacked_at = now
+        self.inflight_bytes += size
+        self.inflight_frames += 1
+        if self.oldest_sent_at is None:
+            self.oldest_sent_at = now
+        if not self.has_room():
+            self.room.clear()
+
+    def note_acknowledged(self, size: int, frames: int) -> None:
+        self.inflight_bytes = max(0, self.inflight_bytes - size)
+        self.inflight_frames = max(0, self.inflight_frames - frames)
+        if self.inflight_frames == 0:
+            self.oldest_sent_at = None
+            self.first_unacked_at = None
+            self.window_bytes = min(
+                PANE_WINDOW_MAX_BYTES,
+                self.window_bytes + PANE_WINDOW_STEP_BYTES,
+            )
+        if self.has_room():
+            self.room.set()
+
+    def is_lagging(self, now: float | None = None) -> bool:
+        now = time.monotonic() if now is None else now
+        return (
+            not self.paused
+            and self.oldest_sent_at is not None
+            and now - self.oldest_sent_at >= PANE_LAG_RESYNC_SECONDS
+        )
+
+    def stalled_forever(self, now: float | None = None) -> bool:
+        now = time.monotonic() if now is None else now
+        return (
+            self.first_unacked_at is not None
+            and now - self.first_unacked_at >= PANE_FRAME_ACK_TIMEOUT_SECONDS
+        )
+
+    def release(self) -> None:
+        """Drop everything in flight after a resync or a pause."""
+        self.window_bytes = max(PANE_WINDOW_MIN_BYTES, self.window_bytes // 2)
+        self.inflight_bytes = 0
+        self.inflight_frames = 0
+        self.oldest_sent_at = None
+        self.first_unacked_at = None
+        self.lagged = False
+        self.room.set()
+
+    def set_paused(self, paused: bool) -> None:
+        self.paused = paused
+        if paused:
+            self.room.clear()
+        else:
+            self.room.set()
+
+    async def wait_for_room(self) -> bool:
+        """Wait for send room. Return false when the window stopped draining."""
+        while True:
+            if self.has_room():
+                return True
+            if self.is_lagging():
+                return False
+            self.room.clear()
+            if self.paused:
+                await self.room.wait()
+                continue
+            try:
+                await asyncio.wait_for(self.room.wait(), timeout=0.25)
+            except asyncio.TimeoutError:
+                continue
+
+
 @dataclass
 class PaneOutputFrame:
     stream_id: int
@@ -324,6 +434,7 @@ class PaneOutputFrame:
     pacing_updated: asyncio.Event = field(default_factory=asyncio.Event)
     queued_at: float = field(default_factory=time.monotonic)
     sent_at: float | None = None
+    encoded_bytes: int = 0
     discarded: bool = False
 
 
@@ -340,7 +451,8 @@ def encode_pane_websocket_frame(
     flags = PANE_FRAME_FLAG_FULL if frame.full else 0
     payload = frame.bytes
     if deflate and len(payload) >= PANE_DEFLATE_MINIMUM_BYTES:
-        compressed = zlib.compress(payload, 1)
+        level = PANE_FULL_FRAME_DEFLATE_LEVEL if frame.full else 1
+        compressed = zlib.compress(payload, level)
         if len(compressed) < len(payload):
             payload = compressed
             flags |= PANE_FRAME_FLAG_DEFLATE
@@ -362,7 +474,8 @@ async def encode_pane_websocket_frame_async(
     if not deflate or len(frame.bytes) < PANE_DEFLATE_COOPERATIVE_BYTES:
         return encode_pane_websocket_frame(stream_id, frame, deflate=deflate)
 
-    compressor = zlib.compressobj(1)
+    level = PANE_FULL_FRAME_DEFLATE_LEVEL if frame.full else 1
+    compressor = zlib.compressobj(level)
     compressed_parts: list[bytes] = []
     for offset in range(0, len(frame.bytes), PANE_DEFLATE_COOPERATIVE_BYTES):
         compressed_parts.append(
@@ -415,7 +528,7 @@ class AdaptivePaneFramePacer:
         self._last_sent_at = sent_at
         self._sent_expedite_generation = self._expedite_generation
 
-    def note_acknowledged(self, elapsed_seconds: float) -> None:
+    def note_acknowledged(self, elapsed_seconds: float, window_frames: int = 1) -> None:
         sample = max(0.0, elapsed_seconds)
         if self._smoothed_ack_seconds is None:
             self._smoothed_ack_seconds = sample
@@ -424,11 +537,14 @@ class AdaptivePaneFramePacer:
             self._smoothed_ack_seconds = (
                 alpha * sample + (1 - alpha) * self._smoothed_ack_seconds
             )
+        # One acknowledgement covers the frames in flight, so the cadence
+        # allows that many frames per measured round trip.
+        headroom = PANE_ACK_HEADROOM / max(1, window_frames)
         self._target_interval = min(
             self._maximum_interval,
             max(
                 self._minimum_interval,
-                self._smoothed_ack_seconds * PANE_ACK_HEADROOM,
+                self._smoothed_ack_seconds * headroom,
             ),
         )
         if self._expedite_generation != self._sent_expedite_generation:
@@ -1524,6 +1640,10 @@ async def run_panes_websocket(
         maxsize=PANE_COMMAND_QUEUE_SIZE
     )
     acknowledgements: dict[tuple[int, int], PaneOutputFrame] = {}
+    stream_windows: dict[int, PaneStreamWindow] = {
+        request.stream_id: PaneStreamWindow(request.stream_id)
+        for request in requests
+    }
     fatal_error: asyncio.Future[str] = asyncio.get_running_loop().create_future()
     frame_pacer = AdaptivePaneFramePacer()
     frame_scheduler = PaneFrameScheduler(
@@ -1606,20 +1726,62 @@ async def run_panes_websocket(
                 if record.full and (record.width, record.height) == (cols, rows):
                     return client, record
 
+    def discard_stream_frames(stream_id: int) -> None:
+        """Drop frames that are still in flight for one stream."""
+        for key in [key for key in acknowledgements if key[0] == stream_id]:
+            item = acknowledgements.pop(key)
+            item.discarded = True
+            item.pacing_updated.set()
+            item.acknowledged.set()
+            frame_scheduler.remove(item)
+        stream_windows[stream_id].release()
+
     async def pump_stream(request: PaneStreamRequest) -> None:
         stream_id = request.stream_id
         client = clients[stream_id]
+        window = stream_windows[stream_id]
         received_frame = False
         pending_record: AnsiFrame | TerminalClosed | None = None
         backlog_started_at: float | None = None
         while True:
             try:
+                if window.paused:
+                    # Do not send while the pane is hidden. Keep draining the
+                    # stream so Herdr never blocks on this observer, and resume
+                    # from one full frame.
+                    pending_record = None
+                    window.needs_resync = True
+                    try:
+                        await asyncio.wait_for(
+                            client.read_record(), timeout=PANE_BUFFERED_FRAME_SECONDS
+                        )
+                    except asyncio.TimeoutError:
+                        pass
+                    if window.paused:
+                        await asyncio.sleep(PANE_PAUSED_POLL_SECONDS)
+                    continue
+                if window.needs_resync:
+                    window.needs_resync = False
+                    client, pending_record = await read_fresh_pane_frame(request, client)
+                    continue
                 if pending_record is None:
+                    if not await window.wait_for_room():
+                        if window.stalled_forever():
+                            if not fatal_error.done():
+                                fatal_error.set_result(
+                                    "pane parser acknowledgement timed out"
+                                )
+                            return
+                        # The client fell behind the window. Drop what is in
+                        # flight and continue from a fresh full frame.
+                        discard_stream_frames(stream_id)
+                        window.needs_resync = True
+                        continue
                     record = await client.read_record()
                 else:
                     record = pending_record
                     pending_record = None
-            except (OSError, RuntimeError, asyncio.TimeoutError, PaneStreamError) as error:
+            except Exception as error:
                 await queue_control(
                     {"type": "pane-closed", "stream_id": stream_id, "reason": str(error)}
                 )
@@ -1665,31 +1827,25 @@ async def run_panes_websocket(
             received_frame = True
             if modes[stream_id] == "control":
                 writable_streams.add(stream_id)
-            acknowledged = asyncio.Event()
-            item = PaneOutputFrame(stream_id, record, acknowledged)
-            key = (stream_id, record.seq)
-            acknowledgements[key] = item
+            item = PaneOutputFrame(stream_id, record, asyncio.Event())
+            acknowledgements[(stream_id, record.seq)] = item
+            frame_scheduler.publish(item)
             try:
-                frame_scheduler.publish(item)
-                try:
-                    await asyncio.wait_for(
-                        acknowledged.wait(), timeout=PANE_FRAME_ACK_TIMEOUT_SECONDS
-                    )
-                except asyncio.TimeoutError:
-                    if not fatal_error.done():
-                        fatal_error.set_result("pane parser acknowledgement timed out")
-                    return
+                # Wait until this frame leaves the send queue. The window, not
+                # this frame's acknowledgement, bounds the next read.
+                await item.pacing_updated.wait()
             finally:
                 frame_scheduler.remove(item)
-                acknowledgements.pop(key, None)
+            if item.discarded:
+                acknowledgements.pop((stream_id, record.seq), None)
+                backlog_started_at = None
+                window.needs_resync = True
+                continue
 
-            await item.pacing_updated.wait()
-            frame_was_slow = (
-                item.sent_at is not None
-                and time.monotonic() - item.sent_at >= PANE_RESYNC_TRIGGER_SECONDS
-            )
+            # A pane that already has a buffered successor is behind. Prefer the
+            # current full state over stale history once that backlog ages.
             buffered_successor = False
-            if not item.discarded and not frame_was_slow:
+            if not window.paused:
                 try:
                     pending_record = await asyncio.wait_for(
                         client.read_record(), timeout=PANE_BUFFERED_FRAME_SECONDS
@@ -1697,7 +1853,11 @@ async def run_panes_websocket(
                     buffered_successor = isinstance(pending_record, AnsiFrame)
                 except asyncio.TimeoutError:
                     pending_record = None
-                except (OSError, RuntimeError, PaneStreamError) as error:
+                except (
+                    OSError,
+                    RuntimeError,
+                    PaneStreamError,
+                ) as error:
                     await queue_control(
                         {
                             "type": "pane-closed",
@@ -1706,37 +1866,33 @@ async def run_panes_websocket(
                         }
                     )
                     return
-
-            if buffered_successor:
-                if backlog_started_at is None:
-                    backlog_started_at = item.sent_at or item.queued_at
-                backlog_is_stale = (
-                    time.monotonic()
-                    - backlog_started_at
-                    + frame_pacer.target_interval_seconds
-                    >= PANE_RESYNC_TRIGGER_SECONDS
-                )
-            else:
+            if not buffered_successor:
                 backlog_started_at = None
-                backlog_is_stale = False
+                continue
+            if backlog_started_at is None:
+                backlog_started_at = item.sent_at or item.queued_at
+            if (
+                time.monotonic() - backlog_started_at
+                < PANE_RESYNC_TRIGGER_SECONDS
+            ):
+                continue
+            backlog_started_at = None
+            pending_record = None
+            discard_stream_frames(stream_id)
+            window.needs_resync = True
 
-            if item.discarded or frame_was_slow or backlog_is_stale:
-                backlog_started_at = None
-                try:
-                    client, pending_record = await read_fresh_pane_frame(request, client)
-                except (OSError, RuntimeError, asyncio.TimeoutError, PaneStreamError) as error:
-                    await queue_control(
-                        {
-                            "type": "pane-closed",
-                            "stream_id": stream_id,
-                            "reason": str(error),
-                        }
-                    )
-                    return
+    def pane_frame_acknowledgement_expired() -> bool:
+        return any(window.stalled_forever() for window in stream_windows.values())
 
     async def send_browser_output() -> None:
         nonlocal pending_error
         while True:
+            if pane_frame_acknowledgement_expired():
+                if not fatal_error.done():
+                    fatal_error.set_result(
+                        "pane parser acknowledgement timed out"
+                    )
+                return
             if pending_error is not None:
                 control_item = pending_error
                 pending_error = None
@@ -1806,11 +1962,12 @@ async def run_panes_websocket(
                     item.pacing_updated.set()
                     item.acknowledged.set()
                     return
-                # Keep one frame awaiting browser parser acknowledgement across
-                # the complete WebSocket. Unsent frames remain bounded to one
-                # decoded record per configured pane and are age-checked first.
-                await item.acknowledged.wait()
-                frame_pacer.note_acknowledged(time.monotonic() - item.sent_at)
+                # The pane window bounds read-ahead. Keep several frames in
+                # flight so throughput follows the link, not the round trip.
+                item.encoded_bytes = len(encoded)
+                stream_windows[item.stream_id].note_sent(
+                    item.encoded_bytes, item.sent_at
+                )
                 item.pacing_updated.set()
                 continue
 
@@ -1821,9 +1978,21 @@ async def run_panes_websocket(
                 or frame_scheduler.has_pending
             ):
                 continue
+            # Wake in time to fail a client that stopped acknowledging frames.
+            wait_seconds = WEBSOCKET_HEARTBEAT_SECONDS
+            now = time.monotonic()
+            for window in stream_windows.values():
+                if window.first_unacked_at is None:
+                    continue
+                remaining = PANE_FRAME_ACK_TIMEOUT_SECONDS - (
+                    now - window.first_unacked_at
+                )
+                wait_seconds = min(wait_seconds, max(0.01, remaining))
             try:
-                await frame_scheduler.wait_for_change(WEBSOCKET_HEARTBEAT_SECONDS)
+                await frame_scheduler.wait_for_change(wait_seconds)
             except asyncio.TimeoutError:
+                if pane_frame_acknowledgement_expired():
+                    continue
                 try:
                     await asyncio.wait_for(
                         websocket.send_json({"type": "ping"}),
@@ -1833,6 +2002,34 @@ async def run_panes_websocket(
                     if not fatal_error.done():
                         fatal_error.set_result("pane WebSocket send timed out")
                     return
+
+    def acknowledge_pane_frames(stream_id: int, seq: int) -> None:
+        """Release every acknowledged frame up to this sequence number."""
+        released_keys = [
+            key
+            for key in acknowledgements
+            if key[0] == stream_id and key[1] <= seq
+        ]
+        if not released_keys:
+            return
+        window = stream_windows[stream_id]
+        released_bytes = 0
+        released_frames = 0
+        newest_sent_at: float | None = None
+        for key in released_keys:
+            item = acknowledgements.pop(key)
+            item.acknowledged.set()
+            if item.sent_at is None:
+                continue
+            released_bytes += item.encoded_bytes
+            released_frames += 1
+            if newest_sent_at is None or item.sent_at > newest_sent_at:
+                newest_sent_at = item.sent_at
+        window.note_acknowledged(released_bytes, released_frames)
+        if released_frames and newest_sent_at is not None:
+            frame_pacer.note_acknowledged(
+                time.monotonic() - newest_sent_at, released_frames
+            )
 
     async def report_error(message: str) -> None:
         nonlocal pending_error
@@ -1892,9 +2089,14 @@ async def run_panes_websocket(
                 except (TypeError, ValueError):
                     continue
                 if isinstance(stream_id, int):
-                    item = acknowledgements.get((stream_id, seq))
-                    if item is not None and item.sent_at is not None:
-                        item.acknowledged.set()
+                    acknowledge_pane_frames(stream_id, seq)
+            elif kind == "pane-visibility":
+                stream_id = control.get("stream_id")
+                visible = control.get("visible")
+                if isinstance(stream_id, int) and isinstance(visible, bool):
+                    window = stream_windows.get(stream_id)
+                    if window is not None:
+                        window.set_paused(not visible)
             elif kind == "pong":
                 continue
             else:
@@ -2188,6 +2390,9 @@ def main() -> None:
         app,
         host=arguments.host,
         port=arguments.port,
+        # Pane frames carry their own deflate flag. A second WebSocket-level
+        # pass would only burn CPU on an already compressed payload.
+        ws_per_message_deflate=False,
         # Herdr Web does not consume proxy identity or client-address headers.
         # Keep the transport peer authoritative and avoid accidental trust.
         proxy_headers=False,
