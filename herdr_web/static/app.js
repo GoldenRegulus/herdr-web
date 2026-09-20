@@ -4521,6 +4521,18 @@ const { WebglAddon } = globalThis.WebglAddon;
   window.addEventListener('popstate', restoreUrlSelection);
   appearanceQuery.addEventListener('change', syncHerdrTheme);
   document.addEventListener('visibilitychange', () => {
+    // A hidden page stops consuming frames. Pause each pane so the server
+    // drops output instead of keeping the link busy, and resume from a full
+    // frame when the page returns.
+    for (const pane of paneTerminals.values()) {
+      if (typeof pane.streamId !== 'number') continue;
+      if (socket?.readyState !== WebSocket.OPEN || !outputFlow?.paneMode) continue;
+      socket.send(JSON.stringify({
+        type: 'pane-visibility',
+        stream_id: pane.streamId,
+        visible: !document.hidden,
+      }));
+    }
     if (!document.hidden) {
       void syncHerdrTheme();
       void refreshNavigation();

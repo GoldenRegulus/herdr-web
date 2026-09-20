@@ -180,8 +180,11 @@ explicit deflate compression for pane frames; older clients keep raw frames.
 Large compression jobs yield between bounded chunks, so they do not add an
 unsafe persistent thread before a later Full-mode PTY fork.
 
-Panes keeps one pending frame per stream and permits only one frame awaiting
-browser parser acknowledgement across the complete WebSocket. An active-aware
+Panes keeps one pending frame per stream and gives each stream a window of
+frames and bytes that may wait for browser parser acknowledgement at the same
+time. The window grows by one step after every clean round trip and halves when
+a stream falls behind, so throughput follows the link instead of the round-trip
+time. The pump reads ahead only while the window has room. An active-aware
 round-robin scheduler gives recent input short priority and then gives service
 to background panes. A dedicated receive task processes parser ACKs without
 waiting for resize, Paste, image, mouse, or other ordered terminal commands. A
@@ -191,6 +194,14 @@ admitted commands have one five-second total drain budget. A stalled drain is
 canceled so it cannot retain a controller indefinitely. Delivery of input
 already sent across a broken connection is uncertain; it is not automatically
 replayed.
+
+When a stream stalls for two seconds, or a buffered backlog ages past the
+resynchronization trigger, Herdr Web drops the frames that are still in flight
+and continues from one full frame. Pane frames carry their own deflate flag, and
+the WebSocket layer declines `permessage-deflate` so a payload is never
+compressed twice. Full frames use a higher compression level than incremental
+frames. A hidden page pauses every pane: the server drains and drops that
+pane's output, and the pane resumes from one full frame when it becomes visible.
 
 Panes uses a one-second freshness budget with a half-second resynchronization
 trigger. If a frame waits or parses too slowly, or buffered history persists
