@@ -390,6 +390,21 @@ header {
   border-bottom-color: var(--theme-accent);
   color: inherit;
 }
+#pane-tabs button[data-status="idle"] {
+  background: color-mix(in srgb, var(--theme-overlay-1) 12%, transparent);
+}
+#pane-tabs button[data-status="working"] {
+  background: color-mix(in srgb, var(--theme-accent) 12%, transparent);
+}
+#pane-tabs button[data-status="done"] {
+  background: color-mix(in srgb, var(--theme-green) 12%, transparent);
+}
+#pane-tabs button[data-status="blocked"] {
+  background: color-mix(in srgb, var(--theme-yellow) 14%, transparent);
+}
+#pane-tabs button[data-status="error"] {
+  background: color-mix(in srgb, var(--theme-red) 14%, transparent);
+}
 #pane-grid {
   background: var(--theme-background);
   grid-row: 2;
