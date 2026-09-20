@@ -699,7 +699,7 @@ const { WebglAddon } = globalThis.WebglAddon;
         navigationRecordLabel(workspace, 'Space'),
         detail,
         workspace.workspace_id === selectedWorkspace,
-        workspace.agent_status,
+        undefined,
         () => selectPaneWorkspace(workspace.workspace_id),
       ));
     }
@@ -737,6 +737,14 @@ const { WebglAddon } = globalThis.WebglAddon;
       button.type = 'button';
       button.role = 'tab';
       button.textContent = navigationRecordLabel(tab, 'Tab');
+      const status = tab.agent_status;
+      if (status && status !== 'unknown') {
+        button.dataset.status = status;
+        const statusText = document.createElement('span');
+        statusText.className = 'visually-hidden';
+        statusText.textContent = `Status: ${status}`;
+        button.append(statusText);
+      }
       button.setAttribute('aria-selected', String(tab.tab_id === selectedTab));
       button.addEventListener('click', () => selectPaneTab(tab.tab_id));
       paneTabs.append(button);
@@ -932,7 +940,7 @@ const { WebglAddon } = globalThis.WebglAddon;
         navigationRecordLabel(workspace, 'Space'),
         `${workspaceTabs.length} ${workspaceTabs.length === 1 ? 'tab' : 'tabs'}`,
         workspace.workspace_id === selectedWorkspace,
-        workspace.agent_status,
+        undefined,
         workspaceTabs.length
           ? () => togglePaneBrowseBranch('workspace', workspace.workspace_id)
           : () => selectPaneWorkspace(workspace.workspace_id),
@@ -1182,7 +1190,8 @@ const { WebglAddon } = globalThis.WebglAddon;
       }
       const current = targetId === navigationSnapshot[`focused_${kind === 'agent' ? 'pane' : kind}_id`];
       const button = sheetItem(
-        navigationRecordLabel(record, fallback), detail, current, record.agent_status,
+        navigationRecordLabel(record, fallback), detail, current,
+        kind === 'workspace' ? undefined : record.agent_status,
         () => focusNavigationTarget(kind, targetId, button),
       );
       sheetContent.append(button);
