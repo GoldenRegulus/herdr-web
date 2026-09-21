@@ -1391,6 +1391,21 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.post("/api/client-report", include_in_schema=False)
+async def client_report(request: Request) -> dict[str, bool]:
+    """Record a bounded browser diagnostic in the server log."""
+    try:
+        payload = await request.json()
+    except Exception:
+        return {"recorded": False}
+    if not isinstance(payload, dict):
+        return {"recorded": False}
+    kind = str(payload.get("kind", ""))[:32]
+    detail = str(payload.get("detail", ""))[:300]
+    logger.info("client report: %s %s", kind, detail)
+    return {"recorded": True}
+
+
 @app.get("/api/backends")
 async def list_backends() -> dict[str, list[dict[str, str]]]:
     return {
