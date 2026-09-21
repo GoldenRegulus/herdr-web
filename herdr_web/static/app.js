@@ -3368,7 +3368,45 @@ const { WebglAddon } = globalThis.WebglAddon;
     }));
   }
 
+  let lastTerminalFrameAt = Date.now();
+
+  function reportClientIssue(kind, detail) {
+    try {
+      void fetch(apiUrl('client-report'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ kind, detail: String(detail ?? '').slice(0, 300) }),
+        keepalive: true,
+      }).catch(() => undefined);
+    } catch (_error) {
+      // Reporting must never break the terminal.
+    }
+  }
+
+  window.addEventListener('error', (event) => {
+    reportClientIssue('error', `${event.message} @${event.lineno}:${event.colno}`);
+  });
+  window.addEventListener('unhandledrejection', (event) => {
+    const reason = event.reason;
+    reportClientIssue('rejection', reason?.message || String(reason));
+  });
+  window.setInterval(() => {
+    if (document.hidden) return;
+    if (socket?.readyState !== WebSocket.OPEN) return;
+    const idleMs = Date.now() - lastTerminalFrameAt;
+    if (idleMs < 20_000) return;
+    const mode = outputFlow?.paneMode ? 'panes' : 'full';
+    reportClientIssue(
+      'stall',
+      `no ${mode} frame for ${Math.round(idleMs / 1000)}s view=${viewMode}`
+      + ` panes=${paneTerminals.size}`
+      + ` awaitingFull=${[...paneTerminals.values()].filter((pane) => pane.awaitingFull).length}`,
+    );
+    lastTerminalFrameAt = Date.now();
+  }, 10_000);
+
   function queuePaneFrame(frame, flow) {
+    lastTerminalFrameAt = Date.now();
     receivedFrames += 1;
     const pane = paneTerminals.get(frame.streamId);
     if (!pane) return;
@@ -3536,6 +3574,7 @@ const { WebglAddon } = globalThis.WebglAddon;
 
   function queueTerminalOutput(bytes, flow) {
     receivedFrames += 1;
+    lastTerminalFrameAt = Date.now();
     const activeTerminal = terminal;
     if (!activeTerminal) return Promise.resolve(false);
     // Use xterm's supported write queue. It limits parser work per browser
