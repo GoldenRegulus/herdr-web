@@ -1,10 +1,15 @@
 #!/bin/bash
 # Install herdr-web as a launchd service.
 #
+# herdr-web listens on loopback only. The oauth2-proxy container in
+# ~/docker/herdr-web is the single exposed surface: it publishes port 8765 on
+# every interface of the Mac, including the Tailscale address, and reaches
+# herdr-web through host.docker.internal.
+#
 # Running pieces live in ~/services/herdr-web: a local copy of the application,
 # the virtual environment, and the logs. The source of truth stays in this
-# repository; this script copies it. A process that launchd starts cannot read
-# code from an SMB share, and the share is unavailable at login.
+# repository; this script copies it, because a process that launchd starts
+# cannot read code from the SMB share.
 #
 # Usage: scripts/install-service.sh
 set -euo pipefail
@@ -17,6 +22,7 @@ LOGS="$SERVICE/logs"
 PYTHON="${HERDR_WEB_PYTHON:-/opt/homebrew/bin/python3}"
 AGENTS="$HOME/Library/LaunchAgents"
 DOMAIN="gui/$(id -u)"
+PORT="${HERDR_WEB_PORT:-8766}"
 
 mkdir -p "$APP" "$LOGS" "$AGENTS"
 
@@ -42,7 +48,7 @@ load_agent() {
     launchctl print "$DOMAIN/$label" >/dev/null 2>&1 || break
     sleep 0.25
   done
-  for attempt in 1 2 3 4 5; do
+  for _ in 1 2 3 4 5; do
     if launchctl bootstrap "$DOMAIN" "$plist" 2>/dev/null; then return 0; fi
     sleep 2
   done
@@ -50,11 +56,15 @@ load_agent() {
   return 1
 }
 
-install_agent() {
-  local name="$1" host="$2"
-  local label="com.regulus.herdr-web.$name"
-  local plist="$AGENTS/$label.plist"
-  cat > "$plist" <<PLIST
+remove_agent() {
+  local label="$1"
+  launchctl bootout "$DOMAIN/$label" 2>/dev/null || true
+  rm -f "$AGENTS/$label.plist"
+}
+
+label="com.regulus.herdr-web.loopback"
+plist="$AGENTS/$label.plist"
+cat > "$plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -63,8 +73,8 @@ install_agent() {
   <key>ProgramArguments</key>
   <array>
     <string>$VENV/bin/herdr-web</string>
-    <string>--host</string><string>$host</string>
-    <string>--port</string><string>8765</string>
+    <string>--host</string><string>127.0.0.1</string>
+    <string>--port</string><string>$PORT</string>
   </array>
   <key>WorkingDirectory</key><string>$APP</string>
   <key>EnvironmentVariables</key>
@@ -75,56 +85,33 @@ install_agent() {
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>5</integer>
-  <key>StandardOutPath</key><string>$LOGS/$name.log</string>
-  <key>StandardErrorPath</key><string>$LOGS/$name.log</string>
+  <key>StandardOutPath</key><string>$LOGS/loopback.log</string>
+  <key>StandardErrorPath</key><string>$LOGS/loopback.log</string>
 </dict>
 </plist>
 PLIST
-  load_agent "$label" "$plist"
-  echo "installed $label on $host:8765"
-}
 
-install_agent loopback 127.0.0.1
-install_agent lan 192.168.2.1
+load_agent "$label" "$plist"
+echo "installed $label on 127.0.0.1:$PORT"
 
-# The oauth2-proxy container in ~/docker/herdr-web listens on 127.0.0.1:4181.
-# Docker cannot publish a container port on the Tailscale address, so forward
-# the tailnet port to the proxy from the host.
-FORWARD_PLIST="$AGENTS/com.regulus.herdr-web.forward.plist"
-cat > "$FORWARD_PLIST" <<PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>com.regulus.herdr-web.forward</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/opt/homebrew/bin/socat</string>
-    <string>-d</string><string>-d</string>
-    <string>TCP4-LISTEN:8765,bind=100.70.11.77,reuseaddr,fork</string>
-    <string>TCP4:127.0.0.1:4181</string>
-  </array>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <key>ThrottleInterval</key><integer>5</integer>
-  <key>StandardOutPath</key><string>$LOGS/forward.log</string>
-  <key>StandardErrorPath</key><string>$LOGS/forward.log</string>
-</dict>
-</plist>
-PLIST
-load_agent com.regulus.herdr-web.forward "$FORWARD_PLIST"
-echo "installed com.regulus.herdr-web.forward on 100.70.11.77:8765" 
+# The proxy publishes 8765 on every interface, so herdr-web no longer binds the
+# LAN address and nothing forwards the Tailscale port.
+remove_agent com.regulus.herdr-web.lan
+remove_agent com.regulus.herdr-web.forward
 
-for host in 127.0.0.1 192.168.2.1; do
-  for _ in $(seq 1 100); do
-    if curl -fsS -m 2 "http://$host:8765/healthz" >/dev/null 2>&1; then
-      echo "healthy: $host:8765"
-      break
-    fi
-    sleep 0.3
-  done
-  curl -fsS -m 2 "http://$host:8765/healthz" >/dev/null 2>&1 \
-    || { echo "FAILED to start on $host" >&2; exit 1; }
+for _ in $(seq 1 100); do
+  if curl -fsS -m 2 "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1; then
+    echo "healthy: herdr-web on 127.0.0.1:$PORT"
+    break
+  fi
+  sleep 0.3
+done
+curl -fsS -m 2 "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1 \
+  || { echo "FAILED: herdr-web did not start on $PORT" >&2; exit 1; }
+
+for host in 127.0.0.1 192.168.2.1 100.70.11.77; do
+  code=$(curl -sS -m 3 -o /dev/null -w '%{http_code}' "http://$host:8765/ping" || true)
+  echo "proxy on $host:8765 -> ${code:-no answer}"
 done
 
 echo "logs: $LOGS"
