@@ -99,6 +99,9 @@ const { WebglAddon } = globalThis.WebglAddon;
   const MOBILE_LONG_PRESS_MOVE_PX = 10;
   const MOBILE_NATIVE_MENU_CLICK_SUPPRESSION_MS = 750;
   const MOBILE_BACKSPACE_BEFORE_INPUT_SUPPRESSION_MS = 200;
+  // The Return key arrives as a keydown and as a native line break. Send the
+  // carriage return once and keep the native newline out of the helper.
+  const MOBILE_RETURN_BEFORE_INPUT_SUPPRESSION_MS = 500;
   const MOBILE_MOUSE_DRAG_HOLD_MS = 180;
   const MOBILE_SCROLL_MAX_VELOCITY = 2.2;
   const MOBILE_SCROLL_DECAY_MS = 240;
@@ -1565,6 +1568,10 @@ const { WebglAddon } = globalThis.WebglAddon;
   }
 
   // One-shot modifiers clear after the input that used them.
+  function mobileModifiersArmed() {
+    return Object.values(mobileModifierState).some(Boolean);
+  }
+
   function consumeMobileModifiers() {
     let changed = false;
     for (const name of Object.keys(mobileModifierState)) {
@@ -2147,7 +2154,27 @@ const { WebglAddon } = globalThis.WebglAddon;
     }
   }
 
+  // The terminal maps one editable line, so a control character can never be
+  // part of the shadow text. Removing one keeps the next edit usable instead
+  // of rejecting it as invalid text.
+  function stripMobileControlCharacters(text, cursor) {
+    if (!/[\x00-\x1f\x7f]/u.test(text)) return { text, cursor };
+    let result = '';
+    let adjusted = cursor;
+    for (let index = 0; index < text.length; index += 1) {
+      if (/[\x00-\x1f\x7f]/u.test(text[index])) {
+        if (index < cursor) adjusted -= 1;
+        continue;
+      }
+      result += text[index];
+    }
+    return { text: result, cursor: Math.max(0, Math.min(adjusted, result.length)) };
+  }
+
   function normalizeMobileHelperText(pane, helperValue, helperCursor) {
+    const cleaned = stripMobileControlCharacters(helperValue, helperCursor);
+    helperValue = cleaned.text;
+    helperCursor = cleaned.cursor;
     const prefix = pane.mobilePredictionPrefix || '';
     if (!helperValue.startsWith(prefix)) return { helperValue, helperCursor };
     const normalized = mobileTextWithoutRedundantSeparator(
@@ -2258,6 +2285,8 @@ const { WebglAddon } = globalThis.WebglAddon;
       && event.inputType !== 'insertReplacementText'
       && event.inputType !== 'deleteContentBackward'
       && event.inputType !== 'deleteWordBackward'
+      && event.inputType !== 'insertLineBreak'
+      && event.inputType !== 'insertParagraph'
     ) return false;
 
     event.stopImmediatePropagation();
@@ -2395,6 +2424,16 @@ const { WebglAddon } = globalThis.WebglAddon;
     );
   }
 
+  function sendMobileReturn(pane) {
+    const data = applyMobileModifiers('\r');
+    clearMobilePredictionState(pane, true);
+    // Return uses the armed gesture even when a legacy encoding keeps the
+    // same bytes a plain Return sends.
+    if (mobileModifiersArmed()) consumeMobileModifiers();
+    sendMobilePaneKeyboardData(pane, data);
+    focusTerminalAfterControl();
+  }
+
   function sendMobilePaneKeyboardData(pane, data) {
     if (!paneAcceptsInput(pane)) return false;
     if (!setActivePane(pane.streamId)) {
@@ -2417,6 +2456,17 @@ const { WebglAddon } = globalThis.WebglAddon;
     if (!nativeKeyboardInput || !mobileQuery.matches || mobileKeyboardLocked) return;
     const pane = paneForKeyboardTarget(event.target);
     if (!pane) return;
+    if (event.key === 'Enter') {
+      // Keep the native line break out of the helper: the terminal line is
+      // already finished, and a leftover newline prevents the next edit from
+      // mapping to terminal input.
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      pane.suppressReturnBeforeInputUntil = performance.now()
+        + MOBILE_RETURN_BEFORE_INPUT_SUPPRESSION_MS;
+      sendMobileReturn(pane);
+      return;
+    }
     if (event.key !== 'Backspace') {
       // iOS and Android can report software-keyboard edits as
       // Unidentified/keyCode 229. Keep the native marker until the browser
@@ -2458,6 +2508,16 @@ const { WebglAddon } = globalThis.WebglAddon;
     const pane = paneForKeyboardTarget(event.target);
     if (!pane) return;
     if (event.isComposing) return;
+    if (event.inputType === 'insertLineBreak' || event.inputType === 'insertParagraph') {
+      if (event.cancelable) event.preventDefault();
+      event.stopImmediatePropagation();
+      if ((pane.suppressReturnBeforeInputUntil || 0) >= performance.now()) {
+        pane.suppressReturnBeforeInputUntil = 0;
+        return;
+      }
+      sendMobileReturn(pane);
+      return;
+    }
     // Safari can deliver the final caret change just before the text edit,
     // before its queued selectionchange event reaches this document.
     followMobileCaret(pane);
@@ -2724,6 +2784,9 @@ const { WebglAddon } = globalThis.WebglAddon;
     const modifiedEnter = physicalModifiedEnterData(event);
     if (modifiedEnter) {
       event.preventDefault();
+      // The mobile modifier bar can arm a one-shot modifier while a hardware
+      // keyboard sends the key. The modified Return used the gesture.
+      if (mobileModifiersArmed()) consumeMobileModifiers();
       sendInput(modifiedEnter);
       return false;
     }
@@ -3233,21 +3296,28 @@ const { WebglAddon } = globalThis.WebglAddon;
         event.stopImmediatePropagation();
       }, true);
     }
-    paneTerminal.onData((data) => {
-      const terminalData = applyMobileModifiers(data);
-      noteMobilePredictionTerminalData(record, terminalData);
-      if (!paneAcceptsInput(record)) return;
-      if (!setActivePane(streamId)) {
-        showBrowserToast('Waiting for input to reach the previous pane');
-        return;
-      }
-      paneTerminal.clearSelection();
-      sendInput(terminalData);
-    });
+    paneTerminal.onData((data) => sendPaneTerminalInput(record, paneTerminal, data));
     paneTerminal.element.addEventListener('focusin', () => setActivePane(streamId));
     tile.addEventListener('pointerdown', () => setActivePane(streamId));
     fitPaneTerminal(record);
     return record;
+  }
+
+  // A one-shot modifier clears after the input it changed, including keys that
+  // xterm encodes itself, such as Return.
+  function sendPaneTerminalInput(pane, paneTerminal, data) {
+    const terminalData = applyMobileModifiers(data);
+    // Consume the gesture when it changed the input, or when a real input used
+    // an armed modifier that a legacy encoding cannot express.
+    if (terminalData !== data || (data && mobileModifiersArmed())) consumeMobileModifiers();
+    noteMobilePredictionTerminalData(pane, terminalData);
+    if (!paneAcceptsInput(pane)) return;
+    if (!setActivePane(pane.streamId)) {
+      showBrowserToast('Waiting for input to reach the previous pane');
+      return;
+    }
+    paneTerminal.clearSelection();
+    sendInput(terminalData);
   }
 
   function sendPaneResizes() {

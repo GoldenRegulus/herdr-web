@@ -19,7 +19,12 @@ export function terminalDataForModifiedEnter(modifiers = {}) {
     + Number(modifiers.alt === true) * 2
     + Number(modifiers.control === true) * 4
     + Number(modifiers.meta === true) * 8;
-  return modifierBits ? `\x1b[13;${modifierBits + 1}u` : undefined;
+  if (!modifierBits) return undefined;
+  // A program that never enabled the extended keyboard protocol cannot read a
+  // modified Return. A CSI-u sequence would reach it as literal text, so send
+  // the legacy encoding instead: Alt prefixes Escape, and the other modifiers
+  // keep the carriage return that Return already uses.
+  return modifiers.alt === true ? '\x1b\r' : '\r';
 }
 
 export function terminalDataForNavigationKey(key, modifiers = {}) {
