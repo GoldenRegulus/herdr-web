@@ -65,6 +65,35 @@ PLIST
 install_agent loopback 127.0.0.1
 install_agent lan 192.168.2.1
 
+# The oauth2-proxy container in ~/docker/herdr-web listens on 127.0.0.1:4181.
+# Docker cannot publish a container port on the Tailscale address, so forward
+# the tailnet port to the proxy from the host.
+FORWARD_PLIST="$AGENTS/com.regulus.herdr-web.forward.plist"
+cat > "$FORWARD_PLIST" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.regulus.herdr-web.forward</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/socat</string>
+    <string>-d</string><string>-d</string>
+    <string>TCP4-LISTEN:8765,bind=100.70.11.77,reuseaddr,fork</string>
+    <string>TCP4:127.0.0.1:4181</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>5</integer>
+  <key>StandardOutPath</key><string>$LOGS/forward.log</string>
+  <key>StandardErrorPath</key><string>$LOGS/forward.log</string>
+</dict>
+</plist>
+PLIST
+launchctl bootout "$DOMAIN/com.regulus.herdr-web.forward" 2>/dev/null || true
+launchctl bootstrap "$DOMAIN" "$FORWARD_PLIST"
+echo "installed com.regulus.herdr-web.forward on 100.70.11.77:8765" 
+
 for host in 127.0.0.1 192.168.2.1; do
   for _ in $(seq 1 100); do
     if curl -fsS -m 2 "http://$host:8765/healthz" >/dev/null 2>&1; then
