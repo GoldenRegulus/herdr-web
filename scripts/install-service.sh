@@ -32,6 +32,24 @@ if [ ! -x "$VENV/bin/herdr-web" ]; then
 fi
 "$VENV/bin/pip" install --quiet "$APP"
 
+# Replace a running agent. launchctl returns an input/output error when a
+# bootstrap follows a bootout of the same label too closely, so wait for the
+# label to disappear and retry.
+load_agent() {
+  local label="$1" plist="$2"
+  launchctl bootout "$DOMAIN/$label" 2>/dev/null || true
+  for _ in $(seq 1 40); do
+    launchctl print "$DOMAIN/$label" >/dev/null 2>&1 || break
+    sleep 0.25
+  done
+  for attempt in 1 2 3 4 5; do
+    if launchctl bootstrap "$DOMAIN" "$plist" 2>/dev/null; then return 0; fi
+    sleep 2
+  done
+  echo "could not load $label" >&2
+  return 1
+}
+
 install_agent() {
   local name="$1" host="$2"
   local label="com.regulus.herdr-web.$name"
@@ -49,6 +67,11 @@ install_agent() {
     <string>--port</string><string>8765</string>
   </array>
   <key>WorkingDirectory</key><string>$APP</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HERDR_BINARY</key><string>$(command -v herdr || echo /opt/homebrew/bin/herdr)</string>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>5</integer>
@@ -57,8 +80,7 @@ install_agent() {
 </dict>
 </plist>
 PLIST
-  launchctl bootout "$DOMAIN/$label" 2>/dev/null || true
-  launchctl bootstrap "$DOMAIN" "$plist"
+  load_agent "$label" "$plist"
   echo "installed $label on $host:8765"
 }
 
@@ -90,8 +112,7 @@ cat > "$FORWARD_PLIST" <<PLIST
 </dict>
 </plist>
 PLIST
-launchctl bootout "$DOMAIN/com.regulus.herdr-web.forward" 2>/dev/null || true
-launchctl bootstrap "$DOMAIN" "$FORWARD_PLIST"
+load_agent com.regulus.herdr-web.forward "$FORWARD_PLIST"
 echo "installed com.regulus.herdr-web.forward on 100.70.11.77:8765" 
 
 for host in 127.0.0.1 192.168.2.1; do
