@@ -1,41 +1,37 @@
 #!/bin/bash
-# Install herdr-web as a launchd service that runs from local disk.
+# Install herdr-web as a launchd service.
 #
-# The repository lives on an SMB share. A service that runs from a network
-# share stops when the share is unavailable and cannot restart at boot. This
-# script copies the application to a local directory, builds a local virtual
-# environment, and installs one launchd agent per host.
+# Running pieces live in ~/services/herdr-web: a local copy of the application,
+# the virtual environment, and the logs. The source of truth stays in this
+# repository; this script copies it. A process that launchd starts cannot read
+# code from an SMB share, and the share is unavailable at login.
 #
 # Usage: scripts/install-service.sh
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-# A path without spaces keeps generated shebang lines simple.
-SUPPORT="$HOME/.local/share/herdr-web"
-APP="$SUPPORT/app"
-VENV="$SUPPORT/venv"
-LOGS="$HOME/Library/Logs/herdr-web"
+SERVICE="$HOME/services/herdr-web"
+APP="$SERVICE/app"
+VENV="$SERVICE/venv"
+LOGS="$SERVICE/logs"
 PYTHON="${HERDR_WEB_PYTHON:-/opt/homebrew/bin/python3}"
 AGENTS="$HOME/Library/LaunchAgents"
 DOMAIN="gui/$(id -u)"
 
 mkdir -p "$APP" "$LOGS" "$AGENTS"
 
-# Copy the application code to local disk.
-rsync -a --delete \
-  --exclude '__pycache__' --exclude '*.pyc' \
+# Copy the application to local disk. launchd cannot execute code that lives on
+# the SMB share.
+rsync -a --delete --exclude '__pycache__' --exclude '*.pyc' \
   "$REPO/herdr_web/" "$APP/herdr_web/"
 cp "$REPO/pyproject.toml" "$REPO/README.md" "$APP/"
 
-# Build the local virtual environment when it is missing or stale.
 if [ ! -x "$VENV/bin/herdr-web" ]; then
   echo "creating $VENV"
-  rm -rf "$VENV"
   "$PYTHON" -m venv "$VENV"
 fi
-"$VENV/bin/pip" install --quiet --upgrade "$APP"
+"$VENV/bin/pip" install --quiet "$APP"
 
-# Install one agent per host.
 install_agent() {
   local name="$1" host="$2"
   local label="com.regulus.herdr-web.$name"
@@ -69,7 +65,6 @@ PLIST
 install_agent loopback 127.0.0.1
 install_agent lan 192.168.2.1
 
-# Wait until every host answers before reporting success.
 for host in 127.0.0.1 192.168.2.1; do
   for _ in $(seq 1 100); do
     if curl -fsS -m 2 "http://$host:8765/healthz" >/dev/null 2>&1; then
@@ -78,11 +73,8 @@ for host in 127.0.0.1 192.168.2.1; do
     fi
     sleep 0.3
   done
-  curl -fsS -m 2 "http://$host:8765/healthz" >/dev/null 2>&1 || {
-    echo "FAILED to start on $host" >&2
-    tail -5 "$LOGS/${host/127.0.0.1/loopback}.log" >&2 || true
-    exit 1
-  }
+  curl -fsS -m 2 "http://$host:8765/healthz" >/dev/null 2>&1 \
+    || { echo "FAILED to start on $host" >&2; exit 1; }
 done
 
 echo "logs: $LOGS"
