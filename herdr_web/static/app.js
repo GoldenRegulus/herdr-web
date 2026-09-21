@@ -3581,16 +3581,15 @@ const { WebglAddon } = globalThis.WebglAddon;
     // task and gives the renderer an opportunity to paint between batches.
     return new Promise((resolve) => {
       activeTerminal.write(bytes, () => {
-        if (terminal !== activeTerminal) {
-          resolve(false);
-          return;
-        }
+        // Acknowledge the flow even when a reconnect replaced this terminal.
+        // The replaced terminal drops these bytes, so the server must release
+        // its acknowledgement window instead of waiting for a timeout.
         if (flow) noteParsedOutput(flow, bytes.length);
         else {
           httpInputReady = true;
           scheduleInputDrain();
         }
-        resolve(true);
+        resolve(terminal === activeTerminal);
       });
     });
   }
