@@ -2257,9 +2257,64 @@ const { WebglAddon } = globalThis.WebglAddon;
     return converted === parts[0] ? undefined : converted;
   }
 
+  // A type-over-selection reports the replaced text as a target range. An
+  // insertion without one is pure typing.
+  function nativeReplacedLength(event) {
+    if (typeof event.getTargetRanges !== 'function') return 0;
+    let length = 0;
+    for (const range of event.getTargetRanges()) {
+      if (range.endOffset > range.startOffset) length += range.endOffset - range.startOffset;
+    }
+    return length;
+  }
+
+  // Keep the invisible field equal to the line the terminal holds, so a native
+  // caret offset maps to a real position in that line. Never rewrite during a
+  // composition: that cancels the text the keyboard is committing.
+  function alignMobilePredictionHelper(pane) {
+    if (pane.mobilePredictionComposition) return;
+    const helper = paneKeyboardHelper(pane);
+    if (helper && helper.value !== mobilePredictionHelperValue(pane)) {
+      restoreMobilePredictionHelper(pane);
+    }
+  }
+
+  // The software keyboard reports exactly what it inserted. Sending that text
+  // can neither erase nor rewrite anything else, and the field and the
+  // terminal stay on the same line. The field text itself is not trusted:
+  // padded screens and separator spaces drift from it.
+  function applyNativeInsertion(pane, inserted, useModifiers) {
+    let text = inserted;
+    const shadowText = pane.mobilePredictionText;
+    const at = pane.mobilePredictionCursor;
+    if (/^\s/u.test(text) && /\s$/u.test(shadowText.slice(0, at))) {
+      // Some keyboards commit a word with a separator the line already has.
+      text = text.replace(/^\s+/u, '');
+      if (!text) {
+        alignMobilePredictionHelper(pane);
+        return true;
+      }
+    }
+    let data = text;
+    if (useModifiers) data = mobileModifiedInsertion(text) ?? text;
+    if (!sendMobilePaneKeyboardData(pane, data)) return false;
+    if (data !== text) {
+      // The modifier sent bytes the field cannot model. Start a clean shadow.
+      clearMobilePredictionState(pane, true);
+      consumeMobileModifiers();
+      return true;
+    }
+    pane.mobilePredictionText = shadowText.slice(0, at) + text + shadowText.slice(at);
+    pane.mobilePredictionCursor = at + text.length;
+    pane.mobilePredictionConfirmed = false;
+    pane.mobilePredictionPending = true;
+    alignMobilePredictionHelper(pane);
+    return true;
+  }
+
   function applyMobileTextValue(
     pane, helperValue, helperCursor, useModifiers = false, viaComposition = false,
-    inputType = '', keyboardData = '',
+    inputType = '', keyboardData = '', replacedLength = 0,
   ) {
     const prefix = pane.mobilePredictionPrefix || '';
     if (!helperValue.startsWith(prefix) || helperCursor < prefix.length) {
@@ -2305,6 +2360,14 @@ const { WebglAddon } = globalThis.WebglAddon;
         `pending=${pane.mobilePredictionPending === true}`,
         recentInputSummary(),
       ].join(' '));
+    }
+    if (inputType === 'insertText' && keyboardData && replacedLength === 0) {
+      // The diff still runs first as a guard: an event that changes nothing is
+      // a duplicate or a caret-only change and must not resend text. A
+      // non-empty target range means the insertion replaced text, so it takes
+      // the diff path below, which deletes exactly what was replaced.
+      if (edit.removed === 0 && !edit.inserted) return true;
+      return applyNativeInsertion(pane, keyboardData, useModifiers);
     }
     if (inputType === 'insertText' && edit.removed > 0 && pane.mobilePredictionPending) {
       // A plain insertion cannot require a terminal deletion. While the echo is
@@ -2426,7 +2489,7 @@ const { WebglAddon } = globalThis.WebglAddon;
     noteRecentInput('native', `${event.inputType}:${event.data || ''}`);
     if (!applyMobileTextValue(
       pane, normalized.helperValue, normalized.helperCursor, useModifiers, false,
-      event.inputType, event.data || '',
+      event.inputType, event.data || '', nativeReplacedLength(event),
     ) && normalized.helperValue.length > MOBILE_PREDICTION_TEXT_LIMIT) {
       clearMobilePredictionState(pane, true);
       showBrowserToast('Mobile input was too long');

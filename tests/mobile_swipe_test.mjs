@@ -246,9 +246,9 @@ test('a swipe keeps the first word when it arrives as an autocorrect replacement
   assert.equal(h.deleted(), false);
 });
 
-test('an insertion that would delete known text is reported with its evidence', () => {
+test('a replacement that removes known text is reported with its evidence', () => {
   const h = harness('hello', 5, 'prompt> ');
-  h.input('prompt> world', 13, { inputType: 'insertText', data: 'world' });
+  h.input('prompt> world', 13, { inputType: 'insertReplacementText', data: 'world' });
   const reports = h.report.filter((entry) => entry.kind === 'native-insert-replaced');
   assert.equal(reports.length, 1, 'the overwrite signature must be recorded');
   assert.match(reports[0].detail, /removed=5/);
@@ -265,9 +265,9 @@ test('a plain insertion never erases terminal text while the echo is pending', (
   h.pane.mobilePredictionConfirmed = false;
   h.input('prompt> this is', 'prompt> this is'.length, { inputType: 'insertText', data: ' is' });
   assert.equal(h.deleted(), false, 'no deletion may reach the terminal');
-  assert.equal(h.sent.join('').endsWith('this is'), true, 'the typed text must arrive');
-  assert.equal(h.pane.mobilePredictionText, `this is${' '.repeat(20)}`);
-  assert.equal(h.pane.mobilePredictionCursor, 7);
+  assert.equal(h.sent.join(''), 'is', 'the word arrives without the separator the line already has');
+  assert.equal(h.pane.mobilePredictionText, `${' '.repeat(20)}is`);
+  assert.equal(h.pane.mobilePredictionCursor, 22);
 });
 
 test('typing while the echo is pending still sends the inserted text', () => {
@@ -280,7 +280,11 @@ test('typing while the echo is pending still sends the inserted text', () => {
 
 test('a confirmed shadow still mirrors a replacement that removes text', () => {
   const h = harness('abc def', 7, 'prompt> ');
-  h.input('prompt> abc X', 'prompt> abc X'.length, { inputType: 'insertText', data: 'X' });
+  h.input('prompt> abc X', 'prompt> abc X'.length, {
+    inputType: 'insertText',
+    data: 'X',
+    getTargetRanges: () => [{ startOffset: 8 + 4, endOffset: 8 + 7 }],
+  });
   assert.equal(h.deleted(), true, 'a confirmed shadow still mirrors the removal');
   assert.equal(h.sent.join('').includes('\x7f\x7f\x7f'), true);
 });
@@ -291,7 +295,7 @@ test('an insertion against a diverged shadow delivers the typed text and erases 
   h.input('prompt> hello t', 'prompt> hello t'.length, { inputType: 'insertText', data: 't' });
   assert.equal(h.deleted(), false, 'a diverged insertion must never erase terminal text');
   assert.equal(h.sent.join('').endsWith('t'), true, 'the typed character must still arrive');
-  assert.equal(h.pane.mobilePredictionText, 'hello tworld');
+  assert.equal(h.pane.mobilePredictionText, 'hello worldt');
 });
 
 test('a diverged insertion with no typed text is dropped without erasing', () => {
