@@ -27,6 +27,10 @@ const keyHandlers = slice(
   '  function sendMobileReturn(pane)',
   '  function terminalMouseButtonCode(button, motion = false)',
 );
+const compositionFunctions = slice(
+  '  function handleMobilePredictionCompositionStart(event)',
+  '  function noteMobilePredictionTerminalData(pane, data)',
+);
 const terminalInputFunction = slice(
   '  function sendPaneTerminalInput(',
   '  function sendPaneResizes(',
@@ -34,6 +38,7 @@ const terminalInputFunction = slice(
 
 function harness(text = '', cursor = text.length) {
   const sent = [];
+  const reports = [];
   const prevented = [];
   const restored = [];
   let value = text;
@@ -115,6 +120,7 @@ function harness(text = '', cursor = text.length) {
     stopMobileKeyRepeat() {},
     performance: { now: () => 1000 },
     MOBILE_BACKSPACE_BEFORE_INPUT_SUPPRESSION_MS: 200,
+    MOBILE_COMPOSITION_STALL_MS: 5,
     MOBILE_RETURN_BEFORE_INPUT_SUPPRESSION_MS: 500,
     paneForKeyboardTarget: (target) => (target === helper ? pane : undefined),
     paneAcceptsInput: (candidate) => candidate.mode === 'control' && !candidate.closed,
@@ -126,7 +132,7 @@ function harness(text = '', cursor = text.length) {
       return true;
     },
     noteMobilePredictionTerminalData() {},
-    reportClientIssue() {},
+    reportClientIssue: (kind, detail) => { reports.push({ kind, detail }); },
     restoreMobilePredictionHelper: (candidate) => { restored.push(candidate); },
     showBrowserToast() {},
     clearTimeout,
@@ -136,6 +142,7 @@ function harness(text = '', cursor = text.length) {
   vm.runInContext(modifierFunctions, context);
   vm.runInContext(helperFunctions, context);
   vm.runInContext(keyHandlers, context);
+  vm.runInContext(compositionFunctions, context);
   vm.runInContext(terminalInputFunction, context);
   const event = (fields = {}) => ({
     target: helper,
@@ -152,6 +159,7 @@ function harness(text = '', cursor = text.length) {
     state,
     mode,
     sent,
+    reports,
     prevented,
     restored,
     render(next, at = next.length) { rendered = next; buffer.cursorX = at; },
@@ -236,4 +244,17 @@ test('a held modifier survives the input it changed', () => {
   h.context.handleMobileTerminalKeyDown(h.keydownReturn());
   assert.equal(h.mode.shift, 'hold');
   assert.deepEqual(h.sent, [terminalDataForModifiedEnter({ shift: true })]);
+});
+
+test('a composition that never ends is committed when the keyboard goes quiet', async () => {
+  const h = harness('hello', 5);
+  h.context.handleMobilePredictionCompositionStart(h.beforeInput({ inputType: 'insertCompositionText' }));
+  h.helper.value = 'helloX';
+  h.helper.setSelectionRange('helloX'.length, 'helloX'.length);
+  h.context.handleMobileTextInput(h.pane, h.beforeInput({ inputType: 'insertCompositionText', data: 'X' }));
+  assert.deepEqual(h.sent, [], 'composition text waits for the commit');
+  assert.equal(h.reports.some((entry) => entry.kind === 'input-swallowed'), true);
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.deepEqual(h.sent, ['X'], 'a stalled composition must still deliver the text');
+  assert.equal(h.pane.mobilePredictionComposition, undefined);
 });

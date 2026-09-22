@@ -102,6 +102,9 @@ const { WebglAddon } = globalThis.WebglAddon;
   // The Return key arrives as a keydown and as a native line break. Send the
   // carriage return once and keep the native newline out of the helper.
   const MOBILE_RETURN_BEFORE_INPUT_SUPPRESSION_MS = 500;
+  // Some software keyboards start a composition and never end it. Commit the
+  // composed text when the keyboard goes quiet instead of dropping every edit.
+  const MOBILE_COMPOSITION_STALL_MS = 750;
   const MOBILE_MOUSE_DRAG_HOLD_MS = 180;
   const MOBILE_SCROLL_MAX_VELOCITY = 2.2;
   const MOBILE_SCROLL_DECAY_MS = 240;
@@ -2116,6 +2119,20 @@ const { WebglAddon } = globalThis.WebglAddon;
 
   let caretBlockedReportedAt = 0;
   let insertReplacedReportedAt = 0;
+  let swallowedInputReportedAt = 0;
+
+  function reportSwallowedInput(pane, reason, inputType) {
+    const now = Date.now();
+    if (now - swallowedInputReportedAt < 5_000) return;
+    swallowedInputReportedAt = now;
+    reportClientIssue('input-swallowed', [
+      reason,
+      `inputType=${inputType || 'unknown'}`,
+      `mode=${pane.mode}`,
+      `pending=${pane.mobilePredictionPending === true}`,
+      recentInputSummary(),
+    ].join(' '));
+  }
 
   function reportCaretBlocked(pane, reason, cursor) {
     const now = Date.now();
@@ -2362,6 +2379,7 @@ const { WebglAddon } = globalThis.WebglAddon;
     ) return false;
     if (pane.mobilePredictionComposition) {
       event.stopImmediatePropagation();
+      reportSwallowedInput(pane, 'composition', event.inputType);
       return true;
     }
     if (
@@ -2381,7 +2399,16 @@ const { WebglAddon } = globalThis.WebglAddon;
     ) return false;
 
     event.stopImmediatePropagation();
-    if (!paneAcceptsInput(pane, false) || mobileKeyboardLocked || pane.snapshot) return true;
+    const blocked = !paneAcceptsInput(pane) ? 'read-only'
+      : mobileKeyboardLocked ? 'keyboard-lock'
+      : pane.snapshot ? 'frozen-pane'
+      : '';
+    if (blocked) {
+      if (blocked === 'keyboard-lock') showBrowserToast('Keyboard lock is on');
+      if (blocked === 'frozen-pane') showBrowserToast('This pane is frozen for selection');
+      reportSwallowedInput(pane, blocked, event.inputType);
+      return true;
+    }
     const normalized = normalizeMobileHelperText(
       pane, helper.value, mobileHelperCaret(helper),
     );
@@ -2412,12 +2439,15 @@ const { WebglAddon } = globalThis.WebglAddon;
     // cancels that edit. Stop xterm from reading the composition and read the
     // committed value at compositionend instead.
     pane.mobilePredictionComposition = true;
+    armMobilePredictionCompositionStall(pane);
     event.stopImmediatePropagation();
   }
 
   function handleMobilePredictionCompositionUpdate(event) {
     const pane = paneForKeyboardTarget(event.target);
-    if (pane?.mobilePredictionComposition) event.stopImmediatePropagation();
+    if (!pane?.mobilePredictionComposition) return;
+    armMobilePredictionCompositionStall(pane);
+    event.stopImmediatePropagation();
   }
 
   function handleMobilePredictionCompositionEnd(event) {
@@ -2426,14 +2456,30 @@ const { WebglAddon } = globalThis.WebglAddon;
     const helper = paneKeyboardHelper(pane);
     if (!helper || !pane.mobilePredictionComposition) return;
     event.stopImmediatePropagation();
-    setTimeout(() => {
-      if (!pane.mobilePredictionComposition) return;
-      pane.mobilePredictionComposition = undefined;
-      if (!paneAcceptsInput(pane, false) || pane.snapshot || mobileKeyboardLocked) return;
-      // The IME has committed the final value. Send what the helper holds,
-      // with any active modifier applied to a single inserted character.
-      applyMobileTextValue(pane, helper.value, mobileHelperCaret(helper), true, true);
-    }, 0);
+    clearTimeout(pane.mobilePredictionCompositionTimer);
+    pane.mobilePredictionCompositionTimer = undefined;
+    setTimeout(() => commitMobilePredictionComposition(pane, helper), 0);
+  }
+
+  function commitMobilePredictionComposition(pane, helper) {
+    if (!pane.mobilePredictionComposition) return;
+    pane.mobilePredictionComposition = undefined;
+    clearTimeout(pane.mobilePredictionCompositionTimer);
+    pane.mobilePredictionCompositionTimer = undefined;
+    if (!paneAcceptsInput(pane, false) || pane.snapshot || mobileKeyboardLocked) return;
+    // The IME has committed the final value. Send what the helper holds,
+    // with any active modifier applied to a single inserted character.
+    applyMobileTextValue(pane, helper.value, mobileHelperCaret(helper), true, true);
+  }
+
+  function armMobilePredictionCompositionStall(pane) {
+    clearTimeout(pane.mobilePredictionCompositionTimer);
+    pane.mobilePredictionCompositionTimer = setTimeout(() => {
+      pane.mobilePredictionCompositionTimer = undefined;
+      const helper = paneKeyboardHelper(pane);
+      if (!helper || !pane.mobilePredictionComposition) return;
+      commitMobilePredictionComposition(pane, helper);
+    }, MOBILE_COMPOSITION_STALL_MS);
   }
 
   function noteMobilePredictionTerminalData(pane, data) {

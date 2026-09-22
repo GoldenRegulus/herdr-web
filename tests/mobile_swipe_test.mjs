@@ -107,6 +107,7 @@ function harness(text = '', cursor = text.length, staticPrefix = '') {
     stopMobileKeyRepeat() {},
     performance: { now: () => 1000 },
     MOBILE_BACKSPACE_BEFORE_INPUT_SUPPRESSION_MS: 200,
+    MOBILE_COMPOSITION_STALL_MS: 750,
     MOBILE_RETURN_BEFORE_INPUT_SUPPRESSION_MS: 500,
     paneForKeyboardTarget: (target) => (target === helper ? pane : undefined),
     paneAcceptsInput: (candidate) => candidate.mode === 'control' && !candidate.closed,
