@@ -85,6 +85,7 @@ function harness(text = 'abcdef', cursor = text.length, staticPrefix = '', optio
       return options.modifierConversion ? options.modifierConversion(data) : data;
     },
     showBrowserToast() {},
+    reportClientIssue() {},
     clearTimeout() {},
     setTimeout: (callback) => timers.push(callback),
     ...options,

@@ -291,10 +291,8 @@ is a display-layer control; Herdr Web does not send it to the terminal as a
 modifier. The
 modifiers apply to arrow and navigation buttons and to a single character from
 the software keyboard. Shift+Tab sends Backtab. A modified software-keyboard
-Enter keeps the legacy encoding: Alt prefixes Escape and the other modifiers
-keep the plain carriage return. Herdr Web cannot detect the extended keyboard
-protocol, so a CSI-u sequence would reach an application that did not ask for
-it as literal text. Hold
+Enter sends CSI-u with the active Ctrl, Alt, and Shift combination. Thus,
+terminal applications can distinguish each combination from plain Enter. Hold
 an arrow or navigation key to repeat it. Selecting another pane clears the
 modifiers. The keyboard lock prevents a
 terminal tap from opening the software keyboard. Use **Browse → Terminal

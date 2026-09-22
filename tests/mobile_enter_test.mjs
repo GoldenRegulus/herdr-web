@@ -126,6 +126,7 @@ function harness(text = '', cursor = text.length) {
       return true;
     },
     noteMobilePredictionTerminalData() {},
+    reportClientIssue() {},
     restoreMobilePredictionHelper: (candidate) => { restored.push(candidate); },
     showBrowserToast() {},
     clearTimeout,
