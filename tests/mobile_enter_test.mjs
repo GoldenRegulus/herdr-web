@@ -272,3 +272,14 @@ test('dictation revisions are held until the hypothesis settles', async () => {
   assert.equal(h.sent.length, 2, 'the settled sentence commits in one edit');
   assert.equal(h.sent[1].includes('ems dictation is broken'), true);
 });
+
+test('typing after a revision commits at once instead of waiting', async () => {
+  const h = harness('', 0);
+  h.input('se', 2, { inputType: 'insertText', data: 'se' });
+  h.input('seems dictation', 15, { inputType: 'insertText', data: 'seems dictation' });
+  assert.deepEqual(h.sent, ['se'], 'the revision itself stays held');
+  h.input('seems dictationq', 16, { inputType: 'insertText', data: 'q' });
+  assert.equal(h.pane.mobilePredictionText, 'seems dictationq', 'the held text lands with the new key');
+  assert.equal(h.sent.length, 2, 'one commit, and typing never waited');
+  assert.equal(h.sent[1].includes('ems dictationq'), true);
+});

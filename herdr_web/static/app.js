@@ -2259,6 +2259,19 @@ const { WebglAddon } = globalThis.WebglAddon;
 
   // A type-over-selection reports the replaced text as a target range. An
   // insertion without one is pure typing.
+  // A revision rewrites text the keyboard already reported, as dictation does
+  // when it refines its hypothesis. Ordinary typing appends to it.
+  function nativeRevision(edit, keyboardData) {
+    if (!keyboardData) return false;
+    // One character is typing. It never rewrites a hypothesis, and it must
+    // never be held back: more than one character is a swipe word or a
+    // dictation hypothesis.
+    if ([...keyboardData.trim()].length <= 1) return false;
+    const stripped = keyboardData.replace(/^\s+/u, '');
+    return !(edit.inserted.endsWith(keyboardData)
+      || (stripped && edit.inserted.endsWith(stripped)));
+  }
+
   function nativeReplacedLength(event) {
     if (typeof event.getTargetRanges !== 'function') return 0;
     let length = 0;
@@ -2361,7 +2374,19 @@ const { WebglAddon } = globalThis.WebglAddon;
         recentInputSummary(),
       ].join(' '));
     }
-    if (inputType === 'insertText' && keyboardData && replacedLength === 0) {
+    const endingProvisional = pane.mobilePredictionProvisional === true
+      && !nativeRevision(edit, keyboardData);
+    if (endingProvisional) {
+      // Typing resumed while a hypothesis was held. Commit the held text
+      // together with this edit through the diff below, in one step: real
+      // typing never waits for a quiet period.
+      pane.mobilePredictionProvisional = false;
+      pane.mobilePredictionComposition = undefined;
+      clearTimeout(pane.mobilePredictionCompositionTimer);
+      pane.mobilePredictionCompositionTimer = undefined;
+    }
+    if (!endingProvisional
+      && inputType === 'insertText' && keyboardData && replacedLength === 0) {
       // The diff still runs first as a guard: an event that changes nothing is
       // a duplicate or a caret-only change and must not resend text.
       if (edit.removed === 0 && !edit.inserted) return true;
@@ -2369,10 +2394,7 @@ const { WebglAddon } = globalThis.WebglAddon;
       // nothing but a separator the line already had. A revision, such as
       // dictation rewriting its hypothesis, does not match and needs the diff
       // below, which replaces the previous text exactly.
-      const stripped = keyboardData.replace(/^\s+/u, '');
-      const reportsSameText = edit.inserted.endsWith(keyboardData)
-        || (stripped && edit.inserted.endsWith(stripped));
-      if (reportsSameText) {
+      if (!nativeRevision(edit, keyboardData)) {
         return applyNativeInsertion(pane, keyboardData, useModifiers);
       }
       // A revision rewrites text the keyboard already reported: dictation
@@ -2380,6 +2402,7 @@ const { WebglAddon } = globalThis.WebglAddon;
       // moves the terminal caret back and forth and lands text at stale
       // positions. Hold it as a composition and commit once when it settles.
       pane.mobilePredictionComposition = true;
+      pane.mobilePredictionProvisional = true;
       armMobilePredictionCompositionStall(pane);
       return true;
     }
@@ -2459,7 +2482,7 @@ const { WebglAddon } = globalThis.WebglAddon;
       || !mobileQuery.matches
       || event.inputType === 'insertFromPaste'
     ) return false;
-    if (pane.mobilePredictionComposition) {
+    if (pane.mobilePredictionComposition && !pane.mobilePredictionProvisional) {
       event.stopImmediatePropagation();
       armMobilePredictionCompositionStall(pane);
       reportSwallowedInput(pane, 'composition', event.inputType);
@@ -2547,6 +2570,7 @@ const { WebglAddon } = globalThis.WebglAddon;
   function commitMobilePredictionComposition(pane, helper) {
     if (!pane.mobilePredictionComposition) return;
     pane.mobilePredictionComposition = undefined;
+    pane.mobilePredictionProvisional = false;
     clearTimeout(pane.mobilePredictionCompositionTimer);
     pane.mobilePredictionCompositionTimer = undefined;
     if (!paneAcceptsInput(pane, false) || pane.snapshot || mobileKeyboardLocked) return;
