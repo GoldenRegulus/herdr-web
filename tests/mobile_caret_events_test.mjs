@@ -72,6 +72,7 @@ function harness(text = 'abcdef', cursor = text.length, staticPrefix = '', optio
     performance: { now: () => 1000 },
     MOBILE_BACKSPACE_SENTINEL: ' ',
     MOBILE_BACKSPACE_BEFORE_INPUT_SUPPRESSION_MS: 200,
+    MOBILE_COMPOSITION_STALL_MS: 750,
     paneForKeyboardTarget: (target) => target === helper ? pane : undefined,
     paneAcceptsInput: (candidate) => candidate.mode === 'control' && !candidate.closed,
     setActivePane: () => true,
