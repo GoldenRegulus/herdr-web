@@ -283,3 +283,33 @@ test('typing after a revision commits at once instead of waiting', async () => {
   assert.equal(h.sent.length, 2, 'one commit, and typing never waited');
   assert.equal(h.sent[1].includes('ems dictationq'), true);
 });
+
+test('a rejected edit during a hold never rewrites the keyboard field', () => {
+  const h = harness('se', 2);
+  h.input('seems dictation', 15, { inputType: 'insertText', data: 'seems dictation' });
+  assert.equal(h.pane.mobilePredictionProvisional, true);
+  h.helper.value = 'seems dictation is broken';
+  h.helper.setSelectionRange(26, 26);
+  h.context.handleMobileTextInput(
+    h.pane, h.beforeInput({ inputType: 'insertText', data: 'e' }),
+  );
+  assert.equal(
+    h.helper.value,
+    'seems dictation is broken',
+    'rewriting the field makes the keyboard re-insert its hypothesis and duplicate the text',
+  );
+  assert.equal(h.pane.mobilePredictionProvisional, true, 'the hold continues');
+});
+
+test('a hypothesis separator neither ends the hold nor deletes anything', () => {
+  const h = harness('se', 2);
+  h.input('seems dictation', 15, { inputType: 'insertText', data: 'seems dictation' });
+  h.helper.value = ' ';
+  h.helper.setSelectionRange(1, 1);
+  h.context.handleMobileTextInput(
+    h.pane, h.beforeInput({ inputType: 'insertText', data: ' ' }),
+  );
+  assert.equal(h.pane.mobilePredictionProvisional, true, 'the hold continues');
+  assert.equal(h.sent.some((entry) => entry.includes('\x7f')), false, 'a separator must never delete text');
+  assert.deepEqual(h.sent, [], 'a separator sends nothing');
+});

@@ -2263,10 +2263,10 @@ const { WebglAddon } = globalThis.WebglAddon;
   // when it refines its hypothesis. Ordinary typing appends to it.
   function nativeRevision(edit, keyboardData) {
     if (!keyboardData) return false;
-    // One character is typing. It never rewrites a hypothesis, and it must
-    // never be held back: more than one character is a swipe word or a
-    // dictation hypothesis.
-    if ([...keyboardData.trim()].length <= 1) return false;
+    const core = keyboardData.trim();
+    // Typing is one character added and nothing removed. Anything larger is a
+    // swipe word or a dictation hypothesis.
+    if (edit.removed === 0 && [...core].length <= 1) return false;
     const stripped = keyboardData.replace(/^\s+/u, '');
     return !(edit.inserted.endsWith(keyboardData)
       || (stripped && edit.inserted.endsWith(stripped)));
@@ -2344,12 +2344,18 @@ const { WebglAddon } = globalThis.WebglAddon;
       // The native field holds text the shadow cannot represent. Record it so
       // a lost keystroke leaves evidence instead of a mystery.
       reportClientIssue('native-edit-rejected', [
-        inputType || (viaComposition ? 'insertCompositionText' : 'unknown'),
         `native=${JSON.stringify(text.slice(-24))}`,
         `shadow=${JSON.stringify(pane.mobilePredictionText.slice(-24))}`,
         `cursor=${cursor}`,
         recentInputSummary(),
       ].join(' '));
+      if (pane.mobilePredictionComposition) {
+        // The keyboard owns provisional text. Rewriting the field here makes
+        // it re-insert its hypothesis beside the restored text, which
+        // duplicates the sentence. Leave the field alone and keep holding.
+        armMobilePredictionCompositionStall(pane);
+        return false;
+      }
       restoreMobilePredictionHelper(pane);
       return false;
     }
@@ -2374,8 +2380,14 @@ const { WebglAddon } = globalThis.WebglAddon;
         recentInputSummary(),
       ].join(' '));
     }
-    const endingProvisional = pane.mobilePredictionProvisional === true
-      && !nativeRevision(edit, keyboardData);
+    const holding = pane.mobilePredictionProvisional === true;
+    if (holding && edit.removed > 1 && edit.inserted.trim().length <= 1) {
+      // A tiny insertion that removes a lot is a hypothesis separator while
+      // the keyboard rewrites the line. Keep holding and delete nothing.
+      armMobilePredictionCompositionStall(pane);
+      return true;
+    }
+    const endingProvisional = holding && !nativeRevision(edit, keyboardData);
     if (endingProvisional) {
       // Typing resumed while a hypothesis was held. Commit the held text
       // together with this edit through the diff below, in one step: real
