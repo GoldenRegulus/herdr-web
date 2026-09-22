@@ -2363,11 +2363,18 @@ const { WebglAddon } = globalThis.WebglAddon;
     }
     if (inputType === 'insertText' && keyboardData && replacedLength === 0) {
       // The diff still runs first as a guard: an event that changes nothing is
-      // a duplicate or a caret-only change and must not resend text. A
-      // non-empty target range means the insertion replaced text, so it takes
-      // the diff path below, which deletes exactly what was replaced.
+      // a duplicate or a caret-only change and must not resend text.
       if (edit.removed === 0 && !edit.inserted) return true;
-      return applyNativeInsertion(pane, keyboardData, useModifiers);
+      // Genuine typing changes the line by exactly the reported text and loses
+      // nothing but a separator the line already had. A revision, such as
+      // dictation rewriting its hypothesis, does not match and needs the diff
+      // below, which replaces the previous text exactly.
+      const stripped = keyboardData.replace(/^\s+/u, '');
+      const reportsSameText = edit.inserted.endsWith(keyboardData)
+        || (stripped && edit.inserted.endsWith(stripped));
+      if (reportsSameText) {
+        return applyNativeInsertion(pane, keyboardData, useModifiers);
+      }
     }
     if (inputType === 'insertText' && edit.removed > 0 && pane.mobilePredictionPending) {
       // A plain insertion cannot require a terminal deletion. While the echo is

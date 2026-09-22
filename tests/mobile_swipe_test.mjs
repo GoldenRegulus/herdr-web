@@ -306,3 +306,17 @@ test('a diverged insertion with no typed text is dropped without erasing', () =>
   assert.deepEqual(h.sent, []);
   assert.equal(h.report.some((entry) => entry.detail.includes('diverged-insert')), true);
 });
+
+test('a dictation revision replaces the hypothesis instead of appending it', () => {
+  const h = harness('', 0, 'prompt> ');
+  h.input('prompt> se', 'prompt> se'.length, { inputType: 'insertText', data: 'se' });
+  h.input('prompt> seems dictation', 'prompt> seems dictation'.length, {
+    inputType: 'insertText', data: 'seems dictation',
+  });
+  h.input('prompt> seems dictation is broken', 'prompt> seems dictation is broken'.length, {
+    inputType: 'insertText', data: 'seems dictation is broken',
+  });
+  assert.equal(h.pane.mobilePredictionText, 'seems dictation is broken');
+  assert.equal(h.typed().includes('seseems'), false, 'hypotheses must not concatenate');
+  assert.equal(h.typed().includes('seems dictationseems'), false, 'hypotheses must not concatenate');
+});
