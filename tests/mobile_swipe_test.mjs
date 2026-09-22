@@ -284,3 +284,21 @@ test('a confirmed shadow still mirrors a replacement that removes text', () => {
   assert.equal(h.deleted(), true, 'a confirmed shadow still mirrors the removal');
   assert.equal(h.sent.join('').includes('\x7f\x7f\x7f'), true);
 });
+
+test('an insertion against a diverged shadow delivers the typed text and erases nothing', () => {
+  const h = harness('hello world', 11, 'prompt> ');
+  h.pane.mobilePredictionPending = true;
+  h.input('prompt> hello t', 'prompt> hello t'.length, { inputType: 'insertText', data: 't' });
+  assert.equal(h.deleted(), false, 'a diverged insertion must never erase terminal text');
+  assert.equal(h.sent.join('').endsWith('t'), true, 'the typed character must still arrive');
+  assert.equal(h.pane.mobilePredictionText, 'hello tworld');
+});
+
+test('a diverged insertion with no typed text is dropped without erasing', () => {
+  const h = harness('hello world', 11, 'prompt> ');
+  h.pane.mobilePredictionPending = true;
+  h.input('prompt> hello', 'prompt> hello'.length, { inputType: 'insertText', data: '' });
+  assert.equal(h.deleted(), false);
+  assert.deepEqual(h.sent, []);
+  assert.equal(h.report.some((entry) => entry.detail.includes('diverged-insert')), true);
+});

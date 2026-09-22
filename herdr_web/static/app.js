@@ -2259,7 +2259,7 @@ const { WebglAddon } = globalThis.WebglAddon;
 
   function applyMobileTextValue(
     pane, helperValue, helperCursor, useModifiers = false, viaComposition = false,
-    inputType = '',
+    inputType = '', keyboardData = '',
   ) {
     const prefix = pane.mobilePredictionPrefix || '';
     if (!helperValue.startsWith(prefix) || helperCursor < prefix.length) {
@@ -2306,25 +2306,30 @@ const { WebglAddon } = globalThis.WebglAddon;
         recentInputSummary(),
       ].join(' '));
     }
-    if (inputType === 'insertText' && edit.removed > 0 && edit.inserted
-      && pane.mobilePredictionPending) {
+    if (inputType === 'insertText' && edit.removed > 0 && pane.mobilePredictionPending) {
       // A plain insertion cannot require a terminal deletion. While the echo is
       // still in flight the shadow can hold text from a screen that pads or
       // rewrites its input area, and the diff then asks to erase text the user
-      // typed. Keep the terminal text and insert only what arrived.
+      // typed. Deliver what the keyboard reported and keep the terminal text.
+      const typed = edit.inserted || keyboardData;
+      if (!typed) {
+        reportSwallowedInput(pane, 'diverged-insert', inputType);
+        restoreMobilePredictionHelper(pane);
+        return false;
+      }
       const shadowText = pane.mobilePredictionText;
       const insertAt = Math.min(edit.insertedStart, shadowText.length);
       const moved = terminalCaretInput(
         shadowText, pane.mobilePredictionCursor, insertAt,
         pane.terminal.modes?.applicationCursorKeysMode,
       );
-      if (!sendMobilePaneKeyboardData(pane, (moved || '') + edit.inserted)) {
+      if (!sendMobilePaneKeyboardData(pane, (moved || '') + typed)) {
         restoreMobilePredictionHelper(pane);
         return false;
       }
-      pane.mobilePredictionText = shadowText.slice(0, insertAt) + edit.inserted
+      pane.mobilePredictionText = shadowText.slice(0, insertAt) + typed
         + shadowText.slice(insertAt);
-      pane.mobilePredictionCursor = insertAt + edit.inserted.length;
+      pane.mobilePredictionCursor = insertAt + typed.length;
       pane.mobilePredictionConfirmed = false;
       pane.mobilePredictionPending = true;
       return true;
@@ -2421,7 +2426,7 @@ const { WebglAddon } = globalThis.WebglAddon;
     noteRecentInput('native', `${event.inputType}:${event.data || ''}`);
     if (!applyMobileTextValue(
       pane, normalized.helperValue, normalized.helperCursor, useModifiers, false,
-      event.inputType,
+      event.inputType, event.data || '',
     ) && normalized.helperValue.length > MOBILE_PREDICTION_TEXT_LIMIT) {
       clearMobilePredictionState(pane, true);
       showBrowserToast('Mobile input was too long');
