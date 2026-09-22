@@ -2102,6 +2102,33 @@ const { WebglAddon } = globalThis.WebglAddon;
       ? helper.selectionStart : helper.selectionEnd;
   }
 
+  // Keep the last native edits and sends so an anomaly report carries context.
+  const recentInputTrace = [];
+
+  function noteRecentInput(kind, detail) {
+    recentInputTrace.push(`${kind}:${String(detail).slice(0, 24)}`);
+    if (recentInputTrace.length > 6) recentInputTrace.shift();
+  }
+
+  function recentInputSummary() {
+    return recentInputTrace.length ? `recent=${recentInputTrace.join('|')}` : 'recent=none';
+  }
+
+  let caretBlockedReportedAt = 0;
+
+  function reportCaretBlocked(pane, reason, cursor) {
+    const now = Date.now();
+    if (now - caretBlockedReportedAt < 10_000) return;
+    caretBlockedReportedAt = now;
+    reportClientIssue('caret-blocked', [
+      reason,
+      `cursor=${cursor}`,
+      `shadow=${pane.mobilePredictionText.length}`,
+      `pending=${pane.mobilePredictionPending === true}`,
+      recentInputSummary(),
+    ].join(' '));
+  }
+
   function followMobileCaret(pane, beforeBlur = false) {
     const helper = paneKeyboardHelper(pane);
     // Android IMEs move the native selection without a user gesture. The
@@ -2109,20 +2136,29 @@ const { WebglAddon } = globalThis.WebglAddon;
     // stays iOS-only until a device validates it.
     if (!iosKeyboard || !mobileQuery.matches || mobileKeyboardLocked
       || !helper || (!beforeBlur && document.activeElement !== helper)
-      || !paneAcceptsInput(pane, false) || pane.snapshot
-      || pane.mobilePredictionComposition
-      || !pane.mobilePredictionConfirmed
-      || helper.value !== mobilePredictionHelperValue(pane)
       || helper.selectionStart !== helper.selectionEnd) return;
     const prefixLength = (pane.mobilePredictionPrefix || '').length;
     if (helper.selectionStart < prefixLength) return;
     const cursor = helper.selectionStart - prefixLength;
     if (cursor === pane.mobilePredictionCursor) return;
+    // Relative moves keep their order in the input queue, so a caret swipe can
+    // follow the native caret while an earlier echo is still in flight. A
+    // pending shadow must not freeze caret movement: nothing else clears it.
+    const blocked = !paneAcceptsInput(pane, false) ? 'read-only'
+      : pane.snapshot ? 'snapshot'
+      : pane.mobilePredictionComposition ? 'composition'
+      : helper.value !== mobilePredictionHelperValue(pane) ? 'native-diverged'
+      : '';
+    if (blocked) {
+      reportCaretBlocked(pane, blocked, cursor);
+      return;
+    }
     const data = terminalCaretInput(
       pane.mobilePredictionText, pane.mobilePredictionCursor, cursor,
       pane.terminal.modes?.applicationCursorKeysMode,
     );
     if (!data) return;
+    noteRecentInput('caret', `${cursor}`);
     if (sendMobilePaneKeyboardData(pane, data)) pane.mobilePredictionCursor = cursor;
   }
 
@@ -2226,6 +2262,7 @@ const { WebglAddon } = globalThis.WebglAddon;
         `native=${JSON.stringify(text.slice(-24))}`,
         `shadow=${JSON.stringify(pane.mobilePredictionText.slice(-24))}`,
         `cursor=${cursor}`,
+        recentInputSummary(),
       ].join(' '));
       restoreMobilePredictionHelper(pane);
       return false;
@@ -2245,6 +2282,7 @@ const { WebglAddon } = globalThis.WebglAddon;
         `shadow=${JSON.stringify(pane.mobilePredictionText.slice(-20))}`,
         `cursor=${cursor}`,
         `pending=${pane.mobilePredictionPending === true}`,
+        recentInputSummary(),
       ].join(' '));
     }
     const input = edit.data;
@@ -2326,6 +2364,7 @@ const { WebglAddon } = globalThis.WebglAddon;
     }
     const useModifiers = event.inputType === 'insertText'
       || event.inputType === 'insertReplacementText';
+    noteRecentInput('native', `${event.inputType}:${event.data || ''}`);
     if (!applyMobileTextValue(
       pane, normalized.helperValue, normalized.helperCursor, useModifiers, false,
       event.inputType,

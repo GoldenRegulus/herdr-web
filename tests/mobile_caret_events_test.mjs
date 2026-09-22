@@ -18,6 +18,7 @@ const keydownHandler = app.slice(
 
 function harness(text = 'abcdef', cursor = text.length, staticPrefix = '', options = {}) {
   const sent = [];
+  const reports = [];
   const modifierInputs = [];
   const modifierConsumed = [];
   const timers = [];
@@ -85,7 +86,7 @@ function harness(text = 'abcdef', cursor = text.length, staticPrefix = '', optio
       return options.modifierConversion ? options.modifierConversion(data) : data;
     },
     showBrowserToast() {},
-    reportClientIssue() {},
+    reportClientIssue: (kind, detail) => { reports.push({ kind, detail }); },
     clearTimeout() {},
     setTimeout: (callback) => timers.push(callback),
     ...options,
@@ -96,7 +97,7 @@ function harness(text = 'abcdef', cursor = text.length, staticPrefix = '', optio
     target: helper, stopImmediatePropagation() {}, ...fields,
   });
   return {
-    pane, helper, context, sent, modifierInputs, modifierConsumed,
+    pane, helper, context, sent, reports, modifierInputs, modifierConsumed,
     render(next, at = next.length) { rendered = next; buffer.cursorX = at; },
     selection(at) {
       helper.setSelectionRange(at, at);
@@ -150,6 +151,25 @@ test('barriers and non-collapsed selections do not move the terminal', () => {
   h.helper.setSelectionRange(1, 3);
   h.context.handleMobileCaretSelection();
   assert.deepEqual(h.sent, []);
+});
+
+test('a caret swipe follows the native caret while an echo is still pending', () => {
+  const h = harness('hello', 5, 'prompt> ');
+  h.pane.mobilePredictionConfirmed = false;
+  h.pane.mobilePredictionPending = true;
+  h.selection('prompt> '.length + 2);
+  assert.deepEqual(h.sent, ['\x1b[D'.repeat(3)]);
+  assert.equal(h.pane.mobilePredictionCursor, 2);
+});
+
+test('a blocked caret swipe reports the gate that refuses it', () => {
+  const h = harness('hello', 5, 'prompt> ');
+  h.pane.mode = 'observe';
+  h.selection('prompt> '.length + 2);
+  assert.deepEqual(h.sent, []);
+  const reports = h.reports.filter((entry) => entry.kind === 'caret-blocked');
+  assert.equal(reports.length, 1);
+  assert.match(reports[0].detail, /read-only/);
 });
 
 test('blur sends a final queued caret change and focus restores that position', () => {
