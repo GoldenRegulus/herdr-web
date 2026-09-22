@@ -258,3 +258,17 @@ test('a composition that never ends is committed when the keyboard goes quiet', 
   assert.deepEqual(h.sent, ['X'], 'a stalled composition must still deliver the text');
   assert.equal(h.pane.mobilePredictionComposition, undefined);
 });
+
+test('dictation revisions are held until the hypothesis settles', async () => {
+  const h = harness('', 0);
+  h.input('se', 2, { inputType: 'insertText', data: 'se' });
+  assert.deepEqual(h.sent, ['se'], 'the first word types like normal text');
+  h.input('seems dictation', 15, { inputType: 'insertText', data: 'seems dictation' });
+  h.input('seems dictation is broken', 25, { inputType: 'insertText', data: 'seems dictation is broken' });
+  assert.deepEqual(h.sent, ['se'], 'provisional hypotheses must not be typed live');
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.equal(h.pane.mobilePredictionText, 'seems dictation is broken');
+  assert.equal(h.pane.mobilePredictionCursor, 25);
+  assert.equal(h.sent.length, 2, 'the settled sentence commits in one edit');
+  assert.equal(h.sent[1].includes('ems dictation is broken'), true);
+});

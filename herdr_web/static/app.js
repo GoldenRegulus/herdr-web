@@ -2375,6 +2375,13 @@ const { WebglAddon } = globalThis.WebglAddon;
       if (reportsSameText) {
         return applyNativeInsertion(pane, keyboardData, useModifiers);
       }
+      // A revision rewrites text the keyboard already reported: dictation
+      // refining its hypothesis. Typing and erasing each hypothesis live
+      // moves the terminal caret back and forth and lands text at stale
+      // positions. Hold it as a composition and commit once when it settles.
+      pane.mobilePredictionComposition = true;
+      armMobilePredictionCompositionStall(pane);
+      return true;
     }
     if (inputType === 'insertText' && edit.removed > 0 && pane.mobilePredictionPending) {
       // A plain insertion cannot require a terminal deletion. While the echo is
@@ -2454,6 +2461,7 @@ const { WebglAddon } = globalThis.WebglAddon;
     ) return false;
     if (pane.mobilePredictionComposition) {
       event.stopImmediatePropagation();
+      armMobilePredictionCompositionStall(pane);
       reportSwallowedInput(pane, 'composition', event.inputType);
       return true;
     }
