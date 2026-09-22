@@ -2115,6 +2115,7 @@ const { WebglAddon } = globalThis.WebglAddon;
   }
 
   let caretBlockedReportedAt = 0;
+  let insertReplacedReportedAt = 0;
 
   function reportCaretBlocked(pane, reason, cursor) {
     const now = Date.now();
@@ -2267,10 +2268,13 @@ const { WebglAddon } = globalThis.WebglAddon;
       restoreMobilePredictionHelper(pane);
       return false;
     }
+    const insertReplacedNow = Date.now();
     if (edit.removed > 0
+      && insertReplacedNow - insertReplacedReportedAt >= 5_000
       && (viaComposition
         || inputType === 'insertText'
         || inputType === 'insertReplacementText')) {
+      insertReplacedReportedAt = insertReplacedNow;
       // An insertion event that would delete known text means the native field
       // lost text before this event, for example a second swipe that replaced
       // the first word. Record the evidence before the terminal follows it.
@@ -2284,6 +2288,29 @@ const { WebglAddon } = globalThis.WebglAddon;
         `pending=${pane.mobilePredictionPending === true}`,
         recentInputSummary(),
       ].join(' '));
+    }
+    if (inputType === 'insertText' && edit.removed > 0 && edit.inserted
+      && pane.mobilePredictionPending) {
+      // A plain insertion cannot require a terminal deletion. While the echo is
+      // still in flight the shadow can hold text from a screen that pads or
+      // rewrites its input area, and the diff then asks to erase text the user
+      // typed. Keep the terminal text and insert only what arrived.
+      const shadowText = pane.mobilePredictionText;
+      const insertAt = Math.min(edit.insertedStart, shadowText.length);
+      const moved = terminalCaretInput(
+        shadowText, pane.mobilePredictionCursor, insertAt,
+        pane.terminal.modes?.applicationCursorKeysMode,
+      );
+      if (!sendMobilePaneKeyboardData(pane, (moved || '') + edit.inserted)) {
+        restoreMobilePredictionHelper(pane);
+        return false;
+      }
+      pane.mobilePredictionText = shadowText.slice(0, insertAt) + edit.inserted
+        + shadowText.slice(insertAt);
+      pane.mobilePredictionCursor = insertAt + edit.inserted.length;
+      pane.mobilePredictionConfirmed = false;
+      pane.mobilePredictionPending = true;
+      return true;
     }
     const input = edit.data;
     if (input) {
@@ -2503,6 +2530,7 @@ const { WebglAddon } = globalThis.WebglAddon;
 
   function sendMobilePaneKeyboardData(pane, data) {
     if (!paneAcceptsInput(pane)) return false;
+    noteRecentInput('send', data);
     if (!setActivePane(pane.streamId)) {
       showBrowserToast('Waiting for input to reach the previous pane');
       return false;

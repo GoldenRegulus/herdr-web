@@ -256,3 +256,30 @@ test('an insertion that would delete known text is reported with its evidence', 
   // Current behaviour mirrors the native field, which is why the record matters.
   assert.equal(h.sent.join('').includes('\x7f\x7f\x7f\x7f\x7f'), true);
 });
+
+test('a plain insertion never erases terminal text while the echo is pending', () => {
+  // The shadow holds a padded screen line, as a TUI input box produces.
+  const h = harness('                    ', 20, 'prompt> ');
+  h.pane.mobilePredictionPending = true;
+  h.pane.mobilePredictionConfirmed = false;
+  h.input('prompt> this is', 'prompt> this is'.length, { inputType: 'insertText', data: ' is' });
+  assert.equal(h.deleted(), false, 'no deletion may reach the terminal');
+  assert.equal(h.sent.join('').endsWith('this is'), true, 'the typed text must arrive');
+  assert.equal(h.pane.mobilePredictionText, `this is${' '.repeat(20)}`);
+  assert.equal(h.pane.mobilePredictionCursor, 7);
+});
+
+test('typing while the echo is pending still sends the inserted text', () => {
+  const h = harness('hello', 5, 'prompt> ');
+  h.pane.mobilePredictionPending = true;
+  h.input('prompt> hello!', 'prompt> hello!'.length, { inputType: 'insertText', data: '!' });
+  assert.deepEqual(h.sent, ['!']);
+  assert.equal(h.pane.mobilePredictionText, 'hello!');
+});
+
+test('a confirmed shadow still mirrors a replacement that removes text', () => {
+  const h = harness('abc def', 7, 'prompt> ');
+  h.input('prompt> abc X', 'prompt> abc X'.length, { inputType: 'insertText', data: 'X' });
+  assert.equal(h.deleted(), true, 'a confirmed shadow still mirrors the removal');
+  assert.equal(h.sent.join('').includes('\x7f\x7f\x7f'), true);
+});
