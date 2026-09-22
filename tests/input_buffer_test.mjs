@@ -69,21 +69,18 @@ assert.equal(isDisposableMouseMotion('\x1b[<64;10;20M'), false);
 assert.equal(isDisposableMouseMotion('q'), false);
 assert.equal(isDisposableMouseMotion('\x1b[<35;10;20Mmore'), false);
 
-// A program that did not enable the extended keyboard protocol reads CSI-u as
-// literal text, so a modified Return keeps the legacy encoding.
 const mobileEnterModifiers = [
-  [{ shift: true }, '\r'],
-  [{ alt: true }, '\x1b\r'],
-  [{ shift: true, alt: true }, '\x1b\r'],
-  [{ control: true }, '\r'],
-  [{ shift: true, control: true }, '\r'],
-  [{ alt: true, control: true }, '\x1b\r'],
-  [{ shift: true, alt: true, control: true }, '\x1b\r'],
-];
-for (const [modifiers, expected] of mobileEnterModifiers) {
+  [{ shift: true }, '\x1b[13;2u'],
+  [{ alt: true }, '\x1b[13;3u'],
+  [{ shift: true, alt: true }, '\x1b[13;4u'],
+  [{ control: true }, '\x1b[13;5u'],
+  [{ shift: true, control: true }, '\x1b[13;6u'],
+  [{ alt: true, control: true }, '\x1b[13;7u'],
+  [{ shift: true, alt: true, control: true }, '\x1b[13;8u'],
+];for (const [modifiers, expected] of mobileEnterModifiers) {
   assert.equal(terminalDataForModifiedEnter(modifiers), expected);
 }
-assert.equal(terminalDataForModifiedEnter({ meta: true }), '\r');
+assert.equal(terminalDataForModifiedEnter({ meta: true }), '\x1b[13;9u');
 assert.equal(terminalDataForModifiedEnter(), undefined);
 
 const navigationKeys = [

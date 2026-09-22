@@ -162,6 +162,13 @@ HERDR_PARENT_ENVIRONMENT_VARIABLES: Final = (
 )
 IMAGE_EXTENSIONS: Final = frozenset({"png", "jpg", "jpeg", "gif", "webp", "bmp"})
 logger = logging.getLogger(__name__)
+# Without a root handler this module's INFO records, including the browser
+# diagnostics, are discarded and a freeze leaves no evidence.
+if not logging.getLogger().handlers:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
 
 app = FastAPI(title="herdr-web", docs_url=None, redoc_url=None)
 # Put the fixed per-process path before the compatibility path. Relative JS and

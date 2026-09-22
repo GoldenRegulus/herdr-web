@@ -2205,6 +2205,7 @@ const { WebglAddon } = globalThis.WebglAddon;
 
   function applyMobileTextValue(
     pane, helperValue, helperCursor, useModifiers = false, viaComposition = false,
+    inputType = '',
   ) {
     const prefix = pane.mobilePredictionPrefix || '';
     if (!helperValue.startsWith(prefix) || helperCursor < prefix.length) {
@@ -2218,8 +2219,33 @@ const { WebglAddon } = globalThis.WebglAddon;
       pane.terminal.modes?.applicationCursorKeysMode,
     );
     if (!edit) {
+      // The native field holds text the shadow cannot represent. Record it so
+      // a lost keystroke leaves evidence instead of a mystery.
+      reportClientIssue('native-edit-rejected', [
+        inputType || (viaComposition ? 'insertCompositionText' : 'unknown'),
+        `native=${JSON.stringify(text.slice(-24))}`,
+        `shadow=${JSON.stringify(pane.mobilePredictionText.slice(-24))}`,
+        `cursor=${cursor}`,
+      ].join(' '));
       restoreMobilePredictionHelper(pane);
       return false;
+    }
+    if (edit.removed > 0
+      && (viaComposition
+        || inputType === 'insertText'
+        || inputType === 'insertReplacementText')) {
+      // An insertion event that would delete known text means the native field
+      // lost text before this event, for example a second swipe that replaced
+      // the first word. Record the evidence before the terminal follows it.
+      reportClientIssue('native-insert-replaced', [
+        inputType || 'insertCompositionText',
+        `removed=${edit.removed}`,
+        `inserted=${JSON.stringify(edit.inserted.slice(0, 20))}`,
+        `native=${JSON.stringify(text.slice(-20))}`,
+        `shadow=${JSON.stringify(pane.mobilePredictionText.slice(-20))}`,
+        `cursor=${cursor}`,
+        `pending=${pane.mobilePredictionPending === true}`,
+      ].join(' '));
     }
     const input = edit.data;
     if (input) {
@@ -2301,7 +2327,8 @@ const { WebglAddon } = globalThis.WebglAddon;
     const useModifiers = event.inputType === 'insertText'
       || event.inputType === 'insertReplacementText';
     if (!applyMobileTextValue(
-      pane, normalized.helperValue, normalized.helperCursor, useModifiers,
+      pane, normalized.helperValue, normalized.helperCursor, useModifiers, false,
+      event.inputType,
     ) && normalized.helperValue.length > MOBILE_PREDICTION_TEXT_LIMIT) {
       clearMobilePredictionState(pane, true);
       showBrowserToast('Mobile input was too long');
@@ -2329,8 +2356,9 @@ const { WebglAddon } = globalThis.WebglAddon;
 
   function handleMobilePredictionCompositionEnd(event) {
     const pane = paneForKeyboardTarget(event.target);
+    if (!pane) return;
     const helper = paneKeyboardHelper(pane);
-    if (!pane || !helper || !pane.mobilePredictionComposition) return;
+    if (!helper || !pane.mobilePredictionComposition) return;
     event.stopImmediatePropagation();
     setTimeout(() => {
       if (!pane.mobilePredictionComposition) return;
