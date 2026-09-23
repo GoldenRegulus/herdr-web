@@ -464,11 +464,15 @@ class FrontendContractTests(unittest.TestCase):
         # tap and must never raise it, and a scroll must not be mistaken for
         # the keyboard: viewport height is not evidence.
         self.assertNotIn("dataset.mobileKeyboard !== 'open'", application)
-        self.assertIn("if (!keyboardFocused) return;", application)
+        # A key tap steals focus to its button; the keyboard must survive it.
+        # A swipe or scroll must not raise the keyboard: only our own focus
+        # state counts.
+        self.assertIn("const controlFocused = document.activeElement?.closest?.(", application)
+        self.assertIn("if (!keyboardFocused && !controlFocused) return;", application)
         self.assertNotIn("document.addEventListener('pointerdown', openKeyboardFromTap", application)
         self.assertNotIn("document.addEventListener('touchstart', openKeyboardFromTap", application)
         self.assertIn("document.addEventListener('touchmove'", application)
-        self.assertIn("const keyboardFocused = document.activeElement === paneKeyboardHelper(pane)", application)
+        self.assertIn("const keyboardFocused = document.activeElement === helper", application)
         self.assertIn("focusPaneKeyboard(pane);", application)
         self.assertIn("function syncVisualViewportLayout()", application)
         self.assertIn("MOBILE_KEYBOARD_MINIMUM_SHRINK_PX = 120", application)
