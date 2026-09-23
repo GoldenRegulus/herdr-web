@@ -1557,7 +1557,10 @@ const { WebglAddon } = globalThis.WebglAddon;
     const pane = selectedPaneTerminal();
     if (!pane) return;
     const keyboardFocused = document.activeElement === paneKeyboardHelper(pane);
-    if (!keyboardFocused && document.documentElement.dataset.mobileKeyboard !== 'open') return;
+    // Focus only when the helper actually holds focus: the keyboard is up
+    // because of us. A viewport change is not the keyboard — the URL bar
+    // collapses during a scroll and must never raise it.
+    if (!keyboardFocused) return;
     focusPaneKeyboard(pane);
   }
 
@@ -2427,17 +2430,6 @@ const { WebglAddon } = globalThis.WebglAddon;
   function resetPaneKeyboardHelper(pane) {
     const helper = paneKeyboardHelper(pane);
     if (!helper) return;
-    if (helper && !helper.mobileFocusTrace) {
-      helper.mobileFocusTrace = true;
-      helper.addEventListener('focus', () => {
-        // Keyboard evidence: every raise names the gesture state it came
-        // from, so a wrong raise is visible in the log.
-        reportClientIssue(
-          'keyboard-focus',
-          `suppress=${performance.now() < suppressKeyboardFocusUntil} touchable=${helper.classList.contains('mobile-native-paste-target')}`,
-        );
-      });
-    }
     helper.classList.remove('mobile-keyboard-target', 'mobile-native-paste-target');
     setMobilePredictionAttributes(helper, false);
     for (const property of [
@@ -3554,6 +3546,16 @@ const { WebglAddon } = globalThis.WebglAddon;
       // Reporting must never break the terminal.
     }
   }
+
+  document.addEventListener('focus', (event) => {
+    const target = event.target;
+    if (!target?.classList?.contains('xterm-helper-textarea')) return;
+    // Keyboard evidence: every raise names the gesture state it came from.
+    reportClientIssue(
+      'keyboard-focus',
+      `suppress=${performance.now() < suppressKeyboardFocusUntil}`,
+    );
+  }, true);
 
   window.addEventListener('error', (event) => {
     reportClientIssue('error', `${event.message} @${event.lineno}:${event.colno}`);
