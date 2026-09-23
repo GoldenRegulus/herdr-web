@@ -4671,6 +4671,15 @@ const { WebglAddon } = globalThis.WebglAddon;
     if (!pane) return;
     focusPaneKeyboard(pane);
   };
+  // A key tap steals focus to its button, and iOS closes the keyboard the
+  // moment the field blurs. Take focus straight back in the same task, so the
+  // keyboard never notices.
+  document.addEventListener('focusin', (event) => {
+    if (!mobileQuery.matches) return;
+    if (event.target?.closest?.('#pane-mobile-bar, #mobile-toolbar')) {
+      focusTerminalAfterControl();
+    }
+  }, true);
   // Any movement marks the gesture: its end may not raise the keyboard.
   document.addEventListener('touchmove', () => {
     suppressKeyboardFocusUntil = performance.now() + MOBILE_TAP_MAX_MS;
