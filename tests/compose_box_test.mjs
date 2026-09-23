@@ -182,6 +182,20 @@ test('a stale caret can never lock the box', () => {
   assert.equal(h.sent.join(''), 'c', 'typing goes through even from a caret the model lost');
 });
 
+test('copy joins a wrapped row without a break and a newline with one', () => {
+  const rows = [
+    { isWrapped: false, translateToString: () => 'prompt> one' },
+    { isWrapped: true, translateToString: () => 'two' },
+    { isWrapped: false, translateToString: () => 'next' },
+  ];
+  const terminal = { buffer: { active: { getLine: (row) => rows[row] } } };
+  const h = harness('', 0);
+  assert.equal(
+    h.context.snapshotCopyText(terminal, 0, ['prompt> one', 'two', 'next']),
+    'prompt> onetwo\nnext',
+  );
+});
+
 test('one character of typing goes out at once', () => {
   const h = harness('hello', 5, 'prompt> ');
   h.type('prompt> hello!');
