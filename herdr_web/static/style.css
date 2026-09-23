@@ -522,10 +522,7 @@ header {
   -webkit-text-fill-color: transparent;
   -webkit-user-select: text;
   opacity: 1;
-  /* The invisible box never takes touches: a tap raises the keyboard
-     through the app's tap rule, a swipe scrolls, and iOS never focuses
-     this field by itself. */
-  pointer-events: none;
+  pointer-events: auto;
   text-shadow: none;
   touch-action: manipulation;
   user-select: text;
