@@ -14,7 +14,8 @@ function graphemes(text) {
 function validText(text) {
   return typeof text === 'string'
     && text.length <= MOBILE_PREDICTION_TEXT_LIMIT
-    && !/[\x00-\x1f\x7f]/u.test(text);
+    // A line break is text: multi-line input must stay editable.
+    && !/[\x00-\x09\x0b-\x1f\x7f]/u.test(text);
 }
 
 function caretIndex(parts, offset) {
