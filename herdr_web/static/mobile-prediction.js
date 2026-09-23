@@ -56,17 +56,20 @@ export function terminalTextAtCursor(terminal) {
   if (!line) return { text: '', cursor: 0 };
 
   const beforeParts = [line.translateToString(false, 0, buffer.cursorX)];
-  while (line.isWrapped && row > 0 && beforeParts.join('').length < MOBILE_PREDICTION_TEXT_LIMIT) {
+  // Follow the rows above without asking for wrap markers: an application
+  // that lays text out across rows never sets them, and edits must be able
+  // to cross that boundary.
+  while (row > 0 && beforeParts.join('').length < MOBILE_PREDICTION_TEXT_LIMIT) {
     row -= 1;
     line = buffer.getLine(row);
     if (!line) break;
-    beforeParts.unshift(line.translateToString(false));
+    beforeParts.unshift(line.translateToString(true));
   }
   const before = beforeParts.join('');
   const afterParts = [buffer.getLine(cursorRow).translateToString(true, buffer.cursorX)];
   row = cursorRow + 1;
   line = buffer.getLine(row);
-  while (line?.isWrapped && before.length + afterParts.join('').length < MOBILE_PREDICTION_TEXT_LIMIT) {
+  while (line && before.length + afterParts.join('').length < MOBILE_PREDICTION_TEXT_LIMIT) {
     afterParts.push(line.translateToString(true));
     row += 1;
     line = buffer.getLine(row);

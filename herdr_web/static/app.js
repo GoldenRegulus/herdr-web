@@ -4581,6 +4581,10 @@ const { WebglAddon } = globalThis.WebglAddon;
     const helper = paneKeyboardHelper(pane);
     if (helper && document.activeElement !== helper) helper.focus();
   };
+  // The keyboard opens from a focus inside the start of a touch, so the tap
+  // must focus on pointerdown, not when the gesture ends.
+  document.addEventListener('pointerdown', openKeyboardFromTap, true);
+  document.addEventListener('touchstart', openKeyboardFromTap, true);
   document.addEventListener('pointerup', openKeyboardFromTap, true);
   document.addEventListener('touchend', openKeyboardFromTap, true);
   document.addEventListener('keydown', handleMobileTerminalKeyDown, true);
