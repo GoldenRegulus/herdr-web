@@ -580,7 +580,8 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("line.text, box.text, line.cursor, box.cursor", application)
         self.assertIn("mobilePredictionPrefix: ''", application)
         self.assertIn("function replaceMobilePredictionFromTerminal(pane, helper)", application)
-        self.assertIn("terminalTextAtCursor(pane.terminal)", application)
+        self.assertIn("terminalTextAtCursor(pane.terminal", application)
+        self.assertIn("text: pane.mobilePredictionText", application)
         self.assertIn("const nativeKeyboardInput = iosKeyboard || androidKeyboard;", application)
         composition_start = application[
             application.index("function handleMobilePredictionCompositionStart(event)")
