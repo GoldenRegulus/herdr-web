@@ -153,6 +153,28 @@ test('a swipe never counts as a tap', () => {
   assert.equal(h.context.isMobileTapGesture(2, 2, 2000), false, 'and neither is a hold');
 });
 
+test('multi-line text is never replaced by one row', async () => {
+  const h = harness('line1\nline2', 11, 'prompt> ');
+  h.render('prompt> program row', 'prompt> program row'.length);
+  h.frame();
+  h.frame();
+  assert.equal(
+    h.pane.mobilePredictionText, 'line1\nline2',
+    'the multi-line text survives a program row that repeated',
+  );
+});
+
+test('a write keeps its moment through a confirming frame', async () => {
+  const h = harness('o', 1, 'prompt> ');
+  h.type('prompt> ', 8);
+  assert.equal(h.pane.mobilePredictionText, '', 'the delete leaves nothing owned');
+  // A stale frame that still shows the deleted text must not end the
+  // write's moment: nothing may adopt it back.
+  h.render('prompt> o', 9);
+  h.frame();
+  assert.ok(h.pane.composeWritten, 'the write in flight keeps its moment');
+});
+
 test('one character of typing goes out at once', () => {
   const h = harness('hello', 5, 'prompt> ');
   h.type('prompt> hello!');

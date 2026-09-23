@@ -2035,6 +2035,10 @@ const { WebglAddon } = globalThis.WebglAddon;
       cursor: pane.mobilePredictionCursor,
     };
     const shadow = terminalTextAtCursor(pane.terminal, composed);
+    reportClientIssue(
+      'adopt',
+      `text=${JSON.stringify(shadow.text).slice(0, 40)} was=${JSON.stringify(composed.text).slice(0, 40)}`,
+    );
     pane.mobilePredictionPrefix = '';
     pane.mobilePredictionText = shadow.text;
     pane.mobilePredictionCursor = shadow.cursor;
@@ -2069,7 +2073,11 @@ const { WebglAddon } = globalThis.WebglAddon;
       } else {
         pane.mobilePredictionPrefix = prefix;
       }
-      pane.composeWritten = undefined;
+      // A confirming frame does not end the write's moment. The frames in
+      // flight still show the old line, and nothing may adopt it back.
+      if (pane.composeWritten && Date.now() - pane.composeWritten.at >= COMPOSE_CONFIRM_MS) {
+        pane.composeWritten = undefined;
+      }
       return;
     }
     const written = pane.composeWritten;
