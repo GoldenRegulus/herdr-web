@@ -1996,6 +1996,13 @@ const { WebglAddon } = globalThis.WebglAddon;
     helper.setSelectionRange(cursor, cursor);
   }
 
+  function prepareMobilePredictionFocus(pane) {
+    // The box must mirror the line the terminal shows before the first
+    // keystroke of this focus.
+    syncMobilePredictionFromTerminal(pane);
+    restoreMobilePredictionHelper(pane);
+  }
+
   function clearMobilePredictionState(pane, clearHelper = false) {
     if (!pane) return;
     pane.mobilePredictionPending = false;
@@ -2278,6 +2285,17 @@ const { WebglAddon } = globalThis.WebglAddon;
       composeShadow(pane), box, pane.terminal.modes?.applicationCursorKeysMode,
     );
     if (!edit) return false;
+    if (edit.removed > 0) {
+      // Deletion evidence: what left the box, and what bytes it became.
+      reportClientIssue('delete-trace', [
+        `removed=${edit.removed}`,
+        `inserted=${JSON.stringify(edit.inserted).slice(0, 24)}`,
+        `data=${JSON.stringify(edit.data).slice(0, 48)}`,
+        `box=${JSON.stringify(box.text).slice(-28)}`,
+        `shadow=${JSON.stringify(composeShadow(pane).text).slice(-28)}`,
+        `caret=${box.cursor}`,
+      ].join(' '));
+    }
     const modified = edit.inserted ? mobileModifiedInsertion(edit.inserted) : undefined;
     if (modified) {
       if (!sendMobilePaneKeyboardData(pane, modified)) return false;

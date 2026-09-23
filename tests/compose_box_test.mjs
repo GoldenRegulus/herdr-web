@@ -116,6 +116,18 @@ function harness(text = '', cursor = text.length, prefix = '') {
   };
 }
 
+test('focus puts the line back into the invisible box', () => {
+  const h = harness('hello', 5, 'prompt> ');
+  h.helper.value = '';
+  h.helper.setSelectionRange(0, 0);
+  h.context.prepareMobilePredictionFocus(h.pane);
+  assert.equal(h.helper.value, 'prompt> hello', 'the box mirrors the terminal line');
+  assert.equal(
+    h.helper.selectionStart, 'prompt> hello'.length,
+    'with the caret at the end of the composed text',
+  );
+});
+
 test('one character of typing goes out at once', () => {
   const h = harness('hello', 5, 'prompt> ');
   h.type('prompt> hello!');
