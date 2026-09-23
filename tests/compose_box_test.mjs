@@ -262,9 +262,9 @@ test('the shadow crosses a row boundary and a delete crosses with it', () => {
       },
     },
   };
-  const shadow = prediction.terminalTextAtCursor(terminal);
-  assert.equal(shadow.text, 'prompt> line-oneline-two', 'the rows are one editable text');
-  assert.equal(shadow.cursor, 24);
+  const shadow = prediction.terminalTextAtCursor(terminal, { text: 'line-one\nline-two', cursor: 17 });
+  assert.equal(shadow.text, 'prompt> line-one\nline-two', 'the rows are one editable text');
+  assert.equal(shadow.cursor, 25);
   // deleting at the boundary between the two rows
   const next = shadow.text.slice(0, 15) + shadow.text.slice(16);
   const edit = prediction.terminalTextInputDelta(shadow.text, next, 16, 15);

@@ -2013,7 +2013,13 @@ const { WebglAddon } = globalThis.WebglAddon;
 
   function replaceMobilePredictionFromTerminal(pane, helper) {
     pane.mobilePredictionPending = false;
-    const shadow = terminalTextAtCursor(pane.terminal);
+    // The composed text decides how many rows are the user's own: its line
+    // breaks are the rows it created.
+    const composed = {
+      text: pane.mobilePredictionText,
+      cursor: pane.mobilePredictionCursor,
+    };
+    const shadow = terminalTextAtCursor(pane.terminal, composed);
     pane.mobilePredictionPrefix = '';
     pane.mobilePredictionText = shadow.text;
     pane.mobilePredictionCursor = shadow.cursor;
@@ -2063,7 +2069,10 @@ const { WebglAddon } = globalThis.WebglAddon;
     // A program mid-redraw shows a line that changes from frame to frame.
     // Adopt only a line that repeated itself, so a reflow never throws away
     // what the user typed.
-    const line = terminalTextAtCursor(pane.terminal);
+    const line = terminalTextAtCursor(pane.terminal, {
+      text: pane.mobilePredictionText,
+      cursor: pane.mobilePredictionCursor,
+    });
     const candidate = pane.composeAdoptCandidate;
     pane.composeAdoptCandidate = { text: line.text, cursor: line.cursor };
     if (!candidate || candidate.text !== line.text || candidate.cursor !== line.cursor) return;
