@@ -2212,11 +2212,26 @@ const { WebglAddon } = globalThis.WebglAddon;
   const COMPOSE_CONFIRM_MS = 1000;
 
   function composeBoxState(pane, helper) {
-    const prefix = pane.mobilePredictionPrefix || '';
     const cleaned = stripMobileControlCharacters(helper.value, mobileHelperCaret(helper));
     if (cleaned.text !== helper.value) {
       helper.value = cleaned.text;
       helper.setSelectionRange(cleaned.cursor, cleaned.cursor);
+    }
+    let prefix = pane.mobilePredictionPrefix || '';
+    const base = prefix + pane.mobilePredictionText;
+    if (!cleaned.text.startsWith(prefix)) {
+      // The box edited into the base line, as a paste or a deletion can do.
+      // The base ends where the two texts diverge: split there instead of
+      // ignoring every later keystroke.
+      let common = 0;
+      const limit = Math.min(base.length, cleaned.text.length);
+      while (common < limit && base[common] === cleaned.text[common]) common += 1;
+      pane.mobilePredictionPrefix = cleaned.text.slice(0, common);
+      pane.mobilePredictionText = base.slice(common);
+      pane.mobilePredictionCursor = Math.max(
+        0, Math.min(pane.mobilePredictionText.length, prefix.length + pane.mobilePredictionCursor - common),
+      );
+      prefix = pane.mobilePredictionPrefix;
     }
     const value = cleaned.text.startsWith(prefix)
       ? cleaned.text.slice(prefix.length)
@@ -2580,6 +2595,7 @@ const { WebglAddon } = globalThis.WebglAddon;
         retainedBytes,
         streamId: pane.streamId,
         text: normalized,
+        bracketed: pane.terminal.modes?.bracketedPasteMode === true,
       });
       drainInput();
       return true;
@@ -2910,6 +2926,10 @@ const { WebglAddon } = globalThis.WebglAddon;
       event.stopImmediatePropagation();
       event.target.value = '';
       clearMobilePredictionState(record);
+      // The paste goes to the program directly. Teach the box what the line
+      // now holds, so the next deletion and keystroke are computed against it.
+      record.mobilePredictionText = text;
+      record.mobilePredictionCursor = text.length;
       if (mobileMouseMode) {
         showBrowserToast('Turn mouse input off to Paste');
         return;
@@ -3710,6 +3730,7 @@ const { WebglAddon } = globalThis.WebglAddon;
           type: 'pane-paste',
           stream_id: operation.streamId,
           text: operation.text,
+          bracketed: operation.bracketed === true,
         }));
         continue;
       }
