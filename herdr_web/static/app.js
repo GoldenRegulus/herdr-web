@@ -4652,8 +4652,10 @@ const { WebglAddon } = globalThis.WebglAddon;
   document.querySelector('#sheet-backdrop').addEventListener('click', () => closeMobileSheet());
   sheetSessions.addEventListener('click', () => showPicker());
   document.querySelector('#sheet-close').addEventListener('click', () => closeMobileSheet());
-  // Tapping anywhere on the screen opens the keyboard. Controls keep their own
-  // taps, and the keyboard lock still holds it shut.
+  // Tapping anywhere on the screen opens the keyboard. Controls keep their
+  // own taps, the keyboard lock still holds it shut, and only the end of a
+  // gesture may focus: a swipe starts exactly like a tap and must never
+  // raise the keyboard.
   const openKeyboardFromTap = (event) => {
     if (!mobileQuery.matches || mobileKeyboardLocked || mobileMouseMode) return;
     const target = event.target;
@@ -4663,13 +4665,11 @@ const { WebglAddon } = globalThis.WebglAddon;
     const pane = selectedPaneTerminal();
     if (!pane) return;
     focusPaneKeyboard(pane);
-    const helper = paneKeyboardHelper(pane);
-    if (helper && document.activeElement !== helper) helper.focus();
   };
-  // The keyboard opens from a focus inside the start of a touch, so the tap
-  // must focus on pointerdown, not when the gesture ends.
-  document.addEventListener('pointerdown', openKeyboardFromTap, true);
-  document.addEventListener('touchstart', openKeyboardFromTap, true);
+  // Any movement marks the gesture: its end may not raise the keyboard.
+  document.addEventListener('touchmove', () => {
+    suppressKeyboardFocusUntil = performance.now() + MOBILE_TAP_MAX_MS;
+  }, true);
   document.addEventListener('pointerup', openKeyboardFromTap, true);
   document.addEventListener('touchend', openKeyboardFromTap, true);
   document.addEventListener('keydown', handleMobileTerminalKeyDown, true);

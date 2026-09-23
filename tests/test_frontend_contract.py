@@ -460,7 +460,14 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("function setMobileKeyboardLocked(locked", application)
         self.assertIn("if (!paneCompact) selectedRecord.terminal.focus()", application)
         self.assertIn("function focusTerminalAfterControl()", application)
-        self.assertIn("dataset.mobileKeyboard !== 'open'", application)
+        # The keyboard rises only at the end of a tap. A swipe starts like a
+        # tap and must never raise it, and a scroll must not be mistaken for
+        # the keyboard: viewport height is not evidence.
+        self.assertNotIn("dataset.mobileKeyboard !== 'open'", application)
+        self.assertIn("if (!keyboardFocused) return;", application)
+        self.assertNotIn("document.addEventListener('pointerdown', openKeyboardFromTap", application)
+        self.assertNotIn("document.addEventListener('touchstart', openKeyboardFromTap", application)
+        self.assertIn("document.addEventListener('touchmove'", application)
         self.assertIn("const keyboardFocused = document.activeElement === paneKeyboardHelper(pane)", application)
         self.assertIn("focusPaneKeyboard(pane);", application)
         self.assertIn("function syncVisualViewportLayout()", application)
