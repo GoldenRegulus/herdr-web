@@ -643,6 +643,8 @@ class FrontendContractTests(unittest.TestCase):
 
     def test_mobile_caret_moves_the_terminal_through_ordered_input(self) -> None:
         application = (STATIC_DIRECTORY / "app.js").read_text(encoding="utf-8")
+        self.assertIn("The keyboard traits must stay constant", application)
+        self.assertIn("Tapping anywhere on the screen opens the keyboard", application)
         self.assertIn("handleMobileCaretSelection();", application)
         self.assertIn("syncAutoSnapshotSelection();", application)
         self.assertIn("'select', handleMobileCaretSelection, true", application)

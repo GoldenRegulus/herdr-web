@@ -208,3 +208,24 @@ test('a paste keeps its structured path', () => {
   h.type('prompt> pasted', 'prompt> pasted'.length, { inputType: 'insertFromPaste' });
   assert.deepEqual(h.sent, [], 'the compose box leaves paste to the paste path');
 });
+
+test('a reflow that redraws the line never throws away typed text', () => {
+  const h = harness('', 0, 'prompt> ');
+  h.type('prompt> draft text', 'prompt> draft text'.length);
+  h.frame();
+  // a program mid-redraw shows a different line in every frame
+  h.render('prompt> draft', 'prompt> draft'.length);
+  h.frame();
+  h.render('prompt> draft tex', 'prompt> draft tex'.length);
+  h.frame();
+  assert.equal(h.helper.value, 'prompt> draft text', 'the box keeps what the user typed');
+  assert.deepEqual(h.sent, [], 'no edit fights the redraw');
+});
+
+test('a line the program really changed is adopted once it settles', async () => {
+  const h = harness('hello', 5, 'prompt> ');
+  h.render('prompt> program moved on', 'prompt> program moved on'.length);
+  h.frame();
+  h.frame();
+  assert.equal(h.helper.value, 'prompt> program moved on', 'a settled line is taken');
+});
