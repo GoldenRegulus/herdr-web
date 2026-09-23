@@ -2332,10 +2332,27 @@ const { WebglAddon } = globalThis.WebglAddon;
     pane.composeSeen = { text: box.text, cursor: box.cursor };
     // One character of change is typing: one typed character or one deletion.
     const typing = change && change.removed + [...change.inserted].length <= 1;
-    if (typing) return composeWrite(pane, helper, box);
+    // A deletion is an instruction, not a hypothesis: it goes out at once.
+    // A held backspace must keep deleting across a row boundary, where the
+    // keyboard deletes the break and a character together.
+    const explicitDelete = change && change.inserted === '' && change.removed > 0;
+    if (typing || explicitDelete) {
+      pane.composeSettleSince = undefined;
+      return composeWrite(pane, helper, box);
+    }
+    // A larger insertion waits for a quiet moment so the terminal never
+    // churns through recognitions — but the wait has a deadline. A stream of
+    // edits, as a held key sends, must not keep resetting it forever.
+    const settledFor = Date.now();
+    if (pane.composeSettleSince === undefined) pane.composeSettleSince = settledFor;
     if (pane.composeTimer !== undefined) clearTimeout(pane.composeTimer);
+    if (settledFor - pane.composeSettleSince >= COMPOSE_SETTLE_MS) {
+      pane.composeSettleSince = undefined;
+      return composeWrite(pane, helper, box);
+    }
     pane.composeTimer = setTimeout(() => {
       pane.composeTimer = undefined;
+      pane.composeSettleSince = undefined;
       const current = paneKeyboardHelper(pane);
       if (current) composeWrite(pane, current, composeBoxState(pane, current));
     }, COMPOSE_SETTLE_MS);
@@ -2386,6 +2403,16 @@ const { WebglAddon } = globalThis.WebglAddon;
     pane.nativeComposing = undefined;
     event.stopImmediatePropagation();
     composeSync(pane);
+  }
+
+  // A tap raises the keyboard. A swipe or a scroll never does, however short.
+  const MOBILE_TAP_SLOP_PX = 12;
+  const MOBILE_TAP_MAX_MS = 700;
+
+  function isMobileTapGesture(deltaX, deltaY, elapsedMs) {
+    return Math.abs(deltaX) <= MOBILE_TAP_SLOP_PX
+      && Math.abs(deltaY) <= MOBILE_TAP_SLOP_PX
+      && elapsedMs <= MOBILE_TAP_MAX_MS;
   }
 
   function noteMobilePredictionTerminalData(pane, data) {
@@ -3251,7 +3278,13 @@ const { WebglAddon } = globalThis.WebglAddon;
         startTouchMomentum();
         return;
       }
-      if (!touchMoved && touchDuration < MOBILE_LONG_PRESS_MS) {
+      const endTouch = event.changedTouches?.[0];
+      const tapLike = isMobileTapGesture(
+        (endTouch?.clientX ?? touchPointerX) - (touchStartX ?? touchPointerX),
+        (endTouch?.clientY ?? touchPointerY) - (touchStartY ?? touchPointerY),
+        touchDuration,
+      );
+      if (!touchMoved && tapLike && touchDuration < MOBILE_LONG_PRESS_MS) {
         event.preventDefault();
         event.stopPropagation();
         sendTerminalMouseClick(record, 0, touchPointerX, touchPointerY);
