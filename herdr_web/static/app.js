@@ -3901,6 +3901,10 @@ const { WebglAddon } = globalThis.WebglAddon;
     } catch (error) {
       disposePaneTerminals();
       setStatus(error.message, 'disconnected');
+      // The status area is hidden on phones: say it where the user is
+      // looking, and keep it in the log.
+      showBrowserToast(`Pane view failed: ${error.message}`);
+      reportClientIssue('pane-view', error.message);
     }
   }
 
@@ -3993,6 +3997,8 @@ const { WebglAddon } = globalThis.WebglAddon;
     } catch (error) {
       if (token !== paneViewToken) return;
       setStatus(error.message, 'disconnected');
+      showBrowserToast(`Pane view failed: ${error.message}`);
+      reportClientIssue('pane-view', error.message);
     }
   }
 
