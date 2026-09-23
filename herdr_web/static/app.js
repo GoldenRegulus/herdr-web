@@ -2221,8 +2221,18 @@ const { WebglAddon } = globalThis.WebglAddon;
   // box holds, with caret placement. Undefined means the change cannot be
   // mapped to terminal input, and the program is left alone.
   function composeEdit(line, box, applicationCursorKeys = false) {
+    // A caret the model lost (a fragment adoption can misplace it) must
+    // never lock the box: heal it to the text it belongs to.
+    const lineText = typeof line.text === 'string' ? line.text : '';
+    const boxText = typeof box.text === 'string' ? box.text : '';
+    const lineCursor = Number.isInteger(line.cursor)
+      ? Math.max(0, Math.min(lineText.length, line.cursor))
+      : lineText.length;
+    const boxCursor = Number.isInteger(box.cursor)
+      ? Math.max(0, Math.min(boxText.length, box.cursor))
+      : boxText.length;
     return terminalTextInputDelta(
-      line.text, box.text, line.cursor, box.cursor, applicationCursorKeys,
+      lineText, boxText, lineCursor, boxCursor, applicationCursorKeys,
     );
   }
 

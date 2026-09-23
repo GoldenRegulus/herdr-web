@@ -175,6 +175,13 @@ test('a write keeps its moment through a confirming frame', async () => {
   assert.ok(h.pane.composeWritten, 'the write in flight keeps its moment');
 });
 
+test('a stale caret can never lock the box', () => {
+  const h = harness('ab', 2, 'prompt> ');
+  h.pane.mobilePredictionCursor = 99;
+  h.type('prompt> abc', 11);
+  assert.equal(h.sent.join(''), 'c', 'typing goes through even from a caret the model lost');
+});
+
 test('one character of typing goes out at once', () => {
   const h = harness('hello', 5, 'prompt> ');
   h.type('prompt> hello!');

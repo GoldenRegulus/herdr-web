@@ -591,7 +591,8 @@ class FrontendContractTests(unittest.TestCase):
         )
 
         self.assertIn("function handleMobileTextInput(pane, event)", application)
-        self.assertIn("line.text, box.text, line.cursor, box.cursor", application)
+        self.assertIn("lineText, boxText, lineCursor, boxCursor", application)
+        self.assertIn("Math.max(0, Math.min(lineText.length, line.cursor))", application)
         self.assertIn("mobilePredictionPrefix: ''", application)
         self.assertIn("function replaceMobilePredictionFromTerminal(pane, helper)", application)
         self.assertIn("terminalTextAtCursor(pane.terminal", application)
