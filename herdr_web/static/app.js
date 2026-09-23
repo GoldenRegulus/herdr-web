@@ -2427,6 +2427,17 @@ const { WebglAddon } = globalThis.WebglAddon;
   function resetPaneKeyboardHelper(pane) {
     const helper = paneKeyboardHelper(pane);
     if (!helper) return;
+    if (helper && !helper.mobileFocusTrace) {
+      helper.mobileFocusTrace = true;
+      helper.addEventListener('focus', () => {
+        // Keyboard evidence: every raise names the gesture state it came
+        // from, so a wrong raise is visible in the log.
+        reportClientIssue(
+          'keyboard-focus',
+          `suppress=${performance.now() < suppressKeyboardFocusUntil} touchable=${helper.classList.contains('mobile-native-paste-target')}`,
+        );
+      });
+    }
     helper.classList.remove('mobile-keyboard-target', 'mobile-native-paste-target');
     setMobilePredictionAttributes(helper, false);
     for (const property of [
