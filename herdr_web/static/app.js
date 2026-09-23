@@ -4679,6 +4679,17 @@ const { WebglAddon } = globalThis.WebglAddon;
     if (!pane) return;
     focusPaneKeyboard(pane);
   };
+  // iOS focuses a button from its compatibility mousedown, and that focus
+  // steal blurs the invisible box and closes the keyboard. Prevent that
+  // mousedown for every control on the key rows: the click still fires and
+  // focus never leaves the box.
+  for (const eventName of ['mousedown', 'pointerdown']) {
+    document.addEventListener(eventName, (event) => {
+      if (event.target?.closest?.('#pane-mobile-bar, #mobile-toolbar')) {
+        event.preventDefault();
+      }
+    }, true);
+  }
   // A key tap steals focus to its button, and iOS closes the keyboard the
   // moment the field blurs. Take focus straight back in the same task, so the
   // keyboard never notices.

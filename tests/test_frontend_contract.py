@@ -469,6 +469,9 @@ class FrontendContractTests(unittest.TestCase):
         # state counts.
         self.assertIn("const controlFocused = document.activeElement?.closest?.(", application)
         self.assertIn("if (!keyboardFocused && !controlFocused) return;", application)
+        # A key tap must not steal focus: iOS focuses from its compatibility
+        # mousedown, which closes the keyboard.
+        self.assertIn("for (const eventName of ['mousedown', 'pointerdown'])", application)
         self.assertNotIn("document.addEventListener('pointerdown', openKeyboardFromTap", application)
         self.assertNotIn("document.addEventListener('touchstart', openKeyboardFromTap", application)
         self.assertIn("document.addEventListener('touchmove'", application)
