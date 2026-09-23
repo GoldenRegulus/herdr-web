@@ -2408,6 +2408,7 @@ const { WebglAddon } = globalThis.WebglAddon;
   // A tap raises the keyboard. A swipe or a scroll never does, however short.
   const MOBILE_TAP_SLOP_PX = 12;
   const MOBILE_TAP_MAX_MS = 700;
+  let suppressKeyboardFocusUntil = 0;
 
   function isMobileTapGesture(deltaX, deltaY, elapsedMs) {
     return Math.abs(deltaX) <= MOBILE_TAP_SLOP_PX
@@ -2483,6 +2484,9 @@ const { WebglAddon } = globalThis.WebglAddon;
   }
 
   function focusPaneKeyboard(pane) {
+    // A moved gesture must never raise the keyboard — only a tap does. This
+    // also stops the click the browser sends after a swipe.
+    if (performance.now() < suppressKeyboardFocusUntil) return false;
     if (mobileKeyboardLocked || pane.mode !== 'control' || pane.closed || pane.snapshot) return false;
     if (!setActivePane(pane.streamId)) return false;
     syncPaneKeyboardHelper(pane);
@@ -3148,6 +3152,7 @@ const { WebglAddon } = globalThis.WebglAddon;
     host.addEventListener('touchstart', (event) => {
       if (event.touches.length !== 1) return;
       const touch = event.touches[0];
+      suppressKeyboardFocusUntil = 0;
       if (!mobileMouseMode) {
         const retainKeyboard = document.activeElement === paneKeyboardHelper(record);
         cancelTouchScroll();
@@ -3205,6 +3210,7 @@ const { WebglAddon } = globalThis.WebglAddon;
         cancelTouchLongPress();
         if (!touchMoved && !mobileMouseMode) paneTerminal.clearSelection();
         touchMoved = true;
+        suppressKeyboardFocusUntil = performance.now() + MOBILE_TAP_MAX_MS;
         if (mobileMouseMode && touchMouseGesture === undefined) {
           const held = performance.now() - (touchStartTime || performance.now());
           const horizontal = Math.abs(touch.clientX - touchStartX);
