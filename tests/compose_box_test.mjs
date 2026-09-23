@@ -240,3 +240,33 @@ test('a delete crosses the line break of multi-line text', async () => {
   assert.equal(h.sent[1], '\x7f'.repeat(5), 'the line break itself is deleted too');
   assert.equal(h.pane.mobilePredictionText, 'line1');
 });
+
+test('the shadow crosses a row boundary and a delete crosses with it', () => {
+  const rows = ['prompt> line-one', 'line-two'];
+  const terminal = {
+    buffer: {
+      active: {
+        baseY: 0,
+        cursorY: 1,
+        cursorX: 8,
+        getLine(row) {
+          const text = rows[row];
+          return text === undefined ? undefined : {
+            isWrapped: false,
+            translateToString: (trim, start = 0, end = text.length) => {
+              const part = text.slice(start, end);
+              return trim ? part.trimEnd() : part;
+            },
+          };
+        },
+      },
+    },
+  };
+  const shadow = prediction.terminalTextAtCursor(terminal);
+  assert.equal(shadow.text, 'prompt> line-oneline-two', 'the rows are one editable text');
+  assert.equal(shadow.cursor, 24);
+  // deleting at the boundary between the two rows
+  const next = shadow.text.slice(0, 15) + shadow.text.slice(16);
+  const edit = prediction.terminalTextInputDelta(shadow.text, next, 16, 15);
+  assert.equal(edit.data, '\x7f', 'the delete crosses the row boundary');
+});
