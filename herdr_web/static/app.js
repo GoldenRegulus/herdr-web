@@ -1970,14 +1970,17 @@ const { WebglAddon } = globalThis.WebglAddon;
     return pane?.terminal.textarea;
   }
 
-  function setMobilePredictionAttributes(helper, enabled) {
-    if (!helper) return;
-    helper.setAttribute('autocorrect', enabled ? 'on' : 'off');
+  function setMobilePredictionAttributes(helper) {
+    if (!helper || helper.mobileKeyboardTraits) return;
+    helper.mobileKeyboardTraits = true;
+    // The keyboard traits must stay constant while the field is focused:
+    // changing them makes the system keyboard rebuild, which pops the
+    // prediction bar and can discard text that is being composed.
+    helper.setAttribute('autocorrect', 'on');
     helper.setAttribute('autocapitalize', 'none');
     helper.setAttribute('autocomplete', 'off');
-    helper.setAttribute('spellcheck', enabled ? 'true' : 'false');
-    if (enabled) helper.setAttribute('enterkeyhint', 'send');
-    else helper.removeAttribute('enterkeyhint');
+    helper.setAttribute('spellcheck', 'true');
+    helper.setAttribute('enterkeyhint', 'send');
   }
 
   function mobilePredictionHelperValue(pane) {
@@ -2054,6 +2057,14 @@ const { WebglAddon } = globalThis.WebglAddon;
     // Text in the box that is not written yet stays: the next write rebases it
     // on the line the program now shows.
     if (pane.composeTimer !== undefined) return;
+    // A program mid-redraw shows a line that changes from frame to frame.
+    // Adopt only a line that repeated itself, so a reflow never throws away
+    // what the user typed.
+    const line = terminalTextAtCursor(pane.terminal);
+    const candidate = pane.composeAdoptCandidate;
+    pane.composeAdoptCandidate = { text: line.text, cursor: line.cursor };
+    if (!candidate || candidate.text !== line.text || candidate.cursor !== line.cursor) return;
+    pane.composeAdoptCandidate = undefined;
     replaceMobilePredictionFromTerminal(pane, helper);
   }
 
@@ -4553,6 +4564,24 @@ const { WebglAddon } = globalThis.WebglAddon;
   document.querySelector('#sheet-backdrop').addEventListener('click', () => closeMobileSheet());
   sheetSessions.addEventListener('click', () => showPicker());
   document.querySelector('#sheet-close').addEventListener('click', () => closeMobileSheet());
+  // Tapping anywhere on the screen opens the keyboard. Controls keep their own
+  // taps, and the keyboard lock still holds it shut.
+  document.addEventListener('pointerup', (event) => {
+    if (!mobileQuery.matches || mobileKeyboardLocked || mobileMouseMode) return;
+    if (event.pointerType === 'mouse' && event.button !== 0) return;
+    const target = event.target;
+    if (target?.closest?.(
+      'button, a, input, textarea, select, [role="dialog"], #sheet-backdrop',
+    )) return;
+    if (String(document.getSelection() || '').trim()) return;
+    const pane = selectedPaneTerminal();
+    if (!pane || pane.snapshot || pane.closed || pane.mode !== 'control') return;
+    focusPaneKeyboard(pane);
+    // The tap promises the keyboard: focus the input itself when the terminal
+    // focus path declines, so the keyboard still opens.
+    const helper = paneKeyboardHelper(pane);
+    if (helper && document.activeElement !== helper) helper.focus();
+  });
   document.addEventListener('keydown', handleMobileTerminalKeyDown, true);
   document.addEventListener('beforeinput', handleMobileTerminalBeforeInput, true);
   document.addEventListener('selectionchange', () => {
