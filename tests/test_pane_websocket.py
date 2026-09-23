@@ -547,6 +547,7 @@ for line in __import__('sys').stdin:
                                 "type": "pane-paste",
                                 "stream_id": 1,
                                 "text": "slow paste",
+                                "bracketed": True,
                             }
                         ),
                     }
@@ -1242,7 +1243,7 @@ for line in __import__('sys').stdin:
                     ),
                     call(
                         backend,
-                        "pane.send_input",
+                        "pane.send_text",
                         {"pane_id": "p1", "text": "first\nsecond"},
                     ),
                 ]
