@@ -128,6 +128,31 @@ test('focus puts the line back into the invisible box', () => {
   );
 });
 
+test('a deletion is an instruction and never waits for the settle', () => {
+  const h = harness('abcdef', 6, 'prompt> ');
+  h.type('prompt> abcd', 12);
+  assert.equal(h.sent.join(''), '\x7f\x7f', 'both deletes go out at once');
+  assert.equal(h.pane.mobilePredictionText, 'abcd');
+});
+
+test('a stream of larger edits cannot starve the settle deadline', async () => {
+  const h = harness('', 0, 'prompt> ');
+  let value = 'prompt> ';
+  for (let index = 0; index < 8; index += 1) {
+    value += `w${index} `;
+    h.type(value, value.length);
+    await settle(60);
+  }
+  assert.ok(h.sent.length > 0, 'the edits flush while the stream continues');
+});
+
+test('a swipe never counts as a tap', () => {
+  const h = harness('', 0);
+  assert.equal(h.context.isMobileTapGesture(0, 0, 80), true, 'a short touch is a tap');
+  assert.equal(h.context.isMobileTapGesture(30, 4, 80), false, 'a drag is not');
+  assert.equal(h.context.isMobileTapGesture(2, 2, 2000), false, 'and neither is a hold');
+});
+
 test('one character of typing goes out at once', () => {
   const h = harness('hello', 5, 'prompt> ');
   h.type('prompt> hello!');
