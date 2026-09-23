@@ -2442,6 +2442,22 @@ const { WebglAddon } = globalThis.WebglAddon;
       && elapsedMs <= MOBILE_TAP_MAX_MS;
   }
 
+  // Hold-to-copy joins rows by their meaning: a wrapped row continues the
+  // same line and joins with nothing, a hard break joins with a line break.
+  function snapshotCopyText(terminal, firstRow, rowTexts) {
+    const buffer = terminal?.buffer?.active;
+    if (!buffer) return rowTexts.join('\n');
+    let text = '';
+    for (let index = 0; index < rowTexts.length; index += 1) {
+      if (index > 0) {
+        const line = buffer.getLine(firstRow + index);
+        text += line?.isWrapped === true ? '' : '\n';
+      }
+      text += rowTexts[index];
+    }
+    return text;
+  }
+
   function noteMobilePredictionTerminalData(pane, data) {
     if (!nativeKeyboardInput || !mobileQuery.matches) return;
     // Native text input owns Backspace on iOS and Android. Any control that
@@ -4715,6 +4731,37 @@ const { WebglAddon } = globalThis.WebglAddon;
   }, true);
   document.addEventListener('pointerup', openKeyboardFromTap, true);
   document.addEventListener('touchend', openKeyboardFromTap, true);
+  // Hold-to-copy keeps the line structure: a wrapped row joins with nothing,
+  // a hard break joins with a break. The selection stays native; only the
+  // clipboard text is rebuilt from the row markers.
+  const rowDivIndex = (node) => {
+    let element = node?.nodeType === 1 ? node : node?.parentElement;
+    while (element?.parentElement && !element.parentElement.classList.contains('xterm-rows')) {
+      element = element.parentElement;
+    }
+    const rows = element?.parentElement;
+    if (!rows?.classList?.contains('xterm-rows')) return undefined;
+    return [...rows.children].indexOf(element);
+  };
+  document.addEventListener('copy', (event) => {
+    const pane = selectedPaneTerminal();
+    if (!pane?.snapshot) return;
+    const selection = document.getSelection();
+    if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return;
+    const range = selection.getRangeAt(0);
+    const first = rowDivIndex(range.startContainer);
+    const last = rowDivIndex(range.endContainer);
+    if (first === undefined || last === undefined) return;
+    const rowTexts = selection.toString().split('\n');
+    if (rowTexts.length !== last - first + 1) return;
+    const buffer = pane.terminal.buffer?.active;
+    const baseRow = (buffer?.viewportY ?? 0) + first;
+    // Rebuild only when the rows match what the selection shows. Otherwise
+    // the browser's own text is the honest copy.
+    if (buffer?.getLine(baseRow)?.translateToString(true) !== rowTexts[0].trimEnd()) return;
+    event.clipboardData?.setData('text/plain', snapshotCopyText(pane.terminal, baseRow, rowTexts));
+    event.preventDefault();
+  }, true);
   document.addEventListener('keydown', handleMobileTerminalKeyDown, true);
   document.addEventListener('beforeinput', handleMobileTerminalBeforeInput, true);
   document.addEventListener('selectionchange', () => {
