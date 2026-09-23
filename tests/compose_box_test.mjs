@@ -197,8 +197,8 @@ test('a composition that never ends does not block typing', async () => {
 
 test('a control character in the box never eats the next character', () => {
   const h = harness('hello', 5, 'prompt> ');
-  h.type('prompt> hello\nq', 'prompt> hello\nq'.length);
-  assert.equal(h.helper.value.includes('\n'), false, 'the newline is not text');
+  h.type('prompt> hello\x00q', 'prompt> hello\x00q'.length);
+  assert.equal(h.helper.value.includes('\x00'), false, 'a control character is not text');
   assert.equal(h.pane.mobilePredictionText, 'helloq');
   assert.deepEqual(h.sent, ['q'], 'the next character is not eaten');
 });
@@ -228,4 +228,15 @@ test('a line the program really changed is adopted once it settles', async () =>
   h.frame();
   h.frame();
   assert.equal(h.helper.value, 'prompt> program moved on', 'a settled line is taken');
+});
+
+test('a delete crosses the line break of multi-line text', async () => {
+  const h = harness('line1\nline2', 11, 'prompt> ');
+  h.type('prompt> line1\nline', 'prompt> line1\nline'.length);
+  assert.deepEqual(h.sent, ['\x7f'], 'the delete crosses into the second line');
+  assert.equal(h.pane.mobilePredictionText, 'line1\nline');
+  h.type('prompt> line1', 'prompt> line1'.length);
+  await settle(320);
+  assert.equal(h.sent[1], '\x7f'.repeat(5), 'the line break itself is deleted too');
+  assert.equal(h.pane.mobilePredictionText, 'line1');
 });

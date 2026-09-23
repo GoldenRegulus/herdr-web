@@ -2057,6 +2057,9 @@ const { WebglAddon } = globalThis.WebglAddon;
     // Text in the box that is not written yet stays: the next write rebases it
     // on the line the program now shows.
     if (pane.composeTimer !== undefined) return;
+    // Multi-line text spans rows the line reader cannot follow. Keep it
+    // instead of replacing it with the row the cursor happens to sit on.
+    if (pane.mobilePredictionText.includes('\n')) return;
     // A program mid-redraw shows a line that changes from frame to frame.
     // Adopt only a line that repeated itself, so a reflow never throws away
     // what the user typed.
@@ -2192,11 +2195,11 @@ const { WebglAddon } = globalThis.WebglAddon;
   }
 
   function stripMobileControlCharacters(text, cursor) {
-    if (!/[\x00-\x1f\x7f]/u.test(text)) return { text, cursor };
+    if (!/[\x00-\x09\x0b-\x1f\x7f]/u.test(text)) return { text, cursor };
     let result = '';
     let adjusted = cursor;
     for (let index = 0; index < text.length; index += 1) {
-      if (/[\x00-\x1f\x7f]/u.test(text[index])) {
+      if (/[\x00-\x09\x0b-\x1f\x7f]/u.test(text[index])) {
         if (index < cursor) adjusted -= 1;
         continue;
       }
@@ -4566,22 +4569,20 @@ const { WebglAddon } = globalThis.WebglAddon;
   document.querySelector('#sheet-close').addEventListener('click', () => closeMobileSheet());
   // Tapping anywhere on the screen opens the keyboard. Controls keep their own
   // taps, and the keyboard lock still holds it shut.
-  document.addEventListener('pointerup', (event) => {
+  const openKeyboardFromTap = (event) => {
     if (!mobileQuery.matches || mobileKeyboardLocked || mobileMouseMode) return;
-    if (event.pointerType === 'mouse' && event.button !== 0) return;
     const target = event.target;
     if (target?.closest?.(
       'button, a, input, textarea, select, [role="dialog"], #sheet-backdrop',
     )) return;
-    if (String(document.getSelection() || '').trim()) return;
     const pane = selectedPaneTerminal();
-    if (!pane || pane.snapshot || pane.closed || pane.mode !== 'control') return;
+    if (!pane) return;
     focusPaneKeyboard(pane);
-    // The tap promises the keyboard: focus the input itself when the terminal
-    // focus path declines, so the keyboard still opens.
     const helper = paneKeyboardHelper(pane);
     if (helper && document.activeElement !== helper) helper.focus();
-  });
+  };
+  document.addEventListener('pointerup', openKeyboardFromTap, true);
+  document.addEventListener('touchend', openKeyboardFromTap, true);
   document.addEventListener('keydown', handleMobileTerminalKeyDown, true);
   document.addEventListener('beforeinput', handleMobileTerminalBeforeInput, true);
   document.addEventListener('selectionchange', () => {

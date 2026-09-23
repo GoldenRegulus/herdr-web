@@ -186,10 +186,12 @@ test('confirmation requires complete owned text across physical rows and the cur
 });
 
 test('invalid text, caret offsets, and oversized replacements produce no input', () => {
-  for (const value of [null, undefined, 42, '\n', 'a\x1bb', 'x'.repeat(MOBILE_PREDICTION_TEXT_LIMIT + 1)]) {
+  for (const value of [null, undefined, 42, '\x00', 'a\x1bb', 'x'.repeat(MOBILE_PREDICTION_TEXT_LIMIT + 1)]) {
     assert.equal(terminalTextInputDelta('abc', value), undefined);
     assert.equal(terminalCaretInput(value, 0, 0), undefined);
   }
+  // A line break is text: multi-line input must stay editable.
+  assert.notEqual(terminalTextInputDelta('abc', 'a\nb'), undefined);
   for (const cursor of [-1, 4, 0.5, NaN]) {
     assert.equal(terminalTextInputDelta('abc', 'abc', cursor, 0), undefined);
     assert.equal(terminalCaretInput('abc', 0, cursor), undefined);
