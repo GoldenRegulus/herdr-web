@@ -1556,11 +1556,16 @@ const { WebglAddon } = globalThis.WebglAddon;
     }
     const pane = selectedPaneTerminal();
     if (!pane) return;
-    const keyboardFocused = document.activeElement === paneKeyboardHelper(pane);
-    // Focus only when the helper actually holds focus: the keyboard is up
-    // because of us. A viewport change is not the keyboard — the URL bar
-    // collapses during a scroll and must never raise it.
-    if (!keyboardFocused) return;
+    const helper = paneKeyboardHelper(pane);
+    const keyboardFocused = document.activeElement === helper;
+    // Restore focus when the keyboard is ours. A control tap moves focus to
+    // its button and losing focus closes the keyboard. A swipe or scroll
+    // must never raise it: only our own focus state counts — never the
+    // viewport, whose URL bar collapse looks exactly like a keyboard.
+    const controlFocused = document.activeElement?.closest?.(
+      '#pane-mobile-bar, #mobile-toolbar',
+    ) != null;
+    if (!keyboardFocused && !controlFocused) return;
     focusPaneKeyboard(pane);
   }
 
