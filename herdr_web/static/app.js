@@ -45,7 +45,8 @@ const { WebglAddon } = globalThis.WebglAddon;
   const mobileMouseModeButton = document.querySelector('#mobile-mouse-mode');
   const mobileKeyboardLockButton = document.querySelector('#mobile-keyboard-lock');
   const mobileArrows = document.querySelector('#mobile-arrows');
-  const mobileNavigationModeButton = document.querySelector('#mobile-navigation-mode');
+  const mobileNavigationModeButtons = [...document.querySelectorAll('[data-navigation-mode]')];
+  const mobileNavigationModeButton = mobileNavigationModeButtons[0];
   const mobileDefaultRow = document.querySelector('#mobile-default-row');
   const mobileNavigationRow = document.querySelector('#mobile-navigation-row');
   const paneMobileBar = document.querySelector('#pane-mobile-bar');
@@ -1534,10 +1535,12 @@ const { WebglAddon } = globalThis.WebglAddon;
   }
 
   function renderMobileNavigationMode() {
-    mobileNavigationModeButton.setAttribute('aria-pressed', String(mobileNavigationMode));
-    mobileNavigationModeButton.setAttribute(
-      'aria-label', mobileNavigationMode ? 'Show primary keys' : 'Show more keys',
-    );
+    for (const button of mobileNavigationModeButtons) {
+      button.setAttribute('aria-pressed', String(mobileNavigationMode));
+      button.setAttribute(
+        'aria-label', mobileNavigationMode ? 'Show primary keys' : 'Show more keys',
+      );
+    }
     mobileDefaultRow.hidden = mobileNavigationMode;
     mobileNavigationRow.hidden = !mobileNavigationMode;
   }
@@ -4693,10 +4696,12 @@ const { WebglAddon } = globalThis.WebglAddon;
   mobileKeyboardLockButton.addEventListener('click', () => {
     setMobileKeyboardLocked(!mobileKeyboardLocked);
   });
-  mobileNavigationModeButton.addEventListener('pointerdown', (event) => event.preventDefault());
-  mobileNavigationModeButton.addEventListener('click', () => {
-    setMobileNavigationMode(!mobileNavigationMode);
-  });
+  for (const button of mobileNavigationModeButtons) {
+    button.addEventListener('pointerdown', (event) => event.preventDefault());
+    button.addEventListener('click', () => {
+      setMobileNavigationMode(!mobileNavigationMode);
+    });
+  }
   renderMobileMouseMode();
   renderMobileKeyboardLock();
   renderMobileNavigationMode();
