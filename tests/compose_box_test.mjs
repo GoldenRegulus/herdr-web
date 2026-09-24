@@ -249,14 +249,13 @@ test('a partial echo does not swallow what was typed', () => {
   assert.deepEqual(h.sent, ['!', '!'], 'the next write rebases on the line as observed');
 });
 
-test('a program that changes its own line is followed, not fought', () => {
+test('a program that changes its own line is left alone with the draft', () => {
   const h = harness('hello', 5, 'prompt> ');
   h.render('prompt> shell replaced this', 'prompt> shell replaced this'.length);
   h.frame();
   h.render('prompt> shell replaced this', 'prompt> shell replaced this'.length);
   h.frame();
-  assert.equal(h.pane.mobilePredictionText, 'prompt> shell replaced this');
-  assert.equal(h.helper.value, 'prompt> shell replaced this', 'the box adopts what the program shows');
+  assert.equal(h.helper.value, 'prompt> hello', 'the draft the user typed stays');
   assert.deepEqual(h.sent, [], 'no edit corrects the program');
 });
 
@@ -302,12 +301,22 @@ test('a reflow that redraws the line never throws away typed text', () => {
   assert.deepEqual(h.sent, [], 'no edit fights the redraw');
 });
 
-test('a line the program really changed is adopted once it settles', async () => {
+test('a redraw fragment never steals the draft', async () => {
   const h = harness('hello', 5, 'prompt> ');
-  h.render('prompt> program moved on', 'prompt> program moved on'.length);
+  h.render('s time, and the two skip       buttons.', 40);
+  h.frame();
+  h.render('s time, and the two skip       buttons.', 40);
+  h.frame();
+  assert.equal(h.helper.value, 'prompt> hello', 'padded screen rows never take the draft');
+  assert.deepEqual(h.sent, [], 'and nothing corrects the program');
+});
+
+test('a settled line is taken when nothing is owned', async () => {
+  const h = harness('', 0, 'prompt> ');
+  h.render('prompt> next thing', 'prompt> next thing'.length);
   h.frame();
   h.frame();
-  assert.equal(h.helper.value, 'prompt> program moved on', 'a settled line is taken');
+  assert.equal(h.helper.value, 'prompt> next thing');
 });
 
 test('a delete crosses the line break of multi-line text', async () => {

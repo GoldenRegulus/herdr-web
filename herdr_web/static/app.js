@@ -2086,9 +2086,17 @@ const { WebglAddon } = globalThis.WebglAddon;
     // Text in the box that is not written yet stays: the next write rebases it
     // on the line the program now shows.
     if (pane.composeTimer !== undefined) return;
-    // Multi-line text spans rows the line reader cannot follow. Keep it
-    // instead of replacing it with the row the cursor happens to sit on.
-    if (pane.mobilePredictionText.includes('\n')) return;
+    // The draft in the box is the user's text. A shown line that holds that
+    // text is the same line, and the program may change it. Any other shown
+    // line is content from a redraw. The draft stays and is left alone.
+    const ownedDraft = pane.mobilePredictionText;
+    if (ownedDraft) {
+      const shownLine = terminalTextAtCursor(pane.terminal, {
+        text: ownedDraft,
+        cursor: pane.mobilePredictionCursor,
+      }).text;
+      if (!shownLine.includes(ownedDraft)) return;
+    }
     // A program mid-redraw shows a line that changes from frame to frame.
     // Adopt only a line that repeated itself, so a reflow never throws away
     // what the user typed.
@@ -2392,7 +2400,15 @@ const { WebglAddon } = globalThis.WebglAddon;
       return false;
     }
     event.stopImmediatePropagation();
-    return composeSync(pane);
+    const result = composeSync(pane);
+    if (event.inputType?.startsWith('delete')) {
+      reportClientIssue(
+        'delete-fate',
+        `type=${event.inputType} handled=${result} composing=${pane.nativeComposing === true}`
+        + ` box=${JSON.stringify(helper.value).slice(-24)}`,
+      );
+    }
+    return result;
   }
 
   function handleMobilePredictionCompositionStart(event) {
@@ -2614,7 +2630,8 @@ const { WebglAddon } = globalThis.WebglAddon;
       event.stopImmediatePropagation();
       pane.suppressDeletionBeforeInputUntil = performance.now()
         + MOBILE_BACKSPACE_BEFORE_INPUT_SUPPRESSION_MS;
-      sendMobilePaneKeyboardData(pane, '\x7f');
+      const sent = sendMobilePaneKeyboardData(pane, '\x7f');
+      reportClientIssue('delete-fate', `empty-box backspace sent=${sent}`);
       return;
     }
     // The native textarea owns Backspace and its repeat. Stop xterm from
