@@ -595,6 +595,10 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("Math.max(0, Math.min(lineText.length, line.cursor))", application)
         self.assertIn("mobilePredictionPrefix: ''", application)
         self.assertIn("function replaceMobilePredictionFromTerminal(pane, helper)", application)
+        # A delete at the row start must reach the terminal. The old gate
+        # required flags from the retired event model and swallowed it.
+        self.assertIn("function mobileDeleteAtBoxStart(helper, pane)", application)
+        self.assertIn("const atNativeStart = mobileDeleteAtBoxStart(helper, pane);", application)
         self.assertIn("terminalTextAtCursor(pane.terminal", application)
         self.assertIn("text: pane.mobilePredictionText", application)
         self.assertIn("const nativeKeyboardInput = iosKeyboard || androidKeyboard;", application)
@@ -677,7 +681,7 @@ class FrontendContractTests(unittest.TestCase):
     def test_mobile_backspace_uses_native_text_edits_with_an_empty_helper_fallback(self) -> None:
         application = (STATIC_DIRECTORY / "app.js").read_text(encoding="utf-8")
 
-        self.assertIn("const atNativeStart = (", application)
+        self.assertIn("const atNativeStart = mobileDeleteAtBoxStart(helper, pane);", application)
         self.assertIn("sendMobilePaneKeyboardData(pane, '\\x7f')", application)
         self.assertNotIn("MOBILE_BACKSPACE_SENTINEL", application)
         self.assertNotIn("mobileBackspaceSentinel", application)

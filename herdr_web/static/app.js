@@ -2474,6 +2474,18 @@ const { WebglAddon } = globalThis.WebglAddon;
     return text;
   }
 
+  // When the box holds nothing before the caret, the native delete has no
+  // character to remove. The delete goes to the terminal instead, and the
+  // program decides what it means: join with the previous row, or nothing.
+  // The box must mirror the model, so this never fires while the keyboard
+  // composes text.
+  function mobileDeleteAtBoxStart(helper, pane) {
+    return !!pane && !pane.nativeComposing
+      && helper?.value === mobilePredictionHelperValue(pane)
+      && helper.selectionStart === helper.selectionEnd
+      && helper.selectionStart === 0;
+  }
+
   function noteMobilePredictionTerminalData(pane, data) {
     if (!nativeKeyboardInput || !mobileQuery.matches) return;
     // Native text input owns Backspace on iOS and Android. Any control that
@@ -2620,11 +2632,7 @@ const { WebglAddon } = globalThis.WebglAddon;
     if (event.isComposing) return;
     followMobileCaret(pane);
     const helper = paneKeyboardHelper(pane);
-    const atNativeStart = (
-      pane.mobilePredictionConfirmed || pane.mobilePredictionPending
-    ) && helper?.value === mobilePredictionHelperValue(pane)
-      && helper.selectionStart === helper.selectionEnd
-      && helper.selectionStart === 0;
+    const atNativeStart = mobileDeleteAtBoxStart(helper, pane);
     if (atNativeStart) {
       event.preventDefault();
       event.stopImmediatePropagation();
