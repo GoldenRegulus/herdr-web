@@ -196,6 +196,24 @@ test('copy joins a wrapped row without a break and a newline with one', () => {
   );
 });
 
+test('a delete at the row start goes to the terminal', () => {
+  const h = harness('line2', 5);
+  assert.equal(
+    h.context.mobileDeleteAtBoxStart(h.helper, h.pane), false,
+    'with text before the caret the native delete applies',
+  );
+  h.caret(0);
+  assert.equal(
+    h.context.mobileDeleteAtBoxStart(h.helper, h.pane), true,
+    'at the row start the delete goes to the terminal',
+  );
+  h.pane.nativeComposing = true;
+  assert.equal(
+    h.context.mobileDeleteAtBoxStart(h.helper, h.pane), false,
+    'and never while the keyboard composes',
+  );
+});
+
 test('one character of typing goes out at once', () => {
   const h = harness('hello', 5, 'prompt> ');
   h.type('prompt> hello!');
