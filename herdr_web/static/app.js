@@ -1,3 +1,4 @@
+import { InputTransfer } from './input-transfer.js';
 import {
   FULL_OUTPUT_COMPRESSION,
   FullOutputReceiver,
@@ -1339,6 +1340,12 @@ const { WebglAddon } = globalThis.WebglAddon;
     clearTimeout(flow.ackTimer);
     flow.ackTimer = undefined;
     flow.outputReceiver?.close();
+    if (flow.inputTransfer) {
+      // Partial delivery is uncertain: never replay an upload on a new socket.
+      flow.inputTransfer.operation.error = new Error('Input transfer interrupted');
+      flow.inputTransfer = undefined;
+      showBrowserToast('An interrupted image or paste was discarded');
+    }
     if (outputFlow === flow) outputFlow = undefined;
   }
 
@@ -3823,6 +3830,8 @@ const { WebglAddon } = globalThis.WebglAddon;
         if (message.type === 'panes-attached') {
           attached = true;
           flow.attached = true;
+          flow.inputChunkBytes = Number.isSafeInteger(message.input_chunk_bytes)
+            && message.input_chunk_bytes > 0 ? message.input_chunk_bytes : 0;
           for (const stream of message.streams || []) {
             const pane = paneTerminals.get(stream.stream_id);
             if (pane) {
@@ -3853,7 +3862,7 @@ const { WebglAddon } = globalThis.WebglAddon;
               const discardedInput = inputBuffer.length || inputOperations.length;
               clearPendingMouseMotion();
               inputBuffer.clear();
-              inputOperations.length = 0;
+              clearInputOperations();
               pendingPaneActivation = undefined;
               if (discardedInput) {
                 showBrowserToast('Queued input was discarded because this pane is read-only');
@@ -3873,7 +3882,7 @@ const { WebglAddon } = globalThis.WebglAddon;
               flow.inputReady = false;
               clearPendingMouseMotion();
               inputBuffer.clear();
-              inputOperations.length = 0;
+              clearInputOperations();
               pendingPaneActivation = undefined;
             }
             updatePaneTitle(pane);
@@ -3943,32 +3952,62 @@ const { WebglAddon } = globalThis.WebglAddon;
     }, delay);
   }
 
+  function clearInputOperations() {
+    if (outputFlow?.inputTransfer) {
+      if (outputFlow.socket.readyState === WebSocket.OPEN) {
+        outputFlow.inputTransfer.cancel(outputFlow.socket);
+      }
+      outputFlow.inputTransfer = undefined;
+    }
+    inputOperations.length = 0;
+  }
+
   function discardInputOperations(message) {
     if (!inputOperations.length) return;
-    inputOperations.length = 0;
+    clearInputOperations();
     showBrowserToast(message);
   }
 
   function drainWebSocketInput(activeSocket, flow) {
     if (!flow.inputReady) return;
+    let sentBytes = 0;
     while (
       flow === outputFlow && flow.attached && activeSocket === socket
       && activeSocket.readyState === WebSocket.OPEN
       && activeSocket.bufferedAmount < INPUT_WEBSOCKET_HIGH_WATER_BYTES
+      && sentBytes < INPUT_BATCH_BYTES
     ) {
       const beforeOperation = inputBytesBeforeOperation();
       if (beforeOperation > 0) {
-        const bytes = inputBuffer.peek(Math.min(INPUT_BATCH_BYTES, beforeOperation));
+        const bytes = inputBuffer.peek(Math.min(
+          INPUT_BATCH_BYTES - sentBytes, beforeOperation,
+          INPUT_WEBSOCKET_HIGH_WATER_BYTES - activeSocket.bufferedAmount,
+        ));
         activeSocket.send(bytes);
         inputBuffer.consume(bytes.length);
+        sentBytes += bytes.length;
         continue;
       }
 
       const operation = inputOperations[0];
       if (!operation) break;
       if (!operation.ready) return;
+      if (operation.error) {
+        inputOperations.shift();
+        continue;
+      }
+      if (flow.inputChunkBytes && ['pane-paste', 'clipboard-image'].includes(operation.kind)) {
+        flow.inputTransfer ||= new InputTransfer(operation, flow.inputChunkBytes);
+        if (flow.inputTransfer.sendNext(activeSocket, INPUT_WEBSOCKET_HIGH_WATER_BYTES)) {
+          inputOperations.shift();
+          flow.inputTransfer = undefined;
+        }
+        // Yield even on a fast socket whose bufferedAmount stays zero. Parser
+        // callbacks and ACK timers must run between bulk input chunks.
+        scheduleInputDrain(activeSocket.bufferedAmount ? 8 : 0);
+        return;
+      }
       inputOperations.shift();
-      if (operation.error) continue;
       if (operation.kind === 'pane-mouse') {
         activeSocket.send(JSON.stringify({
           type: 'pane-mouse',
@@ -4122,7 +4161,7 @@ const { WebglAddon } = globalThis.WebglAddon;
     reconnectTimer = undefined;
     clearPendingMouseMotion();
     inputBuffer.clear();
-    inputOperations.length = 0;
+    clearInputOperations();
     resizeObserver?.disconnect();
     try {
       buildPaneGrid();
@@ -4198,7 +4237,7 @@ const { WebglAddon } = globalThis.WebglAddon;
     reconnectAttempts = 0;
     receivedFrames = 0;
     inputBuffer.clear();
-    inputOperations.length = 0;
+    clearInputOperations();
     currentBackend = backend;
     viewMode = 'panes';
     httpFallbackStarting = false;
@@ -4268,7 +4307,7 @@ const { WebglAddon } = globalThis.WebglAddon;
     inputDrainTimer = undefined;
     clearPendingMouseMotion();
     inputBuffer.clear();
-    inputOperations.length = 0;
+    clearInputOperations();
     httpInputInFlight = false;
     httpInputReady = false;
     httpFallbackStarting = false;
@@ -4534,6 +4573,8 @@ const { WebglAddon } = globalThis.WebglAddon;
           if (message.type === 'attached') {
             attached = true;
             flow.attached = true;
+            flow.inputChunkBytes = Number.isSafeInteger(message.input_chunk_bytes)
+              && message.input_chunk_bytes > 0 ? message.input_chunk_bytes : 0;
             clearTimeout(connectTimer);
             connectTimer = undefined;
             clearTimeout(reconnectStableTimer);
@@ -4585,7 +4626,7 @@ const { WebglAddon } = globalThis.WebglAddon;
     inputDrainTimer = undefined;
     clearPendingMouseMotion();
     inputBuffer.clear();
-    inputOperations.length = 0;
+    clearInputOperations();
     httpInputInFlight = false;
     httpInputReady = false;
     currentBackend = backend;
