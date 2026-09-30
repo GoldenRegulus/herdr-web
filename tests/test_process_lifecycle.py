@@ -57,7 +57,7 @@ class PtyClientTests(unittest.IsolatedAsyncioTestCase):
             [len(chunk) for chunk in chunks],
             [OUTPUT_WEBSOCKET_CHUNK_BYTES, OUTPUT_WEBSOCKET_CHUNK_BYTES, 37],
         )
-        self.assertEqual(OUTPUT_ACK_WINDOW_BYTES, OUTPUT_WEBSOCKET_CHUNK_BYTES)
+        self.assertGreaterEqual(OUTPUT_ACK_WINDOW_BYTES, OUTPUT_WEBSOCKET_CHUNK_BYTES)
 
     async def test_http_output_queue_uses_acknowledgement_sized_chunks(self) -> None:
         payload = b"x" * (OUTPUT_WEBSOCKET_CHUNK_BYTES * 2 + 37)
@@ -87,8 +87,8 @@ class PtyClientTests(unittest.IsolatedAsyncioTestCase):
             all(len(chunk) <= OUTPUT_WEBSOCKET_CHUNK_BYTES for chunk in chunks)
         )
 
-    async def test_full_websocket_waits_for_each_output_chunk_ack(self) -> None:
-        payload = b"x" * (OUTPUT_WEBSOCKET_CHUNK_BYTES * 2 + 37)
+    async def test_full_websocket_waits_for_parser_ack_window(self) -> None:
+        payload = b"x" * (OUTPUT_ACK_WINDOW_BYTES + OUTPUT_WEBSOCKET_CHUNK_BYTES * 2 + 37)
         backend = Backend("backend", "test", Path("/unused.sock"))
 
         class FakeClient:
@@ -155,9 +155,10 @@ class PtyClientTests(unittest.IsolatedAsyncioTestCase):
             patch("herdr_web.app.read_pty_chunk", side_effect=fake_read_pty_chunk),
         ):
             task = asyncio.create_task(terminal_websocket(websocket, backend.id))
-            await wait_for_chunks(1)
+            initial_chunks = OUTPUT_ACK_WINDOW_BYTES // OUTPUT_WEBSOCKET_CHUNK_BYTES
+            await wait_for_chunks(initial_chunks)
             await asyncio.sleep(0.03)
-            self.assertEqual(len(websocket.sent_bytes), 1)
+            self.assertEqual(len(websocket.sent_bytes), initial_chunks)
             await websocket.incoming.put(
                 {
                     "type": "websocket.receive",
@@ -171,26 +172,20 @@ class PtyClientTests(unittest.IsolatedAsyncioTestCase):
                 }
             )
 
-            acknowledged = 0
-            for count in (2, 3):
-                acknowledged += len(websocket.sent_bytes[-1])
-                await websocket.incoming.put(
-                    {
-                        "type": "websocket.receive",
-                        "text": json.dumps(
-                            {"type": "output-ack", "bytes": acknowledged}
-                        ),
-                    }
-                )
-                await wait_for_chunks(count)
-
-            acknowledged += len(websocket.sent_bytes[-1])
             await websocket.incoming.put(
                 {
                     "type": "websocket.receive",
                     "text": json.dumps(
-                        {"type": "output-ack", "bytes": acknowledged}
+                        {"type": "output-ack", "bytes": OUTPUT_ACK_WINDOW_BYTES}
                     ),
+                }
+            )
+            await wait_for_chunks(initial_chunks + 3)
+            self.assertFalse(task.done(), "final output must also wait for its parser ACK")
+            await websocket.incoming.put(
+                {
+                    "type": "websocket.receive",
+                    "text": json.dumps({"type": "output-ack", "bytes": len(payload)}),
                 }
             )
             await asyncio.wait_for(task, timeout=2)
@@ -203,11 +198,11 @@ class PtyClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(b"".join(websocket.sent_bytes), payload)
         self.assertEqual(
             [len(chunk) for chunk in websocket.sent_bytes],
-            [OUTPUT_WEBSOCKET_CHUNK_BYTES, OUTPUT_WEBSOCKET_CHUNK_BYTES, 37],
+            [OUTPUT_WEBSOCKET_CHUNK_BYTES] * (initial_chunks + 2) + [37],
         )
 
     async def test_full_websocket_parser_ack_timeout_releases_client(self) -> None:
-        payload = b"x" * (OUTPUT_WEBSOCKET_CHUNK_BYTES * 2)
+        payload = b"x" * (OUTPUT_ACK_WINDOW_BYTES * 2)
         backend = Backend("backend", "test", Path("/unused.sock"))
 
         class FakeClient:
@@ -271,7 +266,7 @@ class PtyClientTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertTrue(client.closed)
-        self.assertEqual(len(websocket.sent_bytes), 1)
+        self.assertEqual(sum(map(len, websocket.sent_bytes)), OUTPUT_ACK_WINDOW_BYTES)
         self.assertTrue(
             any(
                 message.get("message") == "terminal parser acknowledgement timed out"

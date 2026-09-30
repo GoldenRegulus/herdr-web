@@ -165,11 +165,37 @@ the same precedence as Herdr.
 
 The WebSocket bridge keeps one PTY output chunk in its application queue. It
 coalesces each output burst for at most 2 ms and up to 256 KiB, then sends it as
-ordered 8 KiB WebSocket messages. Full mode permits only one such message in
-its parser-acknowledgement window. Its HTTP fallback also reads one 8 KiB chunk
-at a time and waits for xterm to parse that chunk before the next long poll. It
-does not drop raw ANSI bytes. Full keeps xterm's cursor visible but steady, so
-an idle cursor does not schedule WebGL blink repaints.
+ordered 8 KiB WebSocket messages. Full mode starts with a 32 KiB
+parser-acknowledgement window, grows by 8 KiB per clean window of parsed output,
+and halves the window when parser round trips exceed twice their smoothed
+latency (with a 250 ms floor). Stable high-latency links can still grow. It stays
+between 8 KiB and 256 KiB, with at most 64 messages in flight even for tiny writes.
+Shrinking the window pauses new sends until existing output drains; it never
+drops or reorders raw ANSI bytes. Cumulative ACKs count parsed raw bytes, and
+the oldest unparsed message has a fixed 60-second deadline even during idle
+output or partial ACK progress. Its HTTP fallback still reads one 8 KiB chunk
+at a time and waits for xterm to parse that chunk before the next long poll.
+Full keeps xterm's cursor visible but steady, so an idle cursor does not schedule
+WebGL blink repaints.
+
+Full also negotiates `deflate-v1` output compression when the browser supports
+streaming decompression. Each compressed message is an independent level-1
+zlib stream over at most 8 KiB. A JSON `output-deflate` descriptor gives the
+original byte count and applies only to the immediately following binary
+message. The client must offer `output_compression: "deflate-v1"` in its initial
+resize alongside `output_ack: true`, and receive the same compression field in
+`attached` before accepting descriptors. Old clients and servers keep the raw protocol, as does HTTP fallback.
+
+Small or incompressible chunks remain unchanged raw binary messages. Compression
+must save at least 64 bytes and 5% after the descriptor and
+WebSocket headers; poor savings skip the next eight eligible chunks. A compression attempt that
+exceeds 2 ms backs off for one second. These bounded synchronous jobs create no
+threads and add no batching delay. The browser serializes decompression before
+xterm writes, validates the exact original length, and caps queued output at
+2 MiB. Parser acknowledgements still count original ANSI bytes, never compressed
+wire bytes. Malformed output closes the connection without rendering or
+acknowledging the rejected chunk. Both Full and Panes keep WebSocket-level
+`permessage-deflate` disabled to avoid a second compression pass.
 
 The browser always uses xterm.js's supported scheduled write queue. It
 acknowledges output only after xterm.js parses it. Each Panes WebSocket has an
@@ -232,6 +258,22 @@ It flushes that position before each key, click, wheel event, paste, or image,
 so non-disposable input stays ordered and lossless. Input stays queued while
 the connection attaches. The HTTP fallback sends one input request at a time,
 so requests cannot pass each other.
+
+Full and Panes receive parser acknowledgements independently of their ordered
+input workers. Image uploads (up to 16 MiB) and Panes text pastes (up to 512 KiB)
+use negotiated 16 KiB binary chunks. The browser yields between chunks and
+keeps bulk input within a 32 KiB native socket backlog, so ACKs and heartbeat
+replies can interleave instead of waiting behind a whole upload. Full-mode
+text input uses the same bounded, yielding input drain.
+
+An upload reserves its place in the command queue before its body arrives.
+Keys, pane changes, and resize commands stay in order; no partial image or
+paste reaches Herdr. Declared transfer bytes stay charged against the 32 MiB
+command budget until the operation completes. Each connection allows one
+incomplete transfer, with a 30-second chunk-idle timeout. Cancellation or
+disconnect drops that incomplete body, and the browser does not replay it on a
+new socket. Both input workers have a five-second total disconnect drain
+budget. Older clients and servers retain the legacy upload message shapes.
 
 Full and Panes use the same authentication-aware WebSocket recovery path. Both
 retry with bounded exponential backoff and retain queued input while a new
@@ -458,3 +500,18 @@ bincode protocol in JavaScript.
 Not yet implemented: HTTP fallback for Panes mode, layout editing,
 coordinated takeover between browser clients, or discovery of
 Herdr sessions outside the conventional config directory.
+
+## Transport regression tests
+
+Run Python tests with the project's dependencies installed, and JavaScript
+regressions with Node.js (ES-module support is required):
+
+```sh
+python -m unittest discover -s tests -v
+node --test tests/*_test.mjs
+```
+
+The transport tests include blocked PTY writes and image staging, chunked
+UTF-8 pastes, parser ACKs between chunks, queue limits, cancellation, and
+reconnection without replay. Process/socket integration tests require a host
+that permits local subprocesses and Unix sockets.
