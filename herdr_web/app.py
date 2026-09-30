@@ -37,6 +37,10 @@ from herdr_web.output_flow import (
     OUTPUT_CHUNK_BYTES,
     OUTPUT_WINDOW_INITIAL_BYTES,
 )
+from herdr_web.full_output import (
+    FULL_OUTPUT_COMPRESSION,
+    FullOutputEncoder,
+)
 from herdr_web.pane_stream import (
     AnsiFrame,
     PaneController,
@@ -2417,8 +2421,8 @@ def main() -> None:
         app,
         host=arguments.host,
         port=arguments.port,
-        # Pane frames carry their own deflate flag. A second WebSocket-level
-        # pass would only burn CPU on an already compressed payload.
+        # Full and Pane output negotiate their own compression. A second
+        # WebSocket-level pass would only burn CPU on compressed payloads.
         ws_per_message_deflate=False,
         # Herdr Web does not consume proxy identity or client-address headers.
         # Keep the transport peer authoritative and avoid accidental trust.
@@ -2455,12 +2459,21 @@ async def terminal(websocket: WebSocket, backend_id: str) -> None:
         cols = int(initial.get("cols", 120))
         rows = int(initial.get("rows", 40))
         output_ack_enabled = initial.get("output_ack") is True
+        output_encoder = (
+            FullOutputEncoder()
+            if output_ack_enabled
+            and initial.get("output_compression") == FULL_OUTPUT_COMPRESSION
+            else None
+        )
         client = start_client(backend, cols, rows)
         await asyncio.wait_for(
             websocket.send_json(
                 {
                     "type": "attached",
                     "label": backend.label,
+                    "output_compression": (
+                        FULL_OUTPUT_COMPRESSION if output_encoder is not None else None
+                    ),
                     "output_window_bytes": (
                         OUTPUT_ACK_WINDOW_BYTES if output_ack_enabled else 0
                     ),
@@ -2511,6 +2524,17 @@ async def terminal(websocket: WebSocket, backend_id: str) -> None:
                     "terminal parser acknowledgement timed out"
                 ) from error
 
+        async def send_output_chunk(chunk: bytes) -> None:
+            if output_encoder is None:
+                await websocket.send_bytes(chunk)
+                return
+            packet = output_encoder.encode(chunk)
+            # This sender is the only output writer. Do not put an awaitable
+            # producer or heartbeat between this descriptor/payload pair.
+            if packet.descriptor is not None:
+                await websocket.send_json(packet.descriptor)
+            await websocket.send_bytes(packet.payload)
+
         async def send_browser_output() -> None:
             nonlocal pending_output_error
             while True:
@@ -2548,7 +2572,7 @@ async def terminal(websocket: WebSocket, backend_id: str) -> None:
                             output_window.note_sent(len(chunk), time.monotonic())
                         try:
                             await asyncio.wait_for(
-                                websocket.send_bytes(chunk),
+                                send_output_chunk(chunk),
                                 timeout=WEBSOCKET_SEND_TIMEOUT_SECONDS,
                             )
                         except asyncio.TimeoutError as error:
