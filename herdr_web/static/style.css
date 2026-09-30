@@ -634,7 +634,8 @@ header {
   .mobile-key-row[hidden] { display: none; }
   #mobile-primary-row { grid-template-columns: repeat(6, minmax(0, 1fr)); }
   #mobile-default-row { grid-template-columns: repeat(6, minmax(0, 1fr)); }
-  #mobile-navigation-row { grid-template-columns: repeat(7, minmax(0, 1fr)); }
+  #mobile-navigation-row { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+  #mobile-mouse-mode { order: 1; }
   #pane-mobile-bar button {
     display: grid;
     font-size: .75rem;
