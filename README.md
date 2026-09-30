@@ -178,6 +178,25 @@ at a time and waits for xterm to parse that chunk before the next long poll.
 Full keeps xterm's cursor visible but steady, so an idle cursor does not schedule
 WebGL blink repaints.
 
+Full also negotiates `deflate-v1` output compression when the browser supports
+streaming decompression. Each compressed message is an independent level-1
+zlib stream over at most 8 KiB. A JSON `output-deflate` descriptor gives the
+original byte count and applies only to the immediately following binary
+message. The client must offer `output_compression: "deflate-v1"` in its initial
+resize alongside `output_ack: true`, and receive the same compression field in
+`attached` before accepting descriptors. Old clients and servers keep the raw protocol, as does HTTP fallback.
+
+Small or incompressible chunks remain unchanged raw binary messages. Compression
+must save at least 64 bytes and 5% after the descriptor and
+WebSocket headers; poor savings skip the next eight eligible chunks. A compression attempt that
+exceeds 2 ms backs off for one second. These bounded synchronous jobs create no
+threads and add no batching delay. The browser serializes decompression before
+xterm writes, validates the exact original length, and caps queued output at
+2 MiB. Parser acknowledgements still count original ANSI bytes, never compressed
+wire bytes. Malformed output closes the connection without rendering or
+acknowledging the rejected chunk. Both Full and Panes keep WebSocket-level
+`permessage-deflate` disabled to avoid a second compression pass.
+
 The browser always uses xterm.js's supported scheduled write queue. It
 acknowledges output only after xterm.js parses it. Each Panes WebSocket has an
 independent adaptive frame pacer. It uses a smoothed parser-acknowledgement time
