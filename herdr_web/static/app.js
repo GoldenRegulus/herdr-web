@@ -1,4 +1,9 @@
 import {
+  FULL_OUTPUT_COMPRESSION,
+  FullOutputReceiver,
+  supportsFullOutputCompression,
+} from './full-output.js';
+import {
   InputByteBuffer,
   isDisposableMouseMotion,
   normalizeTerminalPasteText,
@@ -1333,6 +1338,7 @@ const { WebglAddon } = globalThis.WebglAddon;
     if (!flow) return;
     clearTimeout(flow.ackTimer);
     flow.ackTimer = undefined;
+    flow.outputReceiver?.close();
     if (outputFlow === flow) outputFlow = undefined;
   }
 
@@ -4471,6 +4477,7 @@ const { WebglAddon } = globalThis.WebglAddon;
     let opened = false;
     let attached = false;
     const nextSocket = new WebSocket(wsUrl(backend.id));
+    const compressionOffered = supportsFullOutputCompression();
     const flow = {
       socket: nextSocket,
       attached: false,
@@ -4479,6 +4486,20 @@ const { WebglAddon } = globalThis.WebglAddon;
       acknowledgedBytes: 0,
       ackTimer: undefined,
     };
+    flow.outputReceiver = new FullOutputReceiver({
+      compressionOffered,
+      isCurrent: () => flow === outputFlow && nextSocket.readyState === WebSocket.OPEN,
+      write: (bytes) => {
+        flow.inputReady = true;
+        const parsed = queueTerminalOutput(bytes, flow);
+        scheduleInputDrain();
+        return parsed;
+      },
+      onError: (error) => {
+        showBrowserToast(error.message);
+        nextSocket.close(1002, 'Invalid terminal output');
+      },
+    });
     clearOutputFlow();
     outputFlow = flow;
     socket = nextSocket;
@@ -4498,6 +4519,7 @@ const { WebglAddon } = globalThis.WebglAddon;
       fitAddon.fit();
       nextSocket.send(JSON.stringify({
         type: 'resize', cols: terminal.cols, rows: terminal.rows, output_ack: true,
+        output_compression: compressionOffered ? FULL_OUTPUT_COMPRESSION : undefined,
       }));
       connectTimer = setTimeout(() => {
         if (socket === nextSocket && !attached) nextSocket.close();
@@ -4505,29 +4527,32 @@ const { WebglAddon } = globalThis.WebglAddon;
     };
     nextSocket.onmessage = (event) => {
       if (socket !== nextSocket) return;
-      if (typeof event.data === 'string') {
-        const message = JSON.parse(event.data);
-        if (message.type === 'attached') {
-          attached = true;
-          flow.attached = true;
-          clearTimeout(connectTimer);
-          connectTimer = undefined;
-          clearTimeout(reconnectStableTimer);
-          reconnectStableTimer = setTimeout(() => {
-            if (socket === nextSocket) reconnectAttempts = 0;
-          }, 30_000);
-          setStatus('Connected', 'connected');
-          scheduleInputDrain();
-        } else if (message.type === 'ping') {
-          nextSocket.send(JSON.stringify({ type: 'pong' }));
-        } else if (message.type === 'error') {
-          showBrowserToast(message.message);
+      try {
+        if (typeof event.data === 'string') {
+          const message = JSON.parse(event.data);
+          flow.outputReceiver.control(message);
+          if (message.type === 'attached') {
+            attached = true;
+            flow.attached = true;
+            clearTimeout(connectTimer);
+            connectTimer = undefined;
+            clearTimeout(reconnectStableTimer);
+            reconnectStableTimer = setTimeout(() => {
+              if (socket === nextSocket) reconnectAttempts = 0;
+            }, 30_000);
+            setStatus('Connected', 'connected');
+            scheduleInputDrain();
+          } else if (message.type === 'ping') {
+            nextSocket.send(JSON.stringify({ type: 'pong' }));
+          } else if (message.type === 'error') {
+            showBrowserToast(message.message);
+          }
+          return;
         }
-        return;
+        flow.outputReceiver.enqueue(event.data);
+      } catch (error) {
+        flow.outputReceiver.fail(error);
       }
-      flow.inputReady = true;
-      queueTerminalOutput(new Uint8Array(event.data), flow);
-      scheduleInputDrain();
     };
     nextSocket.onclose = () => {
       if (socket !== nextSocket) return;
