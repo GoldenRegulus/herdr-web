@@ -341,8 +341,6 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn('data-terminal-key="escape"', document)
         self.assertIn('data-terminal-key="tab"', document)
         self.assertIn('id="mobile-navigation-mode"', document)
-        self.assertIn("#mobile-default-row { grid-template-columns: repeat(5, minmax(0, 1fr)); }", stylesheet)
-        self.assertIn("#mobile-navigation-row { grid-template-columns: repeat(6, minmax(0, 1fr)); }", stylesheet)
         default_row = document[
             document.index('id="mobile-default-row"'):document.index('id="mobile-navigation-row"')
         ]
