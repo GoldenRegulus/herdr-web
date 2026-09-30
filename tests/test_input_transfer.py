@@ -356,7 +356,7 @@ class PaneInputTests(unittest.IsolatedAsyncioTestCase):
                 ws.binary(b"\x99\x82")
                 ws.binary(b"after paste")
                 await wait_until(lambda: pane.inputs)
-                self.assertEqual(calls, [("pane.send_input", {"pane_id": "p1", "text": "🙂"})])
+                self.assertEqual(calls, [("pane.send_text", {"pane_id": "p1", "text": "🙂"})])
                 self.assertEqual(pane.inputs, [b"after paste"])
             finally:
                 ws.disconnect()
