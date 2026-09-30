@@ -259,6 +259,22 @@ so non-disposable input stays ordered and lossless. Input stays queued while
 the connection attaches. The HTTP fallback sends one input request at a time,
 so requests cannot pass each other.
 
+Full and Panes receive parser acknowledgements independently of their ordered
+input workers. Image uploads (up to 16 MiB) and Panes text pastes (up to 512 KiB)
+use negotiated 16 KiB binary chunks. The browser yields between chunks and
+keeps bulk input within a 32 KiB native socket backlog, so ACKs and heartbeat
+replies can interleave instead of waiting behind a whole upload. Full-mode
+text input uses the same bounded, yielding input drain.
+
+An upload reserves its place in the command queue before its body arrives.
+Keys, pane changes, and resize commands stay in order; no partial image or
+paste reaches Herdr. Declared transfer bytes stay charged against the 32 MiB
+command budget until the operation completes. Each connection allows one
+incomplete transfer, with a 30-second chunk-idle timeout. Cancellation or
+disconnect drops that incomplete body, and the browser does not replay it on a
+new socket. Both input workers have a five-second total disconnect drain
+budget. Older clients and servers retain the legacy upload message shapes.
+
 Full and Panes use the same authentication-aware WebSocket recovery path. Both
 retry with bounded exponential backoff and retain queued input while a new
 connection attaches. Full retries two failed WebSocket connections before it
@@ -484,3 +500,18 @@ bincode protocol in JavaScript.
 Not yet implemented: HTTP fallback for Panes mode, layout editing,
 coordinated takeover between browser clients, or discovery of
 Herdr sessions outside the conventional config directory.
+
+## Transport regression tests
+
+Run Python tests with the project's dependencies installed, and JavaScript
+regressions with Node.js (ES-module support is required):
+
+```sh
+python -m unittest discover -s tests -v
+node --test tests/*_test.mjs
+```
+
+The transport tests include blocked PTY writes and image staging, chunked
+UTF-8 pastes, parser ACKs between chunks, queue limits, cancellation, and
+reconnection without replay. Process/socket integration tests require a host
+that permits local subprocesses and Unix sockets.

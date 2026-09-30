@@ -41,6 +41,11 @@ from herdr_web.full_output import (
     FULL_OUTPUT_COMPRESSION,
     FullOutputEncoder,
 )
+from herdr_web.input_transfer import (
+    INPUT_TRANSFER_CHUNK_BYTES,
+    InputTransfer,
+    InputTransferReceiver,
+)
 from herdr_web.pane_stream import (
     AnsiFrame,
     PaneController,
@@ -456,7 +461,7 @@ class PaneOutputFrame:
 
 @dataclass(frozen=True)
 class PaneBrowserCommand:
-    value: bytes | dict[str, object]
+    value: bytes | dict[str, object] | InputTransfer
     size: int
 
 
@@ -1637,6 +1642,7 @@ async def run_panes_websocket(
 
     attached_message = {
         "type": "panes-attached",
+        "input_chunk_bytes": INPUT_TRANSFER_CHUNK_BYTES,
         "tab_id": tab_id,
         "compression": "deflate" if pane_deflate_enabled else None,
         "streams": [
@@ -1697,7 +1703,7 @@ async def run_panes_websocket(
         frame_pacer.expedite()
 
     def enqueue_browser_command(
-        command: bytes | dict[str, object], size: int
+        command: bytes | dict[str, object] | InputTransfer, size: int
     ) -> bool:
         nonlocal queued_command_bytes
         if size < 0 or queued_command_bytes + size > PANE_COMMAND_QUEUE_BYTES:
@@ -2074,15 +2080,19 @@ async def run_panes_websocket(
             pending_error = error
             frame_scheduler.notify()
 
+    transfers = InputTransferReceiver()
+
     async def receive_browser_messages() -> None:
         """Receive ACKs immediately and queue ordered terminal commands."""
         expected_image_bytes: int | None = None
         while True:
-            message = await websocket.receive()
+            message = await transfers.receive(websocket)
             if message["type"] == "websocket.disconnect":
                 return
             data = message.get("bytes")
             if data is not None:
+                if transfers.feed(data):
+                    continue
                 if expected_image_bytes is None and len(data) > PANE_INPUT_MESSAGE_BYTES:
                     if not fatal_error.done():
                         fatal_error.set_result("pane input message is too large")
@@ -2130,12 +2140,27 @@ async def run_panes_websocket(
                         window.set_paused(not visible)
             elif kind == "pong":
                 continue
+            elif kind == "input-transfer-cancel":
+                transfers.cancel()
+            elif kind == "input-transfer":
+                if expected_image_bytes is not None:
+                    raise ValueError("clipboard image upload body is missing")
+                transfer = InputTransfer(
+                    control, image_limit=MAX_CLIPBOARD_IMAGE_BYTES,
+                    paste_limit=MAX_PANE_TEXT_PASTE_BYTES,
+                    image_extensions=IMAGE_EXTENSIONS, pane_mode=True,
+                )
+                transfers.start(transfer)
+                if not enqueue_browser_command(transfer, transfer.size):
+                    return
             else:
                 if expected_image_bytes is not None:
                     if not fatal_error.done():
                         fatal_error.set_result("clipboard image upload body is missing")
                     return
                 if kind == "clipboard-image":
+                    if transfers.pending is not None:
+                        raise ValueError("an input transfer is already in progress")
                     image_size = control.get("size")
                     if (
                         not isinstance(image_size, int)
@@ -2153,12 +2178,29 @@ async def run_panes_websocket(
         """Apply non-disposable browser commands in their received order."""
         nonlocal active_stream_id, queued_command_bytes
         pending_image: tuple[PaneStreamRequest, str, int] | None = None
+        image_body: bytes | None = None
+        active_command_bytes = 0
         while True:
-            envelope = await command_queue.get()
-            if envelope is None:
-                return
-            queued_command_bytes -= envelope.size
-            command = envelope.value
+            if image_body is not None:
+                command = image_body
+                image_body = None
+            else:
+                queued_command_bytes -= active_command_bytes
+                active_command_bytes = 0
+                envelope = await command_queue.get()
+                if envelope is None:
+                    return
+                active_command_bytes = envelope.size
+                command = envelope.value
+                if isinstance(command, InputTransfer):
+                    try:
+                        result = await command.command()
+                    except UnicodeDecodeError:
+                        await report_error("pane paste is not valid UTF-8")
+                        continue
+                    if result is None:
+                        continue
+                    command, image_body = result
             if pending_image is not None and not isinstance(command, bytes):
                 pending_image = None
                 await report_error("clipboard image upload body is missing")
@@ -2322,8 +2364,17 @@ async def run_panes_websocket(
                     return
                 pending_image = (request, extension, size)
 
+    async def receive_browser_input() -> None:
+        try:
+            await receive_browser_messages()
+        except (ValueError, RuntimeError) as error:
+            if not fatal_error.done():
+                fatal_error.set_result(str(error))
+        finally:
+            transfers.cancel()
+
     async def run_browser_input_pipeline() -> None:
-        receiver = asyncio.create_task(receive_browser_messages())
+        receiver = asyncio.create_task(receive_browser_input())
         command_worker = asyncio.create_task(apply_browser_commands())
         try:
             done, _ = await asyncio.wait(
@@ -2384,6 +2435,13 @@ async def run_panes_websocket(
         for task in done - {failure}:
             task.result()
     finally:
+        # Cancellation of the connection handler must also cancel its input
+        # placeholder, receiver and command worker before releasing clients.
+        tasks = [*pumps, monitor, sender, input_pipeline, failure]
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         for item in acknowledgements.values():
             item.pacing_updated.set()
             item.acknowledged.set()
@@ -2470,6 +2528,7 @@ async def terminal(websocket: WebSocket, backend_id: str) -> None:
             websocket.send_json(
                 {
                     "type": "attached",
+                    "input_chunk_bytes": INPUT_TRANSFER_CHUNK_BYTES,
                     "label": backend.label,
                     "output_compression": (
                         FULL_OUTPUT_COMPRESSION if output_encoder is not None else None
@@ -2590,36 +2649,138 @@ async def terminal(websocket: WebSocket, backend_id: str) -> None:
             except asyncio.QueueFull:
                 pending_output_error = error
 
-        async def browser_to_pty() -> None:
+        command_queue: asyncio.Queue[PaneBrowserCommand | None] = asyncio.Queue(
+            maxsize=PANE_COMMAND_QUEUE_SIZE
+        )
+        queued_command_bytes = 0
+        transfers = InputTransferReceiver()
+
+        def enqueue_browser_command(
+            command: bytes | dict[str, object] | InputTransfer, size: int
+        ) -> None:
+            nonlocal queued_command_bytes
+            if queued_command_bytes + size > PANE_COMMAND_QUEUE_BYTES:
+                raise RuntimeError("terminal command queue is full")
+            try:
+                command_queue.put_nowait(PaneBrowserCommand(command, size))
+            except asyncio.QueueFull as error:
+                raise RuntimeError("terminal command queue is full") from error
+            queued_command_bytes += size
+
+        async def receive_browser_messages() -> None:
+            expected_image_bytes: int | None = None
+            try:
+                while True:
+                    message = await transfers.receive(websocket)
+                    if message["type"] == "websocket.disconnect":
+                        logger.info(
+                            "websocket client disconnected backend=%s code=%s",
+                            backend.label, message.get("code"),
+                        )
+                        return
+                    data = message.get("bytes")
+                    if data is not None:
+                        if transfers.feed(data):
+                            continue
+                        limit = (MAX_CLIPBOARD_IMAGE_BYTES if expected_image_bytes is not None
+                                 else PANE_INPUT_MESSAGE_BYTES)
+                        if len(data) > limit:
+                            raise RuntimeError("terminal input message is too large")
+                        if expected_image_bytes is not None and len(data) != expected_image_bytes:
+                            raise RuntimeError("clipboard image upload was truncated")
+                        expected_image_bytes = None
+                        enqueue_browser_command(data, len(data))
+                        continue
+                    text = message.get("text")
+                    if text is None:
+                        continue
+                    text_size = len(text.encode("utf-8"))
+                    if text_size > PANE_CONTROL_MESSAGE_BYTES:
+                        raise RuntimeError("terminal control message is too large")
+                    try:
+                        control = json.loads(text)
+                    except json.JSONDecodeError:
+                        await report_error("invalid terminal control message")
+                        continue
+                    if not isinstance(control, dict):
+                        await report_error("invalid terminal control message")
+                        continue
+                    kind = control.get("type")
+                    if kind == "output-ack":
+                        if output_ack_enabled and output_window.acknowledge(
+                            control.get("bytes"), time.monotonic()
+                        ):
+                            output_acknowledged.set()
+                    elif kind == "pong":
+                        continue
+                    elif kind == "input-transfer-cancel":
+                        transfers.cancel()
+                    elif kind == "input-transfer":
+                        if expected_image_bytes is not None:
+                            raise RuntimeError("clipboard image upload body is missing")
+                        try:
+                            transfer = InputTransfer(
+                                control, image_limit=MAX_CLIPBOARD_IMAGE_BYTES,
+                                paste_limit=MAX_PANE_TEXT_PASTE_BYTES,
+                                image_extensions=IMAGE_EXTENSIONS, pane_mode=False,
+                            )
+                            transfers.start(transfer)
+                        except ValueError as error:
+                            raise RuntimeError(str(error)) from error
+                        enqueue_browser_command(transfer, transfer.size)
+                    else:
+                        if expected_image_bytes is not None:
+                            raise RuntimeError("clipboard image upload body is missing")
+                        if kind == "clipboard-image":
+                            if transfers.pending is not None:
+                                raise RuntimeError("an input transfer is already in progress")
+                            size = control.get("size")
+                            if (not isinstance(size, int) or isinstance(size, bool)
+                                    or not 0 < size <= MAX_CLIPBOARD_IMAGE_BYTES):
+                                raise RuntimeError("invalid clipboard image header")
+                            expected_image_bytes = size
+                        enqueue_browser_command(control, text_size)
+            except ValueError as error:
+                raise RuntimeError(str(error)) from error
+            finally:
+                transfers.cancel()
+
+        async def apply_browser_commands() -> None:
+            nonlocal queued_command_bytes
             pending_image: tuple[str, int] | None = None
+            image_body: bytes | None = None
+            active_command_bytes = 0
             while True:
-                message = await websocket.receive()
-                if message["type"] == "websocket.disconnect":
-                    logger.info(
-                        "websocket client disconnected backend=%s code=%s",
-                        backend.label,
-                        message.get("code"),
-                    )
-                    return
-                if message.get("bytes") is not None:
-                    data = message["bytes"]
+                if image_body is not None:
+                    command = image_body
+                    image_body = None
+                else:
+                    queued_command_bytes -= active_command_bytes
+                    active_command_bytes = 0
+                    envelope = await command_queue.get()
+                    if envelope is None:
+                        return
+                    active_command_bytes = envelope.size
+                    command = envelope.value
+                    if isinstance(command, InputTransfer):
+                        result = await command.command()
+                        if result is None:
+                            continue
+                        command, image_body = result
+                if isinstance(command, bytes):
                     if pending_image is None:
                         try:
-                            await write_pty(client.master_fd, data)
+                            await write_pty(client.master_fd, command)
                         except OSError:
-                            await report_error("terminal session is closed")
-                            return
+                            raise RuntimeError("terminal session is closed")
                         continue
                     extension, expected_size = pending_image
                     pending_image = None
-                    if len(data) != expected_size:
-                        await report_error("clipboard image upload was truncated")
-                        continue
+                    if len(command) != expected_size:
+                        raise RuntimeError("clipboard image upload was truncated")
                     path: Path | None = None
                     try:
-                        path = await stage_clipboard_image_async(extension, data)
-                        # Herdr's remote client recognizes an absolute image
-                        # path inside bracketed paste and emits ClipboardImage.
+                        path = await stage_clipboard_image_async(extension, command)
                         await write_pty(
                             client.master_fd,
                             b"\x1b[200~" + os.fsencode(path) + b"\x1b[201~",
@@ -2630,43 +2791,62 @@ async def terminal(websocket: WebSocket, backend_id: str) -> None:
                         if path is not None:
                             schedule_staged_image_removal(path)
                     continue
-                text = message.get("text")
-                if text is None:
-                    continue
-                # Only JSON control messages are sent as text. All terminal
-                # input is binary, so paste and escape sequences stay exact.
-                control = json.loads(text)
-                if control.get("type") == "resize":
-                    client.resize(int(control["cols"]), int(control["rows"]))
-                elif control.get("type") == "output-ack":
-                    if output_ack_enabled and output_window.acknowledge(
-                        control.get("bytes"), time.monotonic()
-                    ):
-                        output_acknowledged.set()
-                elif control.get("type") == "clipboard-image":
-                    extension = str(control.get("extension", "")).lower()
-                    size = control.get("size")
-                    if extension not in IMAGE_EXTENSIONS or not isinstance(size, int):
+                if command.get("type") == "resize":
+                    try:
+                        client.resize(int(command["cols"]), int(command["rows"]))
+                    except (KeyError, TypeError, ValueError):
+                        await report_error("invalid terminal resize")
+                elif command.get("type") == "clipboard-image":
+                    extension = str(command.get("extension", "")).lower()
+                    # Even an invalid extension consumes its declared body; it
+                    # must never fall through as raw terminal input.
+                    pending_image = (extension, command["size"])
+                    if extension not in IMAGE_EXTENSIONS:
                         await report_error("invalid clipboard image header")
-                    elif size <= 0 or size > MAX_CLIPBOARD_IMAGE_BYTES:
-                        await report_error("clipboard image exceeds Herdr's 16 MiB limit")
-                    else:
-                        pending_image = (extension, size)
-                elif control.get("type") == "pong":
-                    continue
+
+        async def browser_to_pty() -> None:
+            receiver = asyncio.create_task(receive_browser_messages())
+            worker = asyncio.create_task(apply_browser_commands())
+            try:
+                done, _ = await asyncio.wait(
+                    [receiver, worker], return_when=asyncio.FIRST_COMPLETED
+                )
+                if worker in done:
+                    worker.result()
+                    return
+                receiver.result()
+
+                async def drain_commands() -> None:
+                    await command_queue.put(None)
+                    await worker
+
+                try:
+                    await asyncio.wait_for(
+                        drain_commands(), timeout=PANE_COMMAND_DRAIN_TIMEOUT_SECONDS
+                    )
+                except asyncio.TimeoutError:
+                    logger.info("terminal command drain timed out after disconnect")
+            finally:
+                for task in (receiver, worker):
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(receiver, worker, return_exceptions=True)
 
         reader = asyncio.create_task(read_pty_output())
         sender = asyncio.create_task(send_browser_output())
         input_reader = asyncio.create_task(browser_to_pty())
-        done, pending = await asyncio.wait(
-            [sender, input_reader],
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        for task in [reader, *pending]:
-            task.cancel()
-        await asyncio.gather(reader, *pending, return_exceptions=True)
-        for task in done:
-            task.result()
+        try:
+            done, _ = await asyncio.wait(
+                [sender, input_reader],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in done:
+                task.result()
+        finally:
+            for task in (reader, sender, input_reader):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(reader, sender, input_reader, return_exceptions=True)
     except WebSocketDisconnect as error:
         logger.info("websocket disconnected backend=%s code=%s", backend.label, error.code)
     except asyncio.TimeoutError:
@@ -2679,6 +2859,13 @@ async def terminal(websocket: WebSocket, backend_id: str) -> None:
             )
         except (asyncio.TimeoutError, WebSocketDisconnect, RuntimeError):
             logger.info("could not report terminal websocket error backend=%s", backend.label)
+        try:
+            await asyncio.wait_for(
+                websocket.close(code=1011, reason=str(error)[:120]),
+                timeout=WEBSOCKET_SEND_TIMEOUT_SECONDS,
+            )
+        except (asyncio.TimeoutError, WebSocketDisconnect, RuntimeError):
+            pass
     finally:
         if client is not None:
             await client.close()
