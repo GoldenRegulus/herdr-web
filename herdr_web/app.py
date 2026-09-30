@@ -32,6 +32,11 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from herdr_web.output_flow import (
+    FullOutputWindow,
+    OUTPUT_CHUNK_BYTES,
+    OUTPUT_WINDOW_INITIAL_BYTES,
+)
 from herdr_web.pane_stream import (
     AnsiFrame,
     PaneController,
@@ -100,8 +105,8 @@ CLIPBOARD_IMAGE_WRITE_CHUNK_BYTES: Final = 64 * 1024
 PTY_READ_SIZE: Final = 256 * 1024
 PTY_COALESCE_SECONDS: Final = 0.002
 OUTPUT_QUEUE_SIZE: Final = 1
-OUTPUT_WEBSOCKET_CHUNK_BYTES: Final = 8 * 1024
-OUTPUT_ACK_WINDOW_BYTES: Final = OUTPUT_WEBSOCKET_CHUNK_BYTES
+OUTPUT_WEBSOCKET_CHUNK_BYTES: Final = OUTPUT_CHUNK_BYTES
+OUTPUT_ACK_WINDOW_BYTES: Final = OUTPUT_WINDOW_INITIAL_BYTES
 WEBSOCKET_HEARTBEAT_SECONDS: Final = 15
 PANE_OUTPUT_FRESHNESS_BUDGET_SECONDS: Final = 1.0
 PANE_RESYNC_TRIGGER_SECONDS: Final = PANE_OUTPUT_FRESHNESS_BUDGET_SECONDS / 2
@@ -2470,8 +2475,7 @@ async def terminal(websocket: WebSocket, backend_id: str) -> None:
         output: asyncio.Queue[bytes | dict[str, str] | None] = asyncio.Queue(
             maxsize=OUTPUT_QUEUE_SIZE
         )
-        output_bytes_sent = 0
-        output_bytes_acknowledged = 0
+        output_window = FullOutputWindow()
         output_acknowledged = asyncio.Event()
         pending_output_error: dict[str, str] | None = None
 
@@ -2486,53 +2490,62 @@ async def terminal(websocket: WebSocket, backend_id: str) -> None:
                 await output.put(data)
             await output.put(None)
 
+        def output_ack_timeout() -> float | None:
+            if not output_ack_enabled:
+                return None
+            remaining = output_window.seconds_until_timeout(
+                time.monotonic(), OUTPUT_ACK_TIMEOUT_SECONDS
+            )
+            if remaining is not None and remaining <= 0:
+                raise RuntimeError("terminal parser acknowledgement timed out")
+            return remaining
+
+        async def wait_for_output_ack() -> None:
+            output_acknowledged.clear()
+            try:
+                await asyncio.wait_for(
+                    output_acknowledged.wait(), timeout=output_ack_timeout()
+                )
+            except asyncio.TimeoutError as error:
+                raise RuntimeError(
+                    "terminal parser acknowledgement timed out"
+                ) from error
+
         async def send_browser_output() -> None:
-            nonlocal output_bytes_sent, pending_output_error
+            nonlocal pending_output_error
             while True:
                 if pending_output_error is not None:
                     item = pending_output_error
                     pending_output_error = None
                 else:
                     try:
+                        ack_timeout = output_ack_timeout()
                         item = await asyncio.wait_for(
-                            output.get(), timeout=WEBSOCKET_HEARTBEAT_SECONDS
+                            output.get(),
+                            timeout=min(WEBSOCKET_HEARTBEAT_SECONDS, ack_timeout)
+                            if ack_timeout is not None
+                            else WEBSOCKET_HEARTBEAT_SECONDS,
                         )
                     except asyncio.TimeoutError:
+                        output_ack_timeout()
                         await asyncio.wait_for(
                             websocket.send_json({"type": "ping"}),
                             timeout=WEBSOCKET_SEND_TIMEOUT_SECONDS,
                         )
                         continue
                 if item is None:
+                    while output_ack_enabled and output_window.inflight_bytes:
+                        await wait_for_output_ack()
                     return
                 if isinstance(item, bytes):
                     for chunk in websocket_output_chunks(item):
-                        while (
-                            output_ack_enabled
-                            and output_bytes_sent
-                            - output_bytes_acknowledged
-                            + len(chunk)
-                            > OUTPUT_ACK_WINDOW_BYTES
-                        ):
-                            output_acknowledged.clear()
-                            if (
-                                output_bytes_sent
-                                - output_bytes_acknowledged
-                                + len(chunk)
-                                > OUTPUT_ACK_WINDOW_BYTES
-                            ):
-                                try:
-                                    await asyncio.wait_for(
-                                        output_acknowledged.wait(),
-                                        timeout=OUTPUT_ACK_TIMEOUT_SECONDS,
-                                    )
-                                except asyncio.TimeoutError as error:
-                                    raise RuntimeError(
-                                        "terminal parser acknowledgement timed out"
-                                    ) from error
-                        # Increment before the await so a fast browser ACK cannot
-                        # race ahead of this task's cumulative byte counter.
-                        output_bytes_sent += len(chunk)
+                        while output_ack_enabled and not output_window.has_room(len(chunk)):
+                            await wait_for_output_ack()
+                        output_ack_timeout()
+                        if output_ack_enabled:
+                            # Reserve raw bytes before the await: a fast parser
+                            # ACK must not race ahead of the sent counter.
+                            output_window.note_sent(len(chunk), time.monotonic())
                         try:
                             await asyncio.wait_for(
                                 websocket.send_bytes(chunk),
@@ -2554,7 +2567,6 @@ async def terminal(websocket: WebSocket, backend_id: str) -> None:
                 pending_output_error = error
 
         async def browser_to_pty() -> None:
-            nonlocal output_bytes_acknowledged
             pending_image: tuple[str, int] | None = None
             while True:
                 message = await websocket.receive()
@@ -2603,12 +2615,9 @@ async def terminal(websocket: WebSocket, backend_id: str) -> None:
                 if control.get("type") == "resize":
                     client.resize(int(control["cols"]), int(control["rows"]))
                 elif control.get("type") == "output-ack":
-                    acknowledged = control.get("bytes")
-                    if (
-                        isinstance(acknowledged, int)
-                        and output_bytes_acknowledged < acknowledged <= output_bytes_sent
+                    if output_ack_enabled and output_window.acknowledge(
+                        control.get("bytes"), time.monotonic()
                     ):
-                        output_bytes_acknowledged = acknowledged
                         output_acknowledged.set()
                 elif control.get("type") == "clipboard-image":
                     extension = str(control.get("extension", "")).lower()
