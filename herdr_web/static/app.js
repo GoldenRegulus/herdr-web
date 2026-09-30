@@ -1,3 +1,9 @@
+import { InputTransfer } from './input-transfer.js';
+import {
+  FULL_OUTPUT_COMPRESSION,
+  FullOutputReceiver,
+  supportsFullOutputCompression,
+} from './full-output.js';
 import {
   InputByteBuffer,
   isDisposableMouseMotion,
@@ -1334,6 +1340,13 @@ const { WebglAddon } = globalThis.WebglAddon;
     if (!flow) return;
     clearTimeout(flow.ackTimer);
     flow.ackTimer = undefined;
+    flow.outputReceiver?.close();
+    if (flow.inputTransfer) {
+      // Partial delivery is uncertain: never replay an upload on a new socket.
+      flow.inputTransfer.operation.error = new Error('Input transfer interrupted');
+      flow.inputTransfer = undefined;
+      showBrowserToast('An interrupted image or paste was discarded');
+    }
     if (outputFlow === flow) outputFlow = undefined;
   }
 
@@ -3728,6 +3741,8 @@ const { WebglAddon } = globalThis.WebglAddon;
         if (message.type === 'panes-attached') {
           attached = true;
           flow.attached = true;
+          flow.inputChunkBytes = Number.isSafeInteger(message.input_chunk_bytes)
+            && message.input_chunk_bytes > 0 ? message.input_chunk_bytes : 0;
           for (const stream of message.streams || []) {
             const pane = paneTerminals.get(stream.stream_id);
             if (pane) {
@@ -3758,7 +3773,7 @@ const { WebglAddon } = globalThis.WebglAddon;
               const discardedInput = inputBuffer.length || inputOperations.length;
               clearPendingMouseMotion();
               inputBuffer.clear();
-              inputOperations.length = 0;
+              clearInputOperations();
               pendingPaneActivation = undefined;
               if (discardedInput) {
                 showBrowserToast('Queued input was discarded because this pane is read-only');
@@ -3778,7 +3793,7 @@ const { WebglAddon } = globalThis.WebglAddon;
               flow.inputReady = false;
               clearPendingMouseMotion();
               inputBuffer.clear();
-              inputOperations.length = 0;
+              clearInputOperations();
               pendingPaneActivation = undefined;
             }
             updatePaneTitle(pane);
@@ -3848,32 +3863,62 @@ const { WebglAddon } = globalThis.WebglAddon;
     }, delay);
   }
 
+  function clearInputOperations() {
+    if (outputFlow?.inputTransfer) {
+      if (outputFlow.socket.readyState === WebSocket.OPEN) {
+        outputFlow.inputTransfer.cancel(outputFlow.socket);
+      }
+      outputFlow.inputTransfer = undefined;
+    }
+    inputOperations.length = 0;
+  }
+
   function discardInputOperations(message) {
     if (!inputOperations.length) return;
-    inputOperations.length = 0;
+    clearInputOperations();
     showBrowserToast(message);
   }
 
   function drainWebSocketInput(activeSocket, flow) {
     if (!flow.inputReady) return;
+    let sentBytes = 0;
     while (
       flow === outputFlow && flow.attached && activeSocket === socket
       && activeSocket.readyState === WebSocket.OPEN
       && activeSocket.bufferedAmount < INPUT_WEBSOCKET_HIGH_WATER_BYTES
+      && sentBytes < INPUT_BATCH_BYTES
     ) {
       const beforeOperation = inputBytesBeforeOperation();
       if (beforeOperation > 0) {
-        const bytes = inputBuffer.peek(Math.min(INPUT_BATCH_BYTES, beforeOperation));
+        const bytes = inputBuffer.peek(Math.min(
+          INPUT_BATCH_BYTES - sentBytes, beforeOperation,
+          INPUT_WEBSOCKET_HIGH_WATER_BYTES - activeSocket.bufferedAmount,
+        ));
         activeSocket.send(bytes);
         inputBuffer.consume(bytes.length);
+        sentBytes += bytes.length;
         continue;
       }
 
       const operation = inputOperations[0];
       if (!operation) break;
       if (!operation.ready) return;
+      if (operation.error) {
+        inputOperations.shift();
+        continue;
+      }
+      if (flow.inputChunkBytes && ['pane-paste', 'clipboard-image'].includes(operation.kind)) {
+        flow.inputTransfer ||= new InputTransfer(operation, flow.inputChunkBytes);
+        if (flow.inputTransfer.sendNext(activeSocket, INPUT_WEBSOCKET_HIGH_WATER_BYTES)) {
+          inputOperations.shift();
+          flow.inputTransfer = undefined;
+        }
+        // Yield even on a fast socket whose bufferedAmount stays zero. Parser
+        // callbacks and ACK timers must run between bulk input chunks.
+        scheduleInputDrain(activeSocket.bufferedAmount ? 8 : 0);
+        return;
+      }
       inputOperations.shift();
-      if (operation.error) continue;
       if (operation.kind === 'pane-mouse') {
         activeSocket.send(JSON.stringify({
           type: 'pane-mouse',
@@ -4028,7 +4073,7 @@ const { WebglAddon } = globalThis.WebglAddon;
     reconnectTimer = undefined;
     clearPendingMouseMotion();
     inputBuffer.clear();
-    inputOperations.length = 0;
+    clearInputOperations();
     resizeObserver?.disconnect();
     try {
       buildPaneGrid();
@@ -4108,7 +4153,7 @@ const { WebglAddon } = globalThis.WebglAddon;
     reconnectAttempts = 0;
     receivedFrames = 0;
     inputBuffer.clear();
-    inputOperations.length = 0;
+    clearInputOperations();
     currentBackend = backend;
     viewMode = 'panes';
     httpFallbackStarting = false;
@@ -4180,7 +4225,7 @@ const { WebglAddon } = globalThis.WebglAddon;
     inputDrainTimer = undefined;
     clearPendingMouseMotion();
     inputBuffer.clear();
-    inputOperations.length = 0;
+    clearInputOperations();
     httpInputInFlight = false;
     httpInputReady = false;
     httpFallbackStarting = false;
@@ -4389,6 +4434,7 @@ const { WebglAddon } = globalThis.WebglAddon;
     let opened = false;
     let attached = false;
     const nextSocket = new WebSocket(wsUrl(backend.id));
+    const compressionOffered = supportsFullOutputCompression();
     const flow = {
       socket: nextSocket,
       attached: false,
@@ -4397,6 +4443,20 @@ const { WebglAddon } = globalThis.WebglAddon;
       acknowledgedBytes: 0,
       ackTimer: undefined,
     };
+    flow.outputReceiver = new FullOutputReceiver({
+      compressionOffered,
+      isCurrent: () => flow === outputFlow && nextSocket.readyState === WebSocket.OPEN,
+      write: (bytes) => {
+        flow.inputReady = true;
+        const parsed = queueTerminalOutput(bytes, flow);
+        scheduleInputDrain();
+        return parsed;
+      },
+      onError: (error) => {
+        showBrowserToast(error.message);
+        nextSocket.close(1002, 'Invalid terminal output');
+      },
+    });
     clearOutputFlow();
     outputFlow = flow;
     socket = nextSocket;
@@ -4416,6 +4476,7 @@ const { WebglAddon } = globalThis.WebglAddon;
       fitAddon.fit();
       nextSocket.send(JSON.stringify({
         type: 'resize', cols: terminal.cols, rows: terminal.rows, output_ack: true,
+        output_compression: compressionOffered ? FULL_OUTPUT_COMPRESSION : undefined,
       }));
       connectTimer = setTimeout(() => {
         if (socket === nextSocket && !attached) nextSocket.close();
@@ -4423,29 +4484,34 @@ const { WebglAddon } = globalThis.WebglAddon;
     };
     nextSocket.onmessage = (event) => {
       if (socket !== nextSocket) return;
-      if (typeof event.data === 'string') {
-        const message = JSON.parse(event.data);
-        if (message.type === 'attached') {
-          attached = true;
-          flow.attached = true;
-          clearTimeout(connectTimer);
-          connectTimer = undefined;
-          clearTimeout(reconnectStableTimer);
-          reconnectStableTimer = setTimeout(() => {
-            if (socket === nextSocket) reconnectAttempts = 0;
-          }, 30_000);
-          setStatus('Connected', 'connected');
-          scheduleInputDrain();
-        } else if (message.type === 'ping') {
-          nextSocket.send(JSON.stringify({ type: 'pong' }));
-        } else if (message.type === 'error') {
-          showBrowserToast(message.message);
+      try {
+        if (typeof event.data === 'string') {
+          const message = JSON.parse(event.data);
+          flow.outputReceiver.control(message);
+          if (message.type === 'attached') {
+            attached = true;
+            flow.attached = true;
+            flow.inputChunkBytes = Number.isSafeInteger(message.input_chunk_bytes)
+              && message.input_chunk_bytes > 0 ? message.input_chunk_bytes : 0;
+            clearTimeout(connectTimer);
+            connectTimer = undefined;
+            clearTimeout(reconnectStableTimer);
+            reconnectStableTimer = setTimeout(() => {
+              if (socket === nextSocket) reconnectAttempts = 0;
+            }, 30_000);
+            setStatus('Connected', 'connected');
+            scheduleInputDrain();
+          } else if (message.type === 'ping') {
+            nextSocket.send(JSON.stringify({ type: 'pong' }));
+          } else if (message.type === 'error') {
+            showBrowserToast(message.message);
+          }
+          return;
         }
-        return;
+        flow.outputReceiver.enqueue(event.data);
+      } catch (error) {
+        flow.outputReceiver.fail(error);
       }
-      flow.inputReady = true;
-      queueTerminalOutput(new Uint8Array(event.data), flow);
-      scheduleInputDrain();
     };
     nextSocket.onclose = () => {
       if (socket !== nextSocket) return;
@@ -4478,7 +4544,7 @@ const { WebglAddon } = globalThis.WebglAddon;
     inputDrainTimer = undefined;
     clearPendingMouseMotion();
     inputBuffer.clear();
-    inputOperations.length = 0;
+    clearInputOperations();
     httpInputInFlight = false;
     httpInputReady = false;
     currentBackend = backend;
