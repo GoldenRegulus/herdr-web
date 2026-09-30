@@ -81,11 +81,6 @@
           </section>
           <nav id="pane-mobile-bar" aria-label="Terminal controls">
             <div id="mobile-primary-row" class="mobile-key-row">
-              <button id="pane-browse" type="button" aria-label="Browse" aria-haspopup="dialog" aria-expanded="false">
-                <svg class="mobile-bar-icon" viewBox="0 0 24 24" aria-hidden="true">
-                  <path d="M4 6h16M4 12h16M4 18h16"></path>
-                </svg>
-              </button>
               <div id="mobile-modifiers" role="group" aria-label="Modifier keys">
                 <button type="button" data-modifier="control" aria-pressed="false">Ctrl</button>
                 <button type="button" data-modifier="alt" aria-pressed="false">Alt</button>
@@ -95,7 +90,7 @@
                 <button type="button" data-terminal-key="escape">Esc</button>
                 <button type="button" data-terminal-key="tab">Tab</button>
               </div>
-              <button id="mobile-navigation-mode" type="button" aria-label="Show more keys" aria-pressed="false" aria-controls="mobile-default-row mobile-navigation-row">
+              <button id="mobile-navigation-mode" type="button" data-navigation-mode aria-label="Show more keys" aria-pressed="false" aria-controls="mobile-default-row mobile-navigation-row">
                 <svg class="mobile-bar-icon" viewBox="0 0 24 24" aria-hidden="true">
                   <path d="M6 12h.01M12 12h.01M18 12h.01"></path>
                 </svg>
@@ -124,6 +119,11 @@
                 <svg class="mobile-bar-icon" data-lock-icon="locked" viewBox="0 0 24 24" aria-hidden="true" hidden>
                   <rect x="6" y="10" width="12" height="10" rx="2"></rect>
                   <path d="M9 10V7a3 3 0 0 1 6 0v3"></path>
+                </svg>
+              </button>
+              <button id="pane-browse" type="button" data-mobile-browse aria-label="Browse" aria-haspopup="dialog" aria-expanded="false">
+                <svg class="mobile-bar-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M4 6h16M4 12h16M4 18h16"></path>
                 </svg>
               </button>
             </div>
