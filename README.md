@@ -165,11 +165,18 @@ the same precedence as Herdr.
 
 The WebSocket bridge keeps one PTY output chunk in its application queue. It
 coalesces each output burst for at most 2 ms and up to 256 KiB, then sends it as
-ordered 8 KiB WebSocket messages. Full mode permits only one such message in
-its parser-acknowledgement window. Its HTTP fallback also reads one 8 KiB chunk
-at a time and waits for xterm to parse that chunk before the next long poll. It
-does not drop raw ANSI bytes. Full keeps xterm's cursor visible but steady, so
-an idle cursor does not schedule WebGL blink repaints.
+ordered 8 KiB WebSocket messages. Full mode starts with a 32 KiB
+parser-acknowledgement window, grows by 8 KiB per clean window of parsed output,
+and halves the window when parser round trips exceed twice their smoothed
+latency (with a 250 ms floor). Stable high-latency links can still grow. It stays
+between 8 KiB and 256 KiB, with at most 64 messages in flight even for tiny writes.
+Shrinking the window pauses new sends until existing output drains; it never
+drops or reorders raw ANSI bytes. Cumulative ACKs count parsed raw bytes, and
+the oldest unparsed message has a fixed 60-second deadline even during idle
+output or partial ACK progress. Its HTTP fallback still reads one 8 KiB chunk
+at a time and waits for xterm to parse that chunk before the next long poll.
+Full keeps xterm's cursor visible but steady, so an idle cursor does not schedule
+WebGL blink repaints.
 
 The browser always uses xterm.js's supported scheduled write queue. It
 acknowledges output only after xterm.js parses it. Each Panes WebSocket has an
