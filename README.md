@@ -142,6 +142,23 @@ glyphs. The browser loads the regular, bold, italic, and bold-italic files
 before it measures the terminal. The font license
 and copyright notice are in `herdr_web/static/fonts/MesloLGSNF.LICENSE`.
 
+## Pi session webpage
+
+When the selected Herdr pane runs pi with a persistent session, **Open web preview** opens a read-only view of the latest ten user and assistant messages. Herdr Web resolves the pi session from Herdr's server-side snapshot; it does not expose the session file path to browser JavaScript. The page polls for newly persisted messages.
+
+For token-level streaming, install the optional extension shipped in this repository into each pi profile's agent directory. `PI_CODING_AGENT_DIR` may point somewhere other than `~/.pi/agent`:
+
+```bash
+mkdir -p "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/extensions"
+cp pi-extension/herdr-web-stream.ts "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/extensions/"
+```
+
+Then run `/reload` in an existing pi session or start a new one. The extension publishes the exact pane-to-session mapping, so independent pi profiles and working directories resolve correctly. It writes only the current assistant text to a private per-user runtime file using atomic replacement. It opens no network listener and removes the file when the message or session ends. Herdr Web continues to work without the extension, but displays completed persisted messages only.
+
+The package also vendors KaTeX 0.18.5 for offline math rendering in pi web previews. Inline `$...$` / `\(...\)` and display `$$...$$` / `\[...\]` formulas are rendered without enabling trusted HTML commands. Its MIT license is in `herdr_web/static/vendor/katex/LICENSE`.
+
+Fenced ` ```mermaid ` blocks render as offline Mermaid 11.17.2 diagrams in strict security mode. Generated SVG is displayed through an inert image element rather than inserted as page markup; malformed diagrams fall back to readable source. Its MIT license is in `herdr_web/static/vendor/mermaid/LICENSE`.
+
 ## Theme synchronization
 
 The browser reads Herdr's active `[theme]` configuration. It applies the same

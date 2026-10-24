@@ -9,6 +9,7 @@ import base64
 from collections.abc import Iterator
 import errno
 import fcntl
+import hashlib
 import json
 import logging
 import os
@@ -156,6 +157,11 @@ HERDR_API_MAX_REQUEST_BYTES: Final = 1024 * 1024
 HERDR_API_MAX_OUTPUT_BYTES: Final = 8 * 1024 * 1024
 MAX_PANE_STREAMS: Final = 32
 MAX_PANE_TEXT_PASTE_BYTES: Final = 512 * 1024
+MAX_PI_SESSION_BYTES: Final = 512 * 1024 * 1024
+MAX_SCRATCHPAD_BYTES: Final = 1024 * 1024
+MAX_MARKDOWN_FILE_BYTES: Final = 8 * 1024 * 1024
+MAX_MARKDOWN_FILES: Final = 2000
+PI_STREAM_MAX_AGE_SECONDS: Final = 10 * 60
 PANE_FRAME_MAGIC: Final = b"HWP1"
 PANE_FRAME_HEADER: Final = struct.Struct("!4sIQBHH")
 PANE_FRAME_FLAG_FULL: Final = 1
@@ -183,6 +189,15 @@ if not logging.getLogger().handlers:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+
+
+class PiSessionPreviewError(RuntimeError):
+    """A user-facing pi preview failure with an appropriate HTTP status."""
+
+    def __init__(self, status_code: int, message: str) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
 
 app = FastAPI(title="herdr-web", docs_url=None, redoc_url=None)
 # Put the fixed per-process path before the compatibility path. Relative JS and
@@ -337,6 +352,10 @@ class TerminalResize(BaseModel):
 class FocusRequest(BaseModel):
     kind: Literal["workspace", "tab", "agent"]
     target_id: str
+
+
+class ScratchpadUpdate(BaseModel):
+    markdown: str
 
 
 @dataclass(frozen=True)
@@ -705,6 +724,8 @@ session_reaper: asyncio.Task[None] | None = None
 staged_image_cleanup_tasks: set[asyncio.Task[None]] = set()
 named_session_start_lock = asyncio.Lock()
 navigation_snapshot_cache: dict[str, tuple[float, dict[str, object]]] = {}
+pi_session_message_cache: dict[tuple[str, int], tuple[int, int, dict[str, object]]] = {}
+pi_session_path_cache: dict[str, Path] = {}
 
 
 async def reap_idle_sessions() -> None:
@@ -980,12 +1001,18 @@ def project_layout_snapshot(record: dict[str, object]) -> dict[str, object]:
     return projected
 
 
-def project_navigation_snapshot(document: dict[str, object]) -> dict[str, object]:
-    """Return only the structured state needed by the browser navigation UI."""
+def herdr_snapshot(document: dict[str, object]) -> dict[str, object]:
+    """Extract the public snapshot envelope returned by Herdr."""
     result = document.get("result")
     snapshot = result.get("snapshot") if isinstance(result, dict) else None
     if not isinstance(snapshot, dict):
         raise RuntimeError("Herdr API response does not contain a snapshot")
+    return snapshot
+
+
+def project_navigation_snapshot(document: dict[str, object]) -> dict[str, object]:
+    """Return only the structured state needed by the browser navigation UI."""
+    snapshot = herdr_snapshot(document)
 
     field_sets = {
         "workspaces": (
@@ -1134,6 +1161,330 @@ def parse_pane_stream_requests(
         pane_ids.add(pane_id)
         requests.append(PaneStreamRequest(stream_id, pane_id, cols, rows))
     return tab_id, requests
+
+
+def pi_stream_directory() -> Path:
+    runtime = os.environ.get("XDG_RUNTIME_DIR")
+    return (
+        Path(runtime) / "herdr-web-pi-streams"
+        if runtime
+        else Path(tempfile.gettempdir()) / f"herdr-web-pi-streams-{os.getuid()}"
+    )
+
+
+def pi_stream_path(session_file: Path) -> Path:
+    digest = hashlib.sha256(os.fsencode(str(session_file))).hexdigest()
+    return pi_stream_directory() / f"{digest}.json"
+
+
+def pi_pane_mapping_path(api_socket: Path, pane_id: str) -> Path:
+    identity = os.fsencode(str(api_socket)) + b"\0" + pane_id.encode("utf-8")
+    digest = hashlib.sha256(identity).hexdigest()
+    return pi_stream_directory() / f"pane-{digest}.json"
+
+
+def read_private_json(path: Path) -> dict[str, object] | None:
+    try:
+        metadata = path.lstat()
+        if not path.is_file() or path.is_symlink() or metadata.st_uid != os.getuid():
+            return None
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return document if isinstance(document, dict) else None
+
+
+def text_content(content: object) -> str:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    pieces: list[str] = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "text" and isinstance(block.get("text"), str):
+            pieces.append(block["text"])
+        elif block.get("type") == "image":
+            pieces.append("[Image]")
+    return "\n\n".join(pieces)
+
+
+def read_pi_session_messages(session_file: Path, limit: int = 10) -> dict[str, object]:
+    """Read the latest user/assistant messages on a pi session's active branch."""
+    bounded_limit = max(1, min(limit, 50))
+    try:
+        metadata = session_file.stat()
+    except OSError as error:
+        raise PiSessionPreviewError(404, "pi session file is no longer available") from error
+    if not session_file.is_file():
+        raise PiSessionPreviewError(422, "pi session path is not a regular file")
+    if metadata.st_size > MAX_PI_SESSION_BYTES:
+        actual_mib = metadata.st_size / (1024 * 1024)
+        limit_mib = MAX_PI_SESSION_BYTES // (1024 * 1024)
+        raise PiSessionPreviewError(
+            413,
+            f"pi session is too large to preview ({actual_mib:.1f} MiB; limit {limit_mib} MiB)",
+        )
+    cache_key = (str(session_file), bounded_limit)
+    cached = pi_session_message_cache.get(cache_key)
+    if cached is not None and cached[:2] == (metadata.st_mtime_ns, metadata.st_size):
+        return cached[2]
+
+    # Keep only tree links and displayable message content. Tool results can be
+    # hundreds of megabytes and are discarded immediately after each JSON line
+    # is decoded, keeping memory proportional to entry count rather than file size.
+    entries: list[dict[str, object]] = []
+    header: dict[str, object] | None = None
+    try:
+        with session_file.open(encoding="utf-8") as source:
+            for line_number, line in enumerate(source, 1):
+                if not line.strip():
+                    continue
+                record = json.loads(line)
+                if not isinstance(record, dict):
+                    raise ValueError(f"line {line_number} is not an object")
+                if record.get("type") == "session" and header is None:
+                    header = record
+                    continue
+                entry_id = record.get("id")
+                if not isinstance(entry_id, str):
+                    continue
+                compact: dict[str, object] = {
+                    "id": entry_id,
+                    "parentId": record.get("parentId"),
+                    "type": record.get("type"),
+                }
+                message = record.get("message")
+                if (
+                    record.get("type") == "message"
+                    and isinstance(message, dict)
+                    and message.get("role") in {"user", "assistant"}
+                ):
+                    compact["message"] = message
+                    compact["timestamp"] = record.get("timestamp")
+                entries.append(compact)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        raise PiSessionPreviewError(422, "pi session file contains invalid JSONL") from error
+    if header is None:
+        raise PiSessionPreviewError(422, "pi session file has no session header")
+
+    by_id = {entry["id"]: entry for entry in entries}
+    branch: list[dict[str, object]] = []
+    current = entries[-1] if entries else None
+    visited: set[str] = set()
+    while current is not None:
+        entry_id = current["id"]
+        if entry_id in visited:
+            raise PiSessionPreviewError(422, "pi session branch contains a cycle")
+        visited.add(entry_id)
+        branch.append(current)
+        parent_id = current.get("parentId")
+        current = by_id.get(parent_id) if isinstance(parent_id, str) else None
+    branch.reverse()
+
+    messages: list[dict[str, object]] = []
+    for entry in branch:
+        if entry.get("type") != "message" or not isinstance(entry.get("message"), dict):
+            continue
+        message = entry["message"]
+        role = message.get("role")
+        if role not in {"user", "assistant"}:
+            continue
+        markdown = text_content(message.get("content"))
+        error_message = message.get("errorMessage")
+        if not markdown and role == "assistant" and isinstance(error_message, str):
+            markdown = f"**Error:** {error_message}"
+        if not markdown:
+            continue
+        messages.append(
+            {
+                "id": entry["id"],
+                "role": role,
+                "markdown": markdown,
+                "timestamp": message.get("timestamp") or entry.get("timestamp"),
+                "streaming": False,
+            }
+        )
+    result: dict[str, object] = {
+        "session_id": header.get("id"),
+        "cwd": header.get("cwd"),
+        "session_bytes": metadata.st_size,
+        "messages": messages[-bounded_limit:],
+    }
+    pi_session_message_cache[cache_key] = (metadata.st_mtime_ns, metadata.st_size, result)
+    return result
+
+
+def read_pi_stream(session_file: Path) -> dict[str, object] | None:
+    path = pi_stream_path(session_file)
+    try:
+        metadata = path.stat()
+        if time.time() - metadata.st_mtime > PI_STREAM_MAX_AGE_SECONDS:
+            return None
+    except OSError:
+        return None
+    document = read_private_json(path)
+    if (
+        not isinstance(document, dict)
+        or document.get("session_file") != str(session_file)
+        or document.get("role") != "assistant"
+        or not isinstance(document.get("markdown"), str)
+        or not document.get("streaming")
+    ):
+        return None
+    return {
+        "id": "streaming-assistant",
+        "role": "assistant",
+        "markdown": document["markdown"],
+        "timestamp": document.get("updated_at"),
+        "streaming": True,
+    }
+
+
+def pi_agent_record(snapshot: dict[str, object], pane_id: str | None) -> tuple[str, list[dict[str, object]]]:
+    selected_pane = pane_id or snapshot.get("focused_pane_id")
+    if not isinstance(selected_pane, str) or not selected_pane:
+        raise PiSessionPreviewError(404, "Herdr has no selected pane to preview")
+    candidates: list[dict[str, object]] = []
+    for collection in ("agents", "panes"):
+        records = snapshot.get(collection)
+        if isinstance(records, list):
+            candidates.extend(
+                record for record in records
+                if isinstance(record, dict) and record.get("pane_id") == selected_pane
+            )
+    agent = next(
+        (record.get("agent") for record in candidates if isinstance(record.get("agent"), str)),
+        None,
+    )
+    if not isinstance(agent, str) or agent.casefold() != "pi":
+        raise PiSessionPreviewError(409, "the selected Herdr pane is not running pi")
+    return selected_pane, candidates
+
+
+def pi_session_from_snapshot(snapshot: dict[str, object], pane_id: str | None) -> Path | None:
+    _selected_pane, candidates = pi_agent_record(snapshot, pane_id)
+    session_value: object = next(
+        (record.get("agent_session") for record in candidates if record.get("agent_session")),
+        None,
+    )
+    if isinstance(session_value, dict):
+        session_value = session_value.get("value")
+    if not isinstance(session_value, str) or not session_value:
+        return None
+    session_file = Path(session_value)
+    if not session_file.is_absolute() or session_file.suffix != ".jsonl":
+        raise PiSessionPreviewError(422, "pi published an invalid session path")
+    return session_file
+
+
+def pi_session_roots() -> list[Path]:
+    home = Path.home()
+    roots = [home / ".pi" / "agent" / "sessions"]
+    try:
+        roots.extend(home.glob("*/.pi/agent/sessions"))
+    except OSError:
+        pass
+    return [root for root in roots if root.is_dir()]
+
+
+def session_header(path: Path) -> dict[str, object] | None:
+    try:
+        with path.open(encoding="utf-8") as source:
+            header = json.loads(source.readline())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return header if isinstance(header, dict) and header.get("type") == "session" else None
+
+
+def session_header_cwd(path: Path) -> str | None:
+    header = session_header(path)
+    cwd = header.get("cwd") if header is not None else None
+    return cwd if isinstance(cwd, str) else None
+
+
+def pi_session_candidates() -> list[tuple[float, Path]]:
+    candidates: list[tuple[float, Path]] = []
+    for root in pi_session_roots():
+        try:
+            paths = root.glob("*/*.jsonl")
+            for path in paths:
+                try:
+                    modified = path.stat().st_mtime
+                except OSError:
+                    continue
+                candidates.append((modified, path))
+        except OSError:
+            continue
+    return sorted(candidates, reverse=True)
+
+
+def find_recent_pi_session(cwd: str) -> Path | None:
+    """Find a persisted session by exact cwd across independent pi profiles."""
+    for _modified, path in pi_session_candidates():
+        if session_header_cwd(path) == cwd:
+            return path
+    return None
+
+
+def find_pi_session_by_id(session_id: str) -> Path | None:
+    """Resolve an opaque pi session UUID without accepting a browser file path."""
+    if not session_id or len(session_id) > 128 or not all(
+        character.isalnum() or character in "-_" for character in session_id
+    ):
+        return None
+    cached = pi_session_path_cache.get(session_id)
+    if cached is not None and cached.is_file():
+        header = session_header(cached)
+        if header is not None and header.get("id") == session_id:
+            return cached
+        pi_session_path_cache.pop(session_id, None)
+    for _modified, path in pi_session_candidates():
+        # Pi filenames end in the session UUID, so avoid opening unrelated files.
+        if session_id not in path.stem:
+            continue
+        header = session_header(path)
+        if header is not None and header.get("id") == session_id:
+            pi_session_path_cache[session_id] = path
+            return path
+    return None
+
+
+def read_pi_pane_mapping(backend: Backend, pane_id: str) -> Path | None:
+    api_socket = backend_api_socket(backend)
+    document = read_private_json(pi_pane_mapping_path(api_socket, pane_id))
+    if (
+        document is None
+        or document.get("api_socket") != str(api_socket)
+        or document.get("pane_id") != pane_id
+        or not isinstance(document.get("session_file"), str)
+    ):
+        return None
+    session_file = Path(document["session_file"])
+    if not session_file.is_absolute() or session_file.suffix != ".jsonl":
+        return None
+    return session_file
+
+
+async def resolve_pi_session(backend: Backend, pane_id: str | None) -> tuple[Path, str]:
+    document = await run_herdr_api(backend, "api", "snapshot")
+    snapshot = herdr_snapshot(document)
+    selected_pane, records = pi_agent_record(snapshot, pane_id)
+    session_file = pi_session_from_snapshot(snapshot, selected_pane)
+    if session_file is not None and session_file.is_file():
+        return session_file, selected_pane
+    mapped = read_pi_pane_mapping(backend, selected_pane)
+    if mapped is not None and mapped.is_file():
+        return mapped, selected_pane
+    cwd = next(
+        (record.get("cwd") for record in records if isinstance(record.get("cwd"), str)),
+        None,
+    )
+    recent = find_recent_pi_session(cwd) if isinstance(cwd, str) else None
+    if recent is not None:
+        return recent, selected_pane
+    raise PiSessionPreviewError(404, "pi has not published a persistent session for this pane")
 
 
 async def navigation_snapshot(
@@ -1398,6 +1749,13 @@ async def index() -> HTMLResponse:
     return HTMLResponse(document, headers=NO_STORE_HEADERS)
 
 
+@app.get("/session-preview", include_in_schema=False)
+async def session_preview() -> HTMLResponse:
+    document = (STATIC_SNAPSHOT_DIR / "session-preview.html").read_text(encoding="utf-8")
+    document = document.replace(STATIC_ASSET_PLACEHOLDER, STATIC_ASSET_VERSION)
+    return HTMLResponse(document, headers=NO_STORE_HEADERS)
+
+
 @app.get("/manifest.webmanifest", include_in_schema=False)
 async def web_manifest() -> JSONResponse:
     return JSONResponse(
@@ -1435,6 +1793,241 @@ async def list_backends() -> dict[str, list[dict[str, str]]]:
             for backend in discover_backends().values()
         ]
     }
+
+
+def pi_message_response(session_file: Path, limit: int) -> dict[str, object]:
+    persisted = read_pi_session_messages(session_file, limit)
+    # Session parsing results are cached. Build a fresh response and message
+    # list so a live overlay cannot accumulate in that cached object each poll.
+    result = {**persisted, "messages": list(persisted["messages"])}
+    stream = read_pi_stream(session_file)
+    if stream is not None:
+        messages = result["messages"]
+        assert isinstance(messages, list)
+        messages.append(stream)
+        result["messages"] = messages[-max(1, min(limit, 50)):]
+    result["live"] = stream is not None
+    return result
+
+
+def markdown_file_id(relative_path: Path) -> str:
+    return hashlib.sha256(relative_path.as_posix().encode("utf-8")).hexdigest()[:24]
+
+
+def project_markdown_files(cwd: str) -> list[dict[str, object]]:
+    root = Path(cwd).expanduser().resolve(strict=False)
+    if not root.is_dir():
+        raise PiSessionPreviewError(404, "project directory is no longer available")
+    ignored = {".git", ".hg", ".svn", ".venv", "node_modules", "__pycache__"}
+    files: list[dict[str, object]] = []
+    try:
+        for directory, directory_names, file_names in os.walk(root, followlinks=False):
+            directory_names[:] = sorted(
+                name for name in directory_names
+                if name not in ignored and not (Path(directory) / name).is_symlink()
+            )
+            for file_name in sorted(file_names):
+                path = Path(directory) / file_name
+                relative = path.relative_to(root)
+                if path.is_symlink() or path.suffix.casefold() not in {".md", ".markdown"}:
+                    continue
+                metadata = path.stat()
+                files.append({
+                    "id": markdown_file_id(relative),
+                    "name": path.name,
+                    "location": relative.parent.as_posix() if relative.parent != Path(".") else "",
+                    "bytes": metadata.st_size,
+                    "modified_at": int(metadata.st_mtime * 1000),
+                })
+                if len(files) >= MAX_MARKDOWN_FILES:
+                    break
+            if len(files) >= MAX_MARKDOWN_FILES:
+                break
+    except OSError as error:
+        raise PiSessionPreviewError(503, f"could not scan project Markdown files: {error}") from error
+    files.sort(key=lambda item: (str(item["location"]).casefold(), str(item["name"]).casefold()))
+    return files
+
+
+def resolve_project_markdown_file(cwd: str, file_id: str) -> tuple[Path, Path]:
+    if len(file_id) != 24 or any(character not in "0123456789abcdef" for character in file_id):
+        raise PiSessionPreviewError(404, "Markdown file was not found")
+    root = Path(cwd).expanduser().resolve(strict=False)
+    for item in project_markdown_files(cwd):
+        relative = Path(str(item["location"])) / str(item["name"])
+        if item["id"] == file_id:
+            path = (root / relative).resolve(strict=False)
+            if path.parent != root and root not in path.parents:
+                break
+            return path, relative
+    raise PiSessionPreviewError(404, "Markdown file was not found")
+
+
+def read_project_markdown_file(cwd: str, file_id: str) -> dict[str, object]:
+    path, relative = resolve_project_markdown_file(cwd, file_id)
+    try:
+        metadata = path.stat()
+        if metadata.st_size > MAX_MARKDOWN_FILE_BYTES:
+            raise PiSessionPreviewError(413, "Markdown file exceeds the 8 MiB preview limit")
+        markdown = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as error:
+        raise PiSessionPreviewError(422, "Markdown file is not valid UTF-8") from error
+    except OSError as error:
+        raise PiSessionPreviewError(503, f"could not read Markdown file: {error}") from error
+    return {
+        "file_id": file_id,
+        "name": relative.name,
+        "location": relative.parent.as_posix() if relative.parent != Path(".") else "",
+        "bytes": metadata.st_size,
+        "markdown": markdown,
+    }
+
+
+def scratchpad_path(cwd: str) -> Path:
+    """Return private, project-keyed note storage outside the project tree."""
+    identity = str(Path(cwd).expanduser().resolve(strict=False))
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    return config_dir() / "scratchpads" / f"{digest}.md"
+
+
+def read_scratchpad(cwd: str) -> str:
+    path = scratchpad_path(cwd)
+    try:
+        content = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return ""
+    except UnicodeDecodeError as error:
+        raise PiSessionPreviewError(422, "project scratchpad is not valid UTF-8") from error
+    if len(content.encode("utf-8")) > MAX_SCRATCHPAD_BYTES:
+        raise PiSessionPreviewError(413, "project scratchpad is too large")
+    return content
+
+
+def write_scratchpad(cwd: str, markdown: str) -> None:
+    encoded = markdown.encode("utf-8")
+    if len(encoded) > MAX_SCRATCHPAD_BYTES:
+        raise PiSessionPreviewError(413, "project scratchpad exceeds the 1 MiB limit")
+    path = scratchpad_path(cwd)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.parent.chmod(0o700)
+    temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+    try:
+        with temporary.open("wb") as output:
+            os.chmod(temporary, 0o600)
+            output.write(encoded)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def pi_session_cwd(session_id: str) -> str:
+    session_file = find_pi_session_by_id(session_id)
+    if session_file is None:
+        raise HTTPException(status_code=404, detail="pi session is no longer available")
+    try:
+        cwd = read_pi_session_messages(session_file, 1).get("cwd")
+    except PiSessionPreviewError as error:
+        raise HTTPException(status_code=error.status_code, detail=str(error)) from error
+    except (OSError, RuntimeError) as error:
+        raise HTTPException(status_code=503, detail=f"could not inspect pi session: {error}") from error
+    if not isinstance(cwd, str) or not cwd:
+        raise HTTPException(status_code=422, detail="pi session has no project working directory")
+    return cwd
+
+
+@app.get("/api/pi-sessions/{session_id}/markdown-files")
+async def get_pi_session_markdown_files(session_id: str) -> dict[str, object]:
+    cwd = pi_session_cwd(session_id)
+    try:
+        return {"files": project_markdown_files(cwd)}
+    except PiSessionPreviewError as error:
+        raise HTTPException(status_code=error.status_code, detail=str(error)) from error
+
+
+@app.get("/api/pi-sessions/{session_id}/markdown-files/{file_id}")
+async def get_pi_session_markdown_file(session_id: str, file_id: str) -> dict[str, object]:
+    cwd = pi_session_cwd(session_id)
+    try:
+        document = read_project_markdown_file(cwd, file_id)
+    except PiSessionPreviewError as error:
+        raise HTTPException(status_code=error.status_code, detail=str(error)) from error
+    return {
+        "session_id": session_id,
+        "cwd": document["location"] or "Project root",
+        "session_bytes": document["bytes"],
+        "document_name": document["name"],
+        "document_mode": True,
+        "messages": [{
+            "id": f"markdown-{file_id}",
+            "role": "document",
+            "markdown": document["markdown"],
+            "timestamp": None,
+            "streaming": False,
+        }],
+        "live": False,
+    }
+
+
+@app.get("/api/pi-sessions/{session_id}/scratchpad")
+async def get_pi_session_scratchpad(session_id: str) -> dict[str, object]:
+    cwd = pi_session_cwd(session_id)
+    try:
+        markdown = read_scratchpad(cwd)
+    except PiSessionPreviewError as error:
+        raise HTTPException(status_code=error.status_code, detail=str(error)) from error
+    except OSError as error:
+        raise HTTPException(status_code=503, detail=f"could not read project scratchpad: {error}") from error
+    return {"markdown": markdown, "project_key": hashlib.sha256(cwd.encode()).hexdigest()[:12]}
+
+
+@app.put("/api/pi-sessions/{session_id}/scratchpad")
+async def put_pi_session_scratchpad(
+    session_id: str, update: ScratchpadUpdate
+) -> dict[str, object]:
+    cwd = pi_session_cwd(session_id)
+    try:
+        write_scratchpad(cwd, update.markdown)
+    except PiSessionPreviewError as error:
+        raise HTTPException(status_code=error.status_code, detail=str(error)) from error
+    except OSError as error:
+        raise HTTPException(status_code=503, detail=f"could not save project scratchpad: {error}") from error
+    return {"saved": True, "bytes": len(update.markdown.encode("utf-8"))}
+
+
+@app.get("/api/pi-sessions/{session_id}/messages")
+async def get_pi_session_messages(session_id: str, limit: int = 10) -> dict[str, object]:
+    session_file = find_pi_session_by_id(session_id)
+    if session_file is None:
+        raise HTTPException(status_code=404, detail="pi session is no longer available")
+    try:
+        return pi_message_response(session_file, limit)
+    except PiSessionPreviewError as error:
+        raise HTTPException(status_code=error.status_code, detail=str(error)) from error
+    except (OSError, RuntimeError) as error:
+        raise HTTPException(status_code=503, detail=f"could not inspect pi session: {error}") from error
+
+
+@app.get("/api/backends/{backend_id}/pi-messages")
+async def get_pi_messages(
+    backend_id: str, pane_id: str | None = None, limit: int = 10
+) -> dict[str, object]:
+    backend = discover_backends().get(backend_id)
+    if backend is None:
+        raise HTTPException(status_code=404, detail="Herdr backend is no longer available")
+    try:
+        session_file, selected_pane = await resolve_pi_session(backend, pane_id)
+        result = pi_message_response(session_file, limit)
+        result["pane_id"] = selected_pane
+        session_id = result.get("session_id")
+        if isinstance(session_id, str):
+            pi_session_path_cache[session_id] = session_file
+        return result
+    except PiSessionPreviewError as error:
+        raise HTTPException(status_code=error.status_code, detail=str(error)) from error
+    except (OSError, RuntimeError) as error:
+        raise HTTPException(status_code=503, detail=f"could not inspect pi session: {error}") from error
 
 
 @app.get("/api/backends/{backend_id}/navigation")

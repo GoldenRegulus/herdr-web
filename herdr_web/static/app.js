@@ -58,6 +58,7 @@ const { WebglAddon } = globalThis.WebglAddon;
   const fullModeButton = document.querySelector('#full-mode');
   const panesModeButton = document.querySelector('#panes-mode');
   const backendName = document.querySelector('#backend-name');
+  const openWebpageButton = document.querySelector('#open-webpage');
   const mobileToolbar = document.querySelector('#mobile-toolbar');
   const mobileSheet = document.querySelector('#mobile-sheet');
   const mobileSheetPanel = mobileSheet.querySelector(':scope > section');
@@ -542,6 +543,32 @@ const { WebglAddon } = globalThis.WebglAddon;
     return apiUrl(`backends/${encodeURIComponent(backend.id)}/${path}`);
   }
 
+  function openSessionWebpage(paneId = selectedPane) {
+    if (!currentBackend) return;
+    const query = new URLSearchParams({ backend: currentBackend.id });
+    if (paneId) query.set('pane', paneId);
+    window.open(`${appBasePath()}session-preview?${query}`, '_blank', 'noopener');
+  }
+
+  function piPreviewAction(paneId) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'sheet-preview-action';
+    button.textContent = '↗';
+    button.title = 'Open web preview in new tab';
+    button.setAttribute('aria-label', 'Open Pi web preview in new tab');
+    button.addEventListener('click', () => openSessionWebpage(paneId));
+    return button;
+  }
+
+  function sheetItemRow(item, piPane) {
+    if (piPane?.agent !== 'pi') return item;
+    const row = document.createElement('div');
+    row.className = 'sheet-item-row';
+    row.append(item, piPreviewAction(piPane.pane_id));
+    return row;
+  }
+
   function navigationRecordLabel(record, fallback) {
     return record.label || record.terminal_title_stripped || record.agent || fallback;
   }
@@ -984,7 +1011,7 @@ const { WebglAddon } = globalThis.WebglAddon;
           if (tabPanes.length > 1) {
             configurePaneBrowseBranch(tabButton, 'tab', tab.tab_id, tabExpanded);
           }
-          tabNode.append(tabButton);
+          tabNode.append(sheetItemRow(tabButton, tabPanes.length === 1 ? tabPanes[0] : undefined));
 
           if (tabPanes.length > 1 && tabExpanded) {
             const paneList = document.createElement('ul');
@@ -998,7 +1025,7 @@ const { WebglAddon } = globalThis.WebglAddon;
                 () => selectPaneTarget(pane.pane_id),
               );
               paneButton.classList.add('sheet-tree-item');
-              paneNode.append(paneButton);
+              paneNode.append(sheetItemRow(paneButton, pane));
               paneList.append(paneNode);
             }
             tabNode.append(paneList);
@@ -1145,6 +1172,12 @@ const { WebglAddon } = globalThis.WebglAddon;
     }
 
     if (openSheetName === 'more') {
+      const webpageButton = document.createElement('button');
+      webpageButton.type = 'button';
+      webpageButton.className = 'more-action';
+      webpageButton.textContent = 'Open web preview';
+      webpageButton.addEventListener('click', () => openSessionWebpage());
+      sheetContent.append(webpageButton);
       const panesButton = document.createElement('button');
       panesButton.type = 'button';
       panesButton.className = 'more-action';
@@ -1206,7 +1239,7 @@ const { WebglAddon } = globalThis.WebglAddon;
         kind === 'workspace' ? undefined : record.agent_status,
         () => focusNavigationTarget(kind, targetId, button),
       );
-      sheetContent.append(button);
+      sheetContent.append(sheetItemRow(button, kind === 'agent' ? record : undefined));
     }
     if (!records.length) {
       const empty = document.createElement('p');
@@ -4239,6 +4272,7 @@ const { WebglAddon } = globalThis.WebglAddon;
     inputBuffer.clear();
     clearInputOperations();
     currentBackend = backend;
+    openWebpageButton.disabled = false;
     viewMode = 'panes';
     httpFallbackStarting = false;
     picker.hidden = true;
@@ -4314,6 +4348,7 @@ const { WebglAddon } = globalThis.WebglAddon;
     if (sessionId) fetch(apiUrl(`sessions/${sessionId}`), { method: 'DELETE' });
     sessionId = undefined;
     currentBackend = undefined;
+    openWebpageButton.disabled = true;
     resizeObserver?.disconnect();
     resizeObserver = undefined;
     if (viewMode === 'panes') disposePaneTerminals();
@@ -4630,6 +4665,7 @@ const { WebglAddon } = globalThis.WebglAddon;
     httpInputInFlight = false;
     httpInputReady = false;
     currentBackend = backend;
+    openWebpageButton.disabled = false;
     viewMode = 'full';
     httpFallbackStarting = false;
     picker.hidden = true;
@@ -4820,6 +4856,7 @@ const { WebglAddon } = globalThis.WebglAddon;
 
   document.querySelector('#refresh').addEventListener('click', () => loadBackends(false));
   document.querySelector('#back').addEventListener('click', () => showPicker());
+  openWebpageButton.addEventListener('click', () => openSessionWebpage());
   fullModeButton.addEventListener('click', () => switchViewMode('full'));
   panesModeButton.addEventListener('click', () => switchViewMode('panes'));
   paneBrowse.addEventListener('click', () => openMobileSheet('browse', paneBrowse));

@@ -146,6 +146,11 @@ button:disabled { cursor: default; opacity: .65; }
   height: 28px;
   padding: 0 var(--terminal-column-2);
 }
+#open-webpage {
+  flex: 0 0 auto;
+  height: var(--terminal-row-2);
+  padding: 0 var(--terminal-column-2);
+}
 header {
   align-items: center;
   background: var(--theme-surface-dim);
@@ -842,6 +847,26 @@ header {
     overscroll-behavior: contain;
     padding: 0;
   }
+  .sheet-item-row {
+    border-bottom: 1px solid var(--theme-surface-0);
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) var(--sheet-item-height);
+  }
+  .sheet-item-row > .sheet-item { border-bottom: 0; }
+  .sheet-preview-action {
+    align-items: center;
+    background: transparent;
+    border: 0;
+    border-left: 1px solid var(--theme-surface-0);
+    border-radius: 0;
+    color: var(--theme-accent);
+    display: flex;
+    font-size: 1.1rem;
+    justify-content: center;
+    min-height: var(--sheet-item-height);
+    padding: 0;
+  }
+  .sheet-preview-action:focus-visible { background: var(--theme-surface-0); outline: none; }
   .sheet-item {
     align-items: center;
     background: transparent;
@@ -927,14 +952,20 @@ header {
     background: var(--theme-surface-dim);
     padding-left: var(--sheet-tree-indent);
   }
-  .sheet-tree li li > .sheet-item {
+  .sheet-tree li li > .sheet-item,
+  .sheet-tree li li > .sheet-item-row > .sheet-item {
     background: var(--theme-surface-dim);
     height: var(--sheet-child-item-height);
     min-height: var(--sheet-child-item-height);
     padding-left: var(--terminal-column-2);
   }
+  .sheet-tree li li > .sheet-item-row > .sheet-preview-action {
+    min-height: var(--sheet-child-item-height);
+  }
   .sheet-tree li li > .sheet-item:focus-visible,
-  .sheet-tree li li > .sheet-item[aria-current="true"] {
+  .sheet-tree li li > .sheet-item[aria-current="true"],
+  .sheet-tree li li > .sheet-item-row > .sheet-item:focus-visible,
+  .sheet-tree li li > .sheet-item-row > .sheet-item[aria-current="true"] {
     background: var(--theme-surface-0);
   }
   .sheet-tree-chevron {
@@ -1019,7 +1050,9 @@ header {
   #sheet-close:hover { background: transparent; color: var(--theme-text); }
   #pane-tabs button:hover,
   .sheet-item:hover,
+  .sheet-preview-action:hover,
   .sheet-tree li li > .sheet-item:hover,
+  .sheet-tree li li > .sheet-item-row > .sheet-item:hover,
   .more-action:hover { background: var(--theme-surface-0); }
   #telemetry[data-state="disconnected"]:hover { background: var(--theme-surface-1); }
 }

@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#181825" />
+    <title>Pi session · Herdr</title>
+    <script>
+      const pagePath = window.location.pathname;
+      const marker = '/session-preview';
+      const markerIndex = pagePath.lastIndexOf(marker);
+      window.herdrWebBasePath = markerIndex >= 0 ? `${pagePath.slice(0, markerIndex)}/` : '/';
+      window.herdrWebAssetBasePath = `${window.herdrWebBasePath}static/__HERDR_WEB_ASSET_VERSION__/`;
+      const stylesheet = document.createElement('link');
+      stylesheet.rel = 'stylesheet';
+      stylesheet.href = `${window.herdrWebAssetBasePath}session-preview.css`;
+      document.head.append(stylesheet);
+      const katexStylesheet = document.createElement('link');
+      katexStylesheet.rel = 'stylesheet';
+      katexStylesheet.href = `${window.herdrWebAssetBasePath}vendor/katex/katex.min.css`;
+      document.head.append(katexStylesheet);
+      window.herdrWebMermaidReady = new Promise((resolve, reject) => {
+        const mermaidScript = document.createElement('script');
+        mermaidScript.src = `${window.herdrWebAssetBasePath}vendor/mermaid/mermaid.min.js`;
+        mermaidScript.addEventListener('load', () => {
+          globalThis.mermaid?.initialize({
+            startOnLoad: false,
+            securityLevel: 'strict',
+            suppressErrorRendering: true,
+            theme: 'base',
+          });
+          resolve();
+        }, { once: true });
+        mermaidScript.addEventListener('error', reject, { once: true });
+        document.head.append(mermaidScript);
+      });
+      window.herdrWebKatexReady = new Promise((resolve, reject) => {
+        const katexScript = document.createElement('script');
+        katexScript.src = `${window.herdrWebAssetBasePath}vendor/katex/katex.min.js`;
+        katexScript.addEventListener('load', resolve, { once: true });
+        katexScript.addEventListener('error', reject, { once: true });
+        document.head.append(katexScript);
+      });
+    </script>
+  </head>
+  <body>
+    <header>
+      <div>
+        <strong>Pi session</strong>
+        <span id="session-detail">Loading…</span>
+      </div>
+      <div id="session-actions">
+        <button id="files-open" type="button">Files</button>
+        <button id="scratchpad-open" type="button">Scratchpad</button>
+        <button id="theme-toggle" type="button" aria-pressed="false" title="Use light theme">Light</button>
+        <button id="toggle-all-messages" type="button" aria-pressed="false">Collapse all</button>
+        <span id="session-size" title="Raw pi session JSONL file size">—</span>
+        <span id="live-state" data-live="false">Persisted</span>
+      </div>
+    </header>
+    <main id="messages" aria-live="polite" aria-busy="true"></main>
+    <button id="toc-toggle" type="button" aria-expanded="false" aria-controls="message-toc" hidden>Contents</button>
+    <nav id="message-toc" aria-label="Headings in current message" hidden>
+      <header>
+        <strong>In this message</strong>
+        <button id="toc-close" type="button" aria-label="Close contents">×</button>
+      </header>
+      <div id="message-toc-items"></div>
+    </nav>
+    <nav id="message-navigation" aria-label="Message navigation" hidden>
+      <button id="previous-message" type="button" aria-label="Previous message" title="Previous message (Alt+Up)">↑</button>
+      <output id="message-position" aria-live="polite">1 / 1</output>
+      <button id="next-message" type="button" aria-label="Next message" title="Next message (Alt+Down)">↓</button>
+    </nav>
+    <dialog id="files-dialog" aria-labelledby="files-title">
+      <header>
+        <div>
+          <strong id="files-title">Markdown files</strong>
+          <span id="files-status">Project files</span>
+        </div>
+        <button id="files-close" type="button" aria-label="Close files">×</button>
+      </header>
+      <label id="files-search-label">Search <input id="files-search" type="search" placeholder="Find Markdown files…" autocomplete="off"></label>
+      <div id="files-list" role="list"></div>
+    </dialog>
+    <dialog id="scratchpad-dialog" aria-labelledby="scratchpad-title">
+      <header>
+        <div>
+          <strong id="scratchpad-title">Project scratchpad</strong>
+          <span id="scratchpad-status">Loading…</span>
+        </div>
+        <button id="scratchpad-close" type="button" aria-label="Close scratchpad">×</button>
+      </header>
+      <div id="scratchpad-toolbar" role="toolbar" aria-label="Markdown formatting">
+        <button type="button" data-before="**" data-after="**" title="Bold"><strong>B</strong></button>
+        <button type="button" data-before="`" data-after="`" title="Code">&lt;/&gt;</button>
+        <button type="button" data-line="# " title="Heading">H</button>
+        <button type="button" data-line="- " title="List">•</button>
+        <button type="button" data-before="[" data-after="](https://)" title="Link">Link</button>
+      </div>
+      <div id="scratchpad-body">
+        <label><span>Markdown</span><textarea id="scratchpad-editor" spellcheck="true" placeholder="Project notes…"></textarea></label>
+        <section aria-label="Rendered scratchpad preview"><span>Preview</span><div id="scratchpad-preview" class="message-content"></div></section>
+      </div>
+    </dialog>
+    <template id="message-template">
+      <article class="message">
+        <header>
+          <button class="message-toggle" type="button" aria-expanded="true" title="Collapse message">▾</button>
+          <strong></strong>
+          <button class="message-view-toggle" type="button" aria-pressed="false" title="Show raw message text">Raw</button>
+          <time></time>
+        </header>
+        <div class="message-peek" aria-hidden="true"></div>
+        <div class="message-content"></div>
+        <pre class="message-raw" hidden><code></code></pre>
+      </article>
+    </template>
+    <script type="module">
+      Promise.allSettled([window.herdrWebKatexReady, window.herdrWebMermaidReady])
+        .then(() => import(`${window.herdrWebAssetBasePath}session-preview.js`));
+    </script>
+  </body>
+</html>
