@@ -431,3 +431,35 @@ test('a reset model judges the next keystroke on its own', () => {
   h.type('prompt> echo aX', 15);
   assert.deepEqual(h.sent, ['X'], 'one typed character goes out at once');
 });
+
+test('a hyphen that iOS turned into a dash stays two hyphens', () => {
+  const h = harness('', 0, 'prompt> ');
+  h.type('prompt> ls -', 12);
+  // The second hyphen: iOS replaces the first with an em dash.
+  h.type('prompt> ls —', 12, { inputType: 'insertReplacementText' });
+  assert.equal(h.helper.value, 'prompt> ls --', 'the box shows what was typed');
+  assert.equal(h.sent.join(''), 'ls --', 'and the terminal receives two hyphens');
+  h.type('prompt> ls --a', 14);
+  assert.equal(h.sent.join(''), 'ls --a');
+});
+
+test('a dash picked on purpose is kept', () => {
+  const h = harness('', 0, 'prompt> ');
+  h.type('prompt> a', 9);
+  h.type('prompt> a—', 10);
+  assert.equal(h.sent.join(''), 'a—', 'inserting a dash replaces no hyphen');
+  h.type('prompt> a—-', 11);
+  h.type('prompt> a——', 11);
+  assert.equal(h.helper.value, 'prompt> a—--', 'only the hyphen iOS replaced comes back');
+});
+
+test('a curly quote from the plain quote key goes out straight', () => {
+  const h = harness('', 0, 'prompt> ');
+  h.pane.lastTypedKey = { key: "'", at: Date.now() };
+  h.type('prompt> ’', 9);
+  assert.equal(h.sent.join(''), "'");
+  assert.equal(h.helper.value, "prompt> '");
+  h.pane.lastTypedKey = { key: '’', at: Date.now() };
+  h.type("prompt> '’", 10);
+  assert.equal(h.sent.join(''), "'’", 'a curly quote picked from the key variants is kept');
+});

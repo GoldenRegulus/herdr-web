@@ -2303,6 +2303,33 @@ const { WebglAddon } = globalThis.WebglAddon;
     return true;
   }
 
+  // iOS Smart Punctuation rewrites what was typed: a second hyphen turns the
+  // first into a dash, and a straight quote comes out curly. A command needs
+  // what the keys say. A dash or quote picked from a key's variants is left
+  // alone: it is inserted without replacing a hyphen, and without the plain
+  // key reported as pressed.
+  const SMART_QUOTES = { '‘': "'", '’': "'", '“': '"', '”': '"' };
+
+  function undoSmartPunctuation(pane, seen, box) {
+    const change = terminalTextInputDelta(seen.text, box.text, seen.cursor, box.cursor);
+    if (!change) return undefined;
+    let typed;
+    if ((change.inserted === '—' || change.inserted === '–') && change.removed === 1
+      && seen.text.slice(change.insertedStart, change.insertedStart + 1) === '-') {
+      typed = '--';
+    } else if (change.removed === 0 && SMART_QUOTES[change.inserted]
+      && pane.lastTypedKey?.key === SMART_QUOTES[change.inserted]
+      && performance.now() - pane.lastTypedKey.at < 500) {
+      typed = SMART_QUOTES[change.inserted];
+    }
+    if (!typed) return undefined;
+    const shift = typed.length - change.inserted.length;
+    return {
+      text: box.text.slice(0, change.insertedStart) + typed + box.text.slice(change.insertedEnd),
+      cursor: box.cursor >= change.insertedEnd ? box.cursor + shift : box.cursor,
+    };
+  }
+
   // The box value changed: make the line the terminal holds match it. Keyboard
   // events are never interpreted, only compared.
   function composeSync(pane) {
@@ -2310,7 +2337,14 @@ const { WebglAddon } = globalThis.WebglAddon;
     if (!helper || !nativeKeyboardInput || !mobileQuery.matches) return false;
     if (pane.nativeComposing) return true;
     if (!paneAcceptsInput(pane, false) || mobileKeyboardLocked || pane.snapshot) return false;
-    const box = composeBoxState(pane, helper);
+    let box = composeBoxState(pane, helper);
+    const typed = undoSmartPunctuation(pane, pane.composeSeen || composeShadow(pane), box);
+    if (typed) {
+      const prefix = pane.mobilePredictionPrefix || '';
+      helper.value = prefix + typed.text;
+      helper.setSelectionRange(prefix.length + typed.cursor, prefix.length + typed.cursor);
+      box = typed;
+    }
     const edit = composeEdit(
       composeShadow(pane), box, pane.terminal.modes?.applicationCursorKeysMode,
     );
@@ -2573,6 +2607,7 @@ const { WebglAddon } = globalThis.WebglAddon;
     if (!nativeKeyboardInput || !mobileQuery.matches || mobileKeyboardLocked) return;
     const pane = paneForKeyboardTarget(event.target);
     if (!pane) return;
+    pane.lastTypedKey = { key: event.key, at: performance.now() };
     if (event.key === 'Enter') {
       // Keep the native line break out of the helper: the terminal line is
       // already finished, and a leftover newline prevents the next edit from

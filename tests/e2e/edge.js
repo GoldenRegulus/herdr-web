@@ -236,6 +236,58 @@ async function phone(profile) {
     await k.enter();
     verdict(p('a double space becomes a period'), await shows(page, `${t}. x`));
   });
+  // iOS Smart Punctuation: the hyphen key, pressed after a hyphen, replaces
+  // that hyphen with a dash. This stands for that keystroke.
+  const smartDash = async () => {
+    const { value } = await k.box();
+    await k.select(value.length - 1, value.length);
+    await k.word('—');
+    await sleep(300);
+  };
+  test('two hyphens stay hyphens despite smart punctuation', async () => {
+    const t = token('h');
+    await k.type(`echo ${t}-`);
+    await smartDash();
+    await k.type('a');
+    await k.type('-');
+    await smartDash();
+    await smartDash();
+    await k.type('b');
+    await k.enter();
+    verdict(p('two hyphens stay hyphens despite smart punctuation'), await shows(page, `${t}--a---b`));
+  });
+  test('a dash picked on purpose is kept', async () => {
+    const t = token('j');
+    await k.type(`echo ${t}`);
+    await k.word('—');
+    await k.word('–');
+    await sleep(300);
+    await k.enter();
+    verdict(p('a dash picked on purpose is kept'), await shows(page, `${t}—–`));
+  });
+  test('quotes typed on the quote key stay straight', async () => {
+    const t = token('i');
+    await k.type(`echo ${t}`);
+    // The quote key reports itself and inserts the curly character.
+    for (const [key, text] of [["'", '‘'], ["'", '’'], ['"', '“'], ['"', '”']]) {
+      await k.cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key, text, unmodifiedText: key });
+      await k.cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key });
+      await sleep(60);
+    }
+    await k.type('x');
+    await k.enter();
+    // bash removes the quotes it received: '' and "" are empty strings.
+    verdict(p('quotes typed on the quote key stay straight'), await shows(page, `${t}x`));
+  });
+  test('a curly quote picked on purpose is kept', async () => {
+    const t = token('k');
+    await k.type(`echo ${t}`);
+    await sleep(700);
+    await k.word('’');
+    await sleep(300);
+    await k.enter();
+    verdict(p('a curly quote picked on purpose is kept'), await shows(page, `${t}’`));
+  });
   test('select all and delete clears only the line', async () => {
     const t = token('l');
     await k.type('echo junk');
