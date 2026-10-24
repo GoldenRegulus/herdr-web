@@ -115,9 +115,17 @@ class InputTransferTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(transfer.feed(b"\xf0\x9f"))
         self.assertFalse(transfer.ready.is_set())
         self.assertTrue(transfer.feed(b"\x99\x82"))
-        self.assertEqual(await transfer.command(),
-                         ({"type": "pane-paste", "stream_id": 1, "text": "🙂"}, None))
+        self.assertEqual(await transfer.command(), (
+            {"type": "pane-paste", "stream_id": 1, "text": "🙂", "bracketed": False},
+            None,
+        ))
         self.assertEqual(len(transfer.body), 0)
+
+    async def test_pane_paste_carries_the_bracketed_paste_mode(self):
+        transfer = make_transfer({**transfer_header(2, "pane-paste"), "bracketed": True})
+        self.assertTrue(transfer.feed(b"hi"))
+        command, _ = await transfer.command()
+        self.assertIs(command["bracketed"], True)
 
     async def test_invalid_sizes_kinds_and_chunk_bounds(self):
         for size in (True, False, 0, -1, 1.5, "4", MAX_CLIPBOARD_IMAGE_BYTES + 1):

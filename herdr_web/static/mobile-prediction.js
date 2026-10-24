@@ -212,31 +212,6 @@ export function terminalPredictionPrefix(
   return before.slice(0, before.length - editableBeforeCursor.length).slice(-maximumPrefixLength);
 }
 
-export function mobileTextWithoutRedundantSeparator(
-  previousText, nextText, nextCursor, staticPrefix = '',
-) {
-  if (!validText(previousText) || !validText(nextText)
-    || terminalCaretInput(nextText, nextCursor, nextCursor) === undefined) return undefined;
-  const previous = graphemes(previousText);
-  const next = graphemes(nextText);
-  let shared = 0;
-  while (shared < previous.length && shared < next.length
-    && previous[shared] === next[shared]) shared += 1;
-  let tail = 0;
-  while (tail < previous.length - shared && tail < next.length - shared
-    && previous[previous.length - tail - 1] === next[next.length - tail - 1]) tail += 1;
-  const inserted = next.slice(shared, next.length - tail);
-  const before = shared > 0 ? previous[shared - 1] : graphemes(staticPrefix).at(-1);
-  if (inserted[0] !== ' ' || !/^\s$/u.test(before || '')) {
-    return { text: nextText, cursor: nextCursor };
-  }
-  const separatorOffset = next.slice(0, shared).join('').length;
-  return {
-    text: next.slice(0, shared).join('') + next.slice(shared + 1).join(''),
-    cursor: nextCursor > separatorOffset ? nextCursor - 1 : nextCursor,
-  };
-}
-
 export function terminalTextInputDelta(
   previousText, nextText,
   previousCursor = previousText?.length, nextCursor = nextText?.length,

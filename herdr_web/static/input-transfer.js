@@ -20,6 +20,7 @@ export class InputTransfer {
         kind: this.operation.kind,
         stream_id: this.operation.streamId,
         extension: this.operation.extension,
+        bracketed: this.operation.bracketed === true,
         size: this.bytes.byteLength,
       });
       if (socket.bufferedAmount + new TextEncoder().encode(header).length > highWaterBytes) {

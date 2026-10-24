@@ -688,7 +688,6 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("The native textarea owns Backspace and its repeat", application)
         self.assertIn("if (!iosKeyboard || !mobileQuery.matches || mobileKeyboardLocked", application)
         self.assertIn("|| (imeKey && Boolean(pane?.nativeComposing))", application)
-        self.assertIn("pane.mobilePredictionConfirmed || pane.mobilePredictionPending", application)
         self.assertIn("The box value changed", application)
         self.assertNotIn("MOBILE_EDIT_RECONCILE_MS", application)
         self.assertNotIn("scheduleMobilePredictionReconciliation", application)

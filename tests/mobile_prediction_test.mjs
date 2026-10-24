@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   MOBILE_PREDICTION_TEXT_LIMIT,
-  mobileTextWithoutRedundantSeparator,
   terminalCaretInput,
   terminalHasEditableSuffix,
   terminalHasEditableText,
@@ -88,27 +87,6 @@ test('terminal shadow prefix excludes the owned editable suffix', () => {
   assert.equal(terminalPredictionPrefix(
     terminalWithRows(['unrelated output']), 'hello', 5,
   ), undefined);
-});
-
-test('native automatic separators are removed only after existing whitespace', () => {
-  assert.deepEqual(mobileTextWithoutRedundantSeparator('', ' hello', 6, 'prompt> '), {
-    text: 'hello', cursor: 5,
-  });
-  assert.deepEqual(mobileTextWithoutRedundantSeparator('one ', 'one  swipe', 10, 'prompt> '), {
-    text: 'one swipe', cursor: 9,
-  });
-  assert.deepEqual(mobileTextWithoutRedundantSeparator('one', 'one swipe', 9, 'prompt> '), {
-    text: 'one swipe', cursor: 9,
-  });
-  assert.deepEqual(mobileTextWithoutRedundantSeparator('hello', ' hello', 6, 'prompt> '), {
-    text: 'hello', cursor: 5,
-  });
-  assert.deepEqual(mobileTextWithoutRedundantSeparator('one ', 'one  ', 5, 'prompt> '), {
-    text: 'one ', cursor: 4,
-  });
-  assert.deepEqual(mobileTextWithoutRedundantSeparator('', ' ', 1, 'prompt> '), {
-    text: '', cursor: 0,
-  });
 });
 
 test('native input preserves unchanged text on both sides of the edit', () => {

@@ -377,3 +377,25 @@ test('the shadow crosses a row boundary and a delete crosses with it', () => {
   const edit = prediction.terminalTextInputDelta(shadow.text, next, 16, 15);
   assert.equal(edit.data, '\x7f', 'the delete crosses the row boundary');
 });
+
+test('a control key sends text that is still settling before itself', () => {
+  const h = harness('', 0, 'prompt> ');
+  h.type('prompt> echo ', 13);
+  h.type('prompt> echo quick', 18);
+  assert.equal(h.sent.join(''), '', 'a predictive word waits for the settle');
+  h.context.clearMobilePredictionState(h.pane, true);
+  h.sent.push('\r');
+  assert.deepEqual(h.sent, ['echo quick', '\r'], 'the word reaches the terminal ahead of Return');
+  assert.equal(h.pane.composeTimer, undefined, 'and the settle is cancelled');
+});
+
+test('a reset model judges the next keystroke on its own', () => {
+  const h = harness('', 0, 'prompt> ');
+  h.type('prompt> echo ab', 15);
+  h.context.clearMobilePredictionState(h.pane, true);
+  h.sent.length = 0;
+  h.pane.mobilePredictionPrefix = 'prompt> echo a';
+  h.helper.value = 'prompt> echo a';
+  h.type('prompt> echo aX', 15);
+  assert.deepEqual(h.sent, ['X'], 'one typed character goes out at once');
+});

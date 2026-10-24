@@ -51,6 +51,7 @@ class InputTransfer:
             "extension": extension,
             "stream_id": control.get("stream_id"),
         }
+        self.bracketed = control.get("bracketed") is True
         self.size = size
         self.body = bytearray()
         self.ready = asyncio.Event()
@@ -88,6 +89,7 @@ class InputTransfer:
                 "type": "pane-paste",
                 "stream_id": self.control["stream_id"],
                 "text": body.decode("utf-8"),
+                "bracketed": self.bracketed,
             }, None
         return self.control, body
 
