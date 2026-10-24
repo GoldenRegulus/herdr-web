@@ -1992,7 +1992,9 @@ const { WebglAddon } = globalThis.WebglAddon;
     // The keyboard traits must stay constant while the field is focused:
     // changing them makes the system keyboard rebuild, which pops the
     // prediction bar and can discard text that is being composed.
-    helper.setAttribute('autocorrect', 'on');
+    // Commands, flags and file names are not dictionary words: the keyboard
+    // must not replace what was typed.
+    helper.setAttribute('autocorrect', 'off');
     helper.setAttribute('autocapitalize', 'none');
     helper.setAttribute('autocomplete', 'off');
     helper.setAttribute('spellcheck', 'true');
