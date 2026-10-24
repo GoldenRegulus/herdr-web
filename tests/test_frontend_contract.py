@@ -686,7 +686,7 @@ class FrontendContractTests(unittest.TestCase):
         self.assertNotIn("document.execCommand('insertText'", application)
         self.assertIn("composeSync(pane)", application)
         self.assertIn("The native textarea owns Backspace and its repeat", application)
-        self.assertIn("if (!iosKeyboard || !mobileQuery.matches || mobileKeyboardLocked", application)
+        self.assertIn("A caret in the\n    // prompt is never valid on either.", application)
         self.assertIn("|| (imeKey && Boolean(pane?.nativeComposing))", application)
         self.assertIn("The box value changed", application)
         self.assertNotIn("MOBILE_EDIT_RECONCILE_MS", application)

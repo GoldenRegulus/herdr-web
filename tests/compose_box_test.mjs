@@ -182,17 +182,49 @@ test('a stale caret can never lock the box', () => {
   assert.equal(h.sent.join(''), 'c', 'typing goes through even from a caret the model lost');
 });
 
+function copyTerminal(rows, cols) {
+  const lines = rows.map(({ text, wrapped = false }) => ({
+    isWrapped: wrapped,
+    getCell: (column) => {
+      const padded = text.padEnd(cols);
+      return column < cols ? { getChars: () => padded[column], getWidth: () => 1 } : undefined;
+    },
+  }));
+  return { cols, buffer: { active: { getLine: (row) => lines[row] } } };
+}
+
 test('copy joins a wrapped row without a break and a newline with one', () => {
-  const rows = [
-    { isWrapped: false, translateToString: () => 'prompt> one' },
-    { isWrapped: true, translateToString: () => 'two' },
-    { isWrapped: false, translateToString: () => 'next' },
-  ];
-  const terminal = { buffer: { active: { getLine: (row) => rows[row] } } };
   const h = harness('', 0);
+  const terminal = copyTerminal([
+    { text: 'prompt> one' }, { text: 'two', wrapped: true }, { text: 'next' },
+  ], 20);
   assert.equal(
     h.context.snapshotCopyText(terminal, 0, ['prompt> one', 'two', 'next']),
     'prompt> onetwo\nnext',
+  );
+});
+
+test('copy joins a full row that Herdr drew without a wrap marker', () => {
+  const h = harness('', 0);
+  // Herdr positions every row itself and pads each one with spaces.
+  const terminal = copyTerminal([
+    { text: 'word0 word1 word' }, { text: '7 word8' }, { text: 'hard one' }, { text: 'hard two' },
+  ], 16);
+  assert.equal(
+    h.context.snapshotCopyText(terminal, 0, [
+      'word0 word1 word', '7 word8         ', 'hard one        ', 'hard two        ',
+    ]),
+    'word0 word1 word7 word8\nhard one\nhard two',
+    'no break inside a wrapped word, and no padding before a newline',
+  );
+});
+
+test('copy keeps the space of a wrap that fell on a word break', () => {
+  const h = harness('', 0);
+  const terminal = copyTerminal([{ text: 'aaaa bbbb ' }, { text: 'cccc' }, { text: 'short' }, { text: 'end' }], 10);
+  assert.equal(
+    h.context.snapshotCopyText(terminal, 0, ['aaaa bbbb ', 'cccc      ', 'short     ', 'end']),
+    'aaaa bbbb cccc\nshort\nend',
   );
 });
 

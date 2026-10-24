@@ -28,9 +28,23 @@ function caretIndex(parts, offset) {
   return undefined;
 }
 
-function moveCaret(from, to, applicationCursorKeys) {
+// A terminal line editor moves and deletes one character at a time. As in
+// readline, a character is a code point, and a zero-width mark belongs to the
+// one before it: 👍🏽 is two characters there, é with a combining accent one.
+const ZERO_WIDTH = /[\p{Mn}\p{Me}\u200d\ufe00-\ufe0f\u{e0100}-\u{e01ef}]/u;
+
+function terminalCharacters(parts) {
+  let count = 0;
+  for (const part of parts) {
+    count += Math.max(1, [...part].filter((point) => !ZERO_WIDTH.test(point)).length);
+  }
+  return count;
+}
+
+function moveCaret(parts, from, to, applicationCursorKeys) {
   const prefix = applicationCursorKeys ? '\x1bO' : '\x1b[';
-  return (prefix + (to < from ? 'D' : 'C')).repeat(Math.abs(to - from));
+  const steps = terminalCharacters(parts.slice(Math.min(from, to), Math.max(from, to)));
+  return (prefix + (to < from ? 'D' : 'C')).repeat(steps);
 }
 
 export function terminalCaretInput(text, from, to, applicationCursorKeys = false) {
@@ -39,7 +53,7 @@ export function terminalCaretInput(text, from, to, applicationCursorKeys = false
   const start = caretIndex(parts, from);
   const end = caretIndex(parts, to);
   if (start === undefined || end === undefined) return undefined;
-  return moveCaret(start, end, applicationCursorKeys);
+  return moveCaret(parts, start, end, applicationCursorKeys);
 }
 
 // The fold around the cursor covers the text being composed or confirmed.
@@ -228,7 +242,7 @@ export function terminalTextInputDelta(
     && previous[shared] === next[shared]) shared += 1;
   if (shared === previous.length && shared === next.length) {
     return {
-      data: moveCaret(from, to, applicationCursorKeys),
+      data: moveCaret(next, from, to, applicationCursorKeys),
       removed: 0,
       inserted: '',
       insertedStart: 0,
@@ -242,9 +256,10 @@ export function terminalTextInputDelta(
   const inserted = next.slice(shared, next.length - tail).join('');
   const insertedStart = next.slice(0, shared).join('').length;
   return {
-    data: moveCaret(from, shared + removed, applicationCursorKeys)
-      + DELETE_CHARACTER.repeat(removed) + inserted
-      + moveCaret(next.length - tail, to, applicationCursorKeys),
+    data: moveCaret(previous, from, shared + removed, applicationCursorKeys)
+      + DELETE_CHARACTER.repeat(terminalCharacters(previous.slice(shared, shared + removed)))
+      + inserted
+      + moveCaret(next, next.length - tail, to, applicationCursorKeys),
     removed,
     inserted,
     insertedStart,

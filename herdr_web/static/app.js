@@ -2139,11 +2139,16 @@ const { WebglAddon } = globalThis.WebglAddon;
 
   function followMobileCaret(pane, beforeBlur = false) {
     const helper = paneKeyboardHelper(pane);
-    // Android IMEs move the native selection without a user gesture, so caret
-    // following stays iOS-only until a device validates it.
-    if (!iosKeyboard || !mobileQuery.matches || mobileKeyboardLocked
+    if (!nativeKeyboardInput || !mobileQuery.matches || mobileKeyboardLocked
       || !helper || (!beforeBlur && document.activeElement !== helper)
       || helper.selectionStart !== helper.selectionEnd) return;
+    // Android IMEs move the native selection without a user gesture, so caret
+    // following stays iOS-only until a device validates it. A caret in the
+    // prompt is never valid on either.
+    if (!iosKeyboard) {
+      if (!pane.nativeComposing) keepCaretOutOfPrompt(pane, helper);
+      return;
+    }
     // A caret-only change sends cursor movement and no text. Anything else is
     // an edit and belongs to the value sync.
     if (composeBoxState(pane, helper).text !== pane.mobilePredictionText) return;
@@ -2228,7 +2233,18 @@ const { WebglAddon } = globalThis.WebglAddon;
   const COMPOSE_SETTLE_MS = 250;
   const COMPOSE_CONFIRM_MS = 1000;
 
+  // The prompt in front of the line cannot be edited. A caret moved into it
+  // shows at the start of the editable text, where typing will land.
+  function keepCaretOutOfPrompt(pane, helper) {
+    const prefix = pane.mobilePredictionPrefix || '';
+    if (helper.selectionStart < prefix.length && helper.selectionStart === helper.selectionEnd
+      && helper.value.startsWith(prefix)) {
+      helper.setSelectionRange(prefix.length, prefix.length);
+    }
+  }
+
   function composeBoxState(pane, helper) {
+    keepCaretOutOfPrompt(pane, helper);
     const cleaned = stripMobileControlCharacters(helper.value, mobileHelperCaret(helper));
     if (cleaned.text !== helper.value) {
       helper.value = cleaned.text;
@@ -2392,20 +2408,43 @@ const { WebglAddon } = globalThis.WebglAddon;
       && elapsedMs <= MOBILE_TAP_MAX_MS;
   }
 
+  // Herdr draws every row at an explicit position, so xterm rarely marks a
+  // row as wrapped. A row whose last cell holds text continues on the next
+  // row; Herdr clears unused cells with spaces. A wrap that falls on a word
+  // break leaves its space in the last cell, after text in the one before.
+  function snapshotRowContinues(terminal, row) {
+    const buffer = terminal.buffer.active;
+    if (buffer.getLine(row + 1)?.isWrapped === true) return true;
+    const line = buffer.getLine(row);
+    const filled = (cell) => !!cell && (cell.getWidth() === 0 || cell.getChars().trim() !== '');
+    const last = line?.getCell(terminal.cols - 1);
+    return filled(last) || (last?.getChars() === ' ' && filled(line.getCell(terminal.cols - 2)));
+  }
+
   // Hold-to-copy joins rows by their meaning: a wrapped row continues the
   // same line and joins with nothing, a hard break joins with a line break.
+  // The padding before a hard break is not text.
   function snapshotCopyText(terminal, firstRow, rowTexts) {
-    const buffer = terminal?.buffer?.active;
-    if (!buffer) return rowTexts.join('\n');
-    let text = '';
-    for (let index = 0; index < rowTexts.length; index += 1) {
-      if (index > 0) {
-        const line = buffer.getLine(firstRow + index);
-        text += line?.isWrapped === true ? '' : '\n';
-      }
-      text += rowTexts[index];
+    return rowTexts.map((rowText, index) => {
+      if (index === rowTexts.length - 1) return rowText.trimEnd();
+      return snapshotRowContinues(terminal, firstRow + index) ? rowText : `${rowText.trimEnd()}\n`;
+    }).join('');
+  }
+
+  // A pane's own selection copies by line meaning too.
+  function paneSelectionCopyText(terminal) {
+    const range = terminal.getSelectionPosition();
+    if (!range) return undefined;
+    const buffer = terminal.buffer.active;
+    const rowTexts = [];
+    for (let row = range.start.y; row <= range.end.y; row += 1) {
+      rowTexts.push(buffer.getLine(row)?.translateToString(
+        false,
+        row === range.start.y ? range.start.x : 0,
+        row === range.end.y ? range.end.x : terminal.cols,
+      ) ?? '');
     }
-    return text;
+    return snapshotCopyText(terminal, range.start.y, rowTexts);
   }
 
   // When the box holds nothing before the caret, the native delete has no
@@ -4749,6 +4788,13 @@ const { WebglAddon } = globalThis.WebglAddon;
     return [...rows.children].indexOf(element);
   };
   document.addEventListener('copy', (event) => {
+    const selected = [...paneTerminals.values()].find((candidate) => candidate.terminal.hasSelection());
+    if (selected) {
+      event.clipboardData?.setData('text/plain', paneSelectionCopyText(selected.terminal));
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      return;
+    }
     const pane = selectedPaneTerminal();
     if (!pane?.snapshot) return;
     const selection = document.getSelection();
@@ -4761,9 +4807,13 @@ const { WebglAddon } = globalThis.WebglAddon;
     if (rowTexts.length !== last - first + 1) return;
     const buffer = pane.terminal.buffer?.active;
     const baseRow = (buffer?.viewportY ?? 0) + first;
-    // Rebuild only when the rows match what the selection shows. Otherwise
-    // the browser's own text is the honest copy.
-    if (buffer?.getLine(baseRow)?.translateToString(true) !== rowTexts[0].trimEnd()) return;
+    // Rebuild only when the rows match what the selection shows: a selection
+    // can start and end inside a row. Otherwise the browser's own text is the
+    // honest copy.
+    // Herdr pads rows with written spaces, which xterm does not trim.
+    const rowText = (index) => buffer?.getLine(baseRow + index)?.translateToString(true).trimEnd();
+    if (!rowText(0)?.endsWith(rowTexts[0].trimEnd())
+      || !rowText(last - first)?.startsWith(rowTexts.at(-1).trimEnd())) return;
     event.clipboardData?.setData('text/plain', snapshotCopyText(pane.terminal, baseRow, rowTexts));
     event.preventDefault();
   }, true);
