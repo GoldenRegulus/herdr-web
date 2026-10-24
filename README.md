@@ -490,6 +490,12 @@ clipboard editor.
 Only sockets found under the selected config directory are attachable. The web
 client deliberately has no endpoint that accepts an arbitrary Unix-socket path.
 
+To see what a phone keyboard sends, open the page with `?inputlog`, for example
+`http://192.168.1.1:8765/?inputlog`. An overlay lists each key, input event,
+the end of the hidden input box, and the bytes sent to the terminal, with
+characters outside printable ASCII written as code points. The log stays on the
+page.
+
 ## Current scope
 
 The application provides backend selection, the terminal-faithful Full view,

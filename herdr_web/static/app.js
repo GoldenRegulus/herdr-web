@@ -140,6 +140,29 @@ const { WebglAddon } = globalThis.WebglAddon;
   const androidKeyboard = /Android/.test(navigator.userAgent)
     || navigator.userAgentData?.platform === 'Android';
   const nativeKeyboardInput = iosKeyboard || androidKeyboard;
+
+  // ?inputlog shows what the keyboard does and what reaches the terminal, on
+  // screen, for diagnosing a phone keyboard. Nothing leaves the page.
+  const inputLog = new URLSearchParams(location.search).has('inputlog')
+    ? (() => {
+      const view = document.createElement('pre');
+      view.className = 'input-log';
+      document.body.append(view);
+      // The first line describes the page and stays.
+      const header = `mobile=${mobileQuery.matches} ios=${iosKeyboard} android=${androidKeyboard} width=${innerWidth}`;
+      const lines = [];
+      return (line) => {
+        lines.push(line);
+        if (lines.length > 16) lines.shift();
+        view.textContent = [header, ...lines].join('\n');
+      };
+    })()
+    : undefined;
+  // A dash looks like a hyphen and a curly quote like a straight one: name
+  // every character outside printable ASCII.
+  const inputLogText = (text) => String(text ?? '').replace(
+    /[^\x20-\x7e]/gu, (character) => `\\u{${character.codePointAt(0).toString(16)}}`,
+  );
   // A touch-capable device owns the pane gesture in every layout, not only
   // the mobile layout. The stylesheet reads this marker to set touch-action.
   const touchInput = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
@@ -4285,6 +4308,7 @@ const { WebglAddon } = globalThis.WebglAddon;
   }
 
   function sendInput(data) {
+    inputLog?.(`sent "${inputLogText(data)}"`);
     try {
       if (viewMode === 'panes' && selectedPaneTerminal()?.snapshot) return;
       if (isDisposableMouseMotion(data)) {
@@ -4854,6 +4878,18 @@ const { WebglAddon } = globalThis.WebglAddon;
     event.clipboardData?.setData('text/plain', snapshotCopyText(pane.terminal, baseRow, rowTexts));
     event.preventDefault();
   }, true);
+  if (inputLog) {
+    // Window listeners run before the document ones that stop these events.
+    const boxEnd = (target) => inputLogText(String(target?.value ?? '').slice(-12));
+    window.addEventListener('keydown', (event) => {
+      inputLog(`key "${inputLogText(event.key)}" code=${event.keyCode}`);
+    }, true);
+    for (const type of ['beforeinput', 'input']) {
+      window.addEventListener(type, (event) => {
+        inputLog(`${type} ${event.inputType} "${inputLogText(event.data)}" box="${boxEnd(event.target)}"`);
+      }, true);
+    }
+  }
   document.addEventListener('keydown', handleMobileTerminalKeyDown, true);
   document.addEventListener('beforeinput', handleMobileTerminalBeforeInput, true);
   document.addEventListener('selectionchange', () => {
