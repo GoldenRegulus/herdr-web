@@ -2663,7 +2663,6 @@ const { WebglAddon } = globalThis.WebglAddon;
         retainedBytes,
         streamId: pane.streamId,
         text: normalized,
-        bracketed: pane.terminal.modes?.bracketedPasteMode === true,
       });
       drainInput();
       return true;
@@ -3850,7 +3849,6 @@ const { WebglAddon } = globalThis.WebglAddon;
           type: 'pane-paste',
           stream_id: operation.streamId,
           text: operation.text,
-          bracketed: operation.bracketed === true,
         }));
         continue;
       }

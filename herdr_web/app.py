@@ -2303,12 +2303,9 @@ async def run_panes_websocket(
                     continue
                 try:
                     pasted_text = validate_pane_paste_text(control.get("text"))
-                    # Bracketed paste is a program feature. Without it the
-                    # markers would reach the program as literal text.
-                    bracketed = control.get("bracketed") is True
                     await run_herdr_socket_api(
                         backend,
-                        "pane.send_input" if bracketed else "pane.send_text",
+                        "pane.send_input",
                         {"pane_id": request.pane_id, "text": pasted_text},
                     )
                     mark_interactive(stream_id)

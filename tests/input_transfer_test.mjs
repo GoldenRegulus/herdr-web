@@ -145,12 +145,3 @@ test('older servers receive the unchanged legacy message shapes', () => {
   assert.deepEqual(controls(h.ws).map((control) => control.type), ['pane-paste', 'clipboard-image']);
   assert.deepEqual([...binaryFrames(h.ws)[0]], [1, 2]);
 });
-
-test('a chunked pane paste carries the bracketed paste mode in its header', () => {
-  for (const bracketed of [true, false]) {
-    const h = harness();
-    h.append({ kind: 'pane-paste', streamId: 1, text: 'hello', bracketed });
-    h.drain();
-    assert.equal(controls(h.ws)[0].bracketed, bracketed);
-  }
-});
