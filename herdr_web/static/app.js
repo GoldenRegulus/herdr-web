@@ -2060,7 +2060,8 @@ const { WebglAddon } = globalThis.WebglAddon;
     // changing them makes the system keyboard rebuild, which pops the
     // prediction bar and can discard text that is being composed.
     // Commands, flags and file names are not dictionary words: the keyboard
-    // must not replace what was typed.
+    // must not replace what was typed. WebKit also switches off iOS smart
+    // quotes and dashes for a field with spellcheck off.
     helper.setAttribute('autocorrect', 'off');
     helper.setAttribute('autocapitalize', 'none');
     helper.setAttribute('autocomplete', 'off');
@@ -2379,67 +2380,6 @@ const { WebglAddon } = globalThis.WebglAddon;
     return true;
   }
 
-  // Keyboards rewrite what was typed: iOS Smart Punctuation makes a second
-  // hyphen a dash, a third period an ellipsis and straight quotes curly, and
-  // the "." shortcut makes a double space a period and a space. spellcheck is
-  // off, which makes WebKit switch off smart quotes and dashes, but not the
-  // rest. A command needs what the keys say. An iPhone's input log showed a
-  // rewrite as the key press, deletions of the characters it replaces, then
-  // the new text in their place; it can also come as one replacement. The
-  // deletions have gone out by then, so the replacement brings them back with
-  // the key itself. A character picked from a key's variants is left alone:
-  // it follows no such deletion, and a quote picked that way does not report
-  // the plain key.
-  const SMART_QUOTES = { '‘': "'", '’': "'", '“': '"', '”': '"' };
-  const SMART_REPLACEMENTS = { '—': '-', '–': '-', '…': '.', '. ': ' ' };
-  const SMART_PUNCTUATION_MS = 500;
-
-  function undoSmartPunctuation(pane, seen, box) {
-    const change = terminalTextInputDelta(seen.text, box.text, seen.cursor, box.cursor);
-    // A caret move between the edits of a rewrite changes no text.
-    if (!change || (!change.inserted && !change.removed)) return undefined;
-    const now = performance.now();
-    const key = now - (pane.lastTypedKey?.at ?? -Infinity) < SMART_PUNCTUATION_MS
-      ? pane.lastTypedKey.key : undefined;
-    const removed = seen.text.slice(
-      change.insertedStart, seen.text.length - (box.text.length - change.insertedEnd),
-    );
-    const only = (text, character) => !!text && [...text].every((part) => part === character);
-    const pending = pane.smartDeleted && now - pane.smartDeleted.at < SMART_PUNCTUATION_MS
-      ? pane.smartDeleted : undefined;
-    pane.smartDeleted = undefined;
-    if (!change.inserted) {
-      // A deletion made by a key that gets rewritten: hold on to what it
-      // removed, joined to an earlier one that ended where this one starts.
-      if (Object.values(SMART_REPLACEMENTS).includes(key) && only(removed, key)) {
-        const earlier = pending?.index === change.insertedStart + removed.length ? pending.deleted : '';
-        pane.smartDeleted = { index: change.insertedStart, deleted: removed + earlier, at: now };
-      }
-      return undefined;
-    }
-    const replaced = SMART_REPLACEMENTS[change.inserted];
-    let typed;
-    // A period and space can also be a keyboard's space after a typed period,
-    // which Android cannot tell apart: only the space key's own rewrite is
-    // undone. In one edit it arrives as a period before the existing space.
-    if (replaced && only(removed, replaced) && (replaced !== ' ' || key === ' ')) {
-      typed = removed + replaced;
-    } else if (change.inserted === '.' && !removed && key === ' ') {
-      typed = ' ';
-    } else if (replaced && key === replaced && !removed
-      && pending?.index === change.insertedStart && only(pending.deleted, replaced)) {
-      typed = pending.deleted + replaced;
-    } else if (!removed && SMART_QUOTES[change.inserted] && key === SMART_QUOTES[change.inserted]) {
-      typed = SMART_QUOTES[change.inserted];
-    }
-    if (!typed) return undefined;
-    const shift = typed.length - change.inserted.length;
-    return {
-      text: box.text.slice(0, change.insertedStart) + typed + box.text.slice(change.insertedEnd),
-      cursor: box.cursor >= change.insertedEnd ? box.cursor + shift : box.cursor,
-    };
-  }
-
   // The box value changed: make the line the terminal holds match it. Keyboard
   // events are never interpreted, only compared.
   function composeSync(pane) {
@@ -2447,14 +2387,7 @@ const { WebglAddon } = globalThis.WebglAddon;
     if (!helper || !nativeKeyboardInput || !mobileQuery.matches) return false;
     if (pane.nativeComposing) return true;
     if (!paneAcceptsInput(pane, false) || mobileKeyboardLocked || pane.snapshot) return false;
-    let box = composeBoxState(pane, helper);
-    const typed = undoSmartPunctuation(pane, pane.composeSeen || composeShadow(pane), box);
-    if (typed) {
-      const prefix = pane.mobilePredictionPrefix || '';
-      helper.value = prefix + typed.text;
-      helper.setSelectionRange(prefix.length + typed.cursor, prefix.length + typed.cursor);
-      box = typed;
-    }
+    const box = composeBoxState(pane, helper);
     const edit = composeEdit(
       composeShadow(pane), box, pane.terminal.modes?.applicationCursorKeysMode,
     );
@@ -2472,8 +2405,7 @@ const { WebglAddon } = globalThis.WebglAddon;
     // A held backspace must keep deleting across a row boundary, where the
     // keyboard deletes the break and a character together.
     const explicitDelete = change && change.inserted === '' && change.removed > 0;
-    // Restored punctuation came from one key press, so it is typing too.
-    if (typing || explicitDelete || typed) {
+    if (typing || explicitDelete) {
       pane.composeSettleSince = undefined;
       return composeWrite(pane, helper, box);
     }
@@ -2718,7 +2650,6 @@ const { WebglAddon } = globalThis.WebglAddon;
     if (!nativeKeyboardInput || !mobileQuery.matches || mobileKeyboardLocked) return;
     const pane = paneForKeyboardTarget(event.target);
     if (!pane) return;
-    pane.lastTypedKey = { key: event.key, at: performance.now() };
     if (event.key === 'Enter') {
       // Keep the native line break out of the helper: the terminal line is
       // already finished, and a leftover newline prevents the next edit from

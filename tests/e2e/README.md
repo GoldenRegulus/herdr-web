@@ -26,11 +26,9 @@ differently.
 - The keyboard dropped and raised again, with the line changed meanwhile.
 - Spacebar caret swipes, overshoots, a caret moved into the prompt,
   replacing a selection.
-- iOS rewrites: hyphens, periods, quotes and a double space stay as typed,
-  in the shapes an iPhone sends them, while a dash or curly quote picked
-  from a key's variants is kept. Spaces never reach the shell as no-break
-  spaces.
-- Tab completion, history recall, emoji, autocorrect,
+- The box asks the keyboard not to rewrite text (spellcheck and
+  autocorrect off), and spaces never reach the shell as no-break spaces.
+- Tab completion, history recall, emoji, a suggestion replacing a word,
   select all and delete, word delete, Ctrl+C, rotation, switching tabs,
   fast typing.
 - A multi-line prompt like an agent's (`ml.py`): newlines, joining lines,

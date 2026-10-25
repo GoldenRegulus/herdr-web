@@ -213,7 +213,7 @@ async function phone(profile) {
     await k.enter();
     verdict(p('emoji are deleted whole'), await shows(page, `${t}k`));
   });
-  test('autocorrect replaces a word in the middle', async () => {
+  test('a suggestion replaces a word in the middle', async () => {
     const t = token('a');
     await k.type(`echo teh ${t}`);
     await sleep(300);
@@ -222,89 +222,22 @@ async function phone(profile) {
     await k.word('the');
     await sleep(400);
     await k.enter();
-    verdict(p('autocorrect replaces a word in the middle'), await shows(page, `the ${t}`));
+    verdict(p('a suggestion replaces a word in the middle'), await shows(page, `the ${t}`));
   });
-  // The "." shortcut: the space key, pressed after a space, turns it into a
-  // period and a space.
-  for (const shape of ['two edits', 'one edit']) {
-    test(`a double space stays two spaces when iOS sends a period as ${shape}`, async () => {
-      const t = token('d');
-      await k.type(`echo "${t} `);
-      await sleep(200);
-      await k.cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: ' ', code: 'Space', windowsVirtualKeyCode: 32 });
-      await page.evaluate((twoEdits) => {
-        const box = document.activeElement;
-        const edit = (value, inputType, data) => {
-          box.value = value;
-          box.setSelectionRange(value.length, value.length);
-          box.dispatchEvent(new InputEvent('input', { inputType, data, bubbles: true }));
-        };
-        const before = box.value.slice(0, -1);
-        if (twoEdits) edit(before, 'deleteContentBackward', null);
-        edit(`${before}. `, 'insertText', '. ');
-      }, shape === 'two edits');
-      await k.cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: ' ', code: 'Space', windowsVirtualKeyCode: 32 });
-      await sleep(300);
-      await k.type('x"');
-      await k.enter();
-      verdict(p(`a double space stays two spaces when iOS sends a period as ${shape}`), await shows(page, `${t}  x`));
-    });
-  }
-  test('a period and space without the space key are kept', async () => {
-    const t = token('n');
-    await k.type(`echo ${t} `);
-    await sleep(700);
-    // Android reports no key: this may be a space after a typed period.
-    const { value } = await k.box();
-    await k.select(value.length - 1, value.length);
-    await k.word('. ');
-    await sleep(400);
-    await k.type('x');
-    await k.enter();
-    verdict(p('a period and space without the space key are kept'), await shows(page, `${t}. x`));
-  });
-  // iOS Smart Punctuation: the hyphen key, pressed after a hyphen, turns that
-  // hyphen into a dash. These stand for that keystroke. An iPhone's input log
-  // showed it as two edits: the key, a deletion of the hyphen, then the dash.
-  const smartDashInTwoEdits = async () => {
-    await k.cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: '-', code: 'Minus', windowsVirtualKeyCode: 189 });
-    await page.evaluate(() => {
-      const box = document.activeElement;
-      box.value = box.value.slice(0, -1);
-      box.setSelectionRange(box.value.length, box.value.length);
-      box.dispatchEvent(new InputEvent('input', { inputType: 'deleteContentBackward', bubbles: true }));
-    });
-    await k.word('—');
-    await k.cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: '-', code: 'Minus', windowsVirtualKeyCode: 189 });
-    await sleep(300);
-  };
-  // The same as one replacement, which other iOS versions may send.
-  const smartDashInOneEdit = async () => {
-    const { value } = await k.box();
-    await k.select(value.length - 1, value.length);
-    await k.word('—');
-    await sleep(300);
-  };
-  for (const [shape, smartDash] of [['two edits', smartDashInTwoEdits], ['one edit', smartDashInOneEdit]]) {
-    test(`two hyphens stay hyphens when iOS sends the dash as ${shape}`, async () => {
-      const t = token('h');
-      await k.type(`echo ${t}-`);
-      await smartDash();
-      await k.type('a');
-      await k.type('-');
-      await smartDash();
-      await smartDash();
-      await k.type('b');
-      await k.enter();
-      verdict(p(`two hyphens stay hyphens when iOS sends the dash as ${shape}`), await shows(page, `${t}--a---b`));
-    });
-  }
   // WebKit stores a trailing space as a no-break space, then swaps it back.
   const nbspSpace = () => page.evaluate(() => {
     const box = document.activeElement;
     box.value += ' ';
     box.setSelectionRange(box.value.length, box.value.length);
     box.dispatchEvent(new InputEvent('input', { inputType: 'insertText', data: ' ', bubbles: true }));
+  });
+  // spellcheck off makes WebKit switch off iOS smart quotes and dashes.
+  test('the box asks the keyboard not to rewrite text', async () => {
+    const traits = await page.evaluate(() => {
+      const box = document.activeElement;
+      return `${box.getAttribute('spellcheck')} ${box.getAttribute('autocorrect')}`;
+    });
+    check(p('the box asks the keyboard not to rewrite text'), traits === 'false off', `spellcheck autocorrect: ${traits}`);
   });
   test('the box keeps spaces as typed', async () => {
     const whiteSpace = await page.evaluate(() => getComputedStyle(document.activeElement).whiteSpace);
@@ -318,78 +251,6 @@ async function phone(profile) {
     await k.type(t);
     await k.enter();
     verdict(p('a no-break space reaches the shell as a space'), await shows(page, t));
-  });
-  test('three periods stay periods when iOS sends an ellipsis', async () => {
-    const t = token('e');
-    await k.type(`echo ${t}..`);
-    // The third period, as an iPhone sent it: the key, two deletions, then …
-    await k.cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: '.', code: 'Period', windowsVirtualKeyCode: 190 });
-    for (let index = 0; index < 2; index += 1) {
-      await page.evaluate(() => {
-        const box = document.activeElement;
-        box.value = box.value.slice(0, -1);
-        box.setSelectionRange(box.value.length, box.value.length);
-        box.dispatchEvent(new InputEvent('input', { inputType: 'deleteContentBackward', bubbles: true }));
-      });
-    }
-    await k.word('…');
-    await k.cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: '.', code: 'Period', windowsVirtualKeyCode: 190 });
-    await sleep(300);
-    await k.type('x');
-    await k.enter();
-    verdict(p('three periods stay periods when iOS sends an ellipsis'), await shows(page, `${t}...x`));
-  });
-  test('a quote after a no-break space goes out straight', async () => {
-    const t = token('q');
-    await k.type(`echo ${t}`);
-    await nbspSpace();
-    await sleep(200);
-    // The quote key reports itself; the curly quote replaces the no-break
-    // space's place along with a plain space.
-    await k.cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: "'", code: 'Quote', windowsVirtualKeyCode: 222 });
-    await page.evaluate(() => {
-      const box = document.activeElement;
-      box.value = `${box.value.slice(0, -1)} ‘`;
-      box.setSelectionRange(box.value.length, box.value.length);
-      box.dispatchEvent(new InputEvent('input', { inputType: 'insertText', data: '‘', bubbles: true }));
-    });
-    await k.cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: "'", code: 'Quote', windowsVirtualKeyCode: 222 });
-    await sleep(200);
-    await k.type("x'");
-    await k.enter();
-    verdict(p('a quote after a no-break space goes out straight'), await shows(page, `${t} x`));
-  });
-  test('a dash picked on purpose is kept', async () => {
-    const t = token('j');
-    await k.type(`echo ${t}`);
-    await k.word('—');
-    await k.word('–');
-    await sleep(300);
-    await k.enter();
-    verdict(p('a dash picked on purpose is kept'), await shows(page, `${t}—–`));
-  });
-  test('quotes typed on the quote key stay straight', async () => {
-    const t = token('i');
-    await k.type(`echo ${t}`);
-    // The quote key reports itself and inserts the curly character.
-    for (const [key, text] of [["'", '‘'], ["'", '’'], ['"', '“'], ['"', '”']]) {
-      await k.cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key, text, unmodifiedText: key });
-      await k.cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key });
-      await sleep(60);
-    }
-    await k.type('x');
-    await k.enter();
-    // bash removes the quotes it received: '' and "" are empty strings.
-    verdict(p('quotes typed on the quote key stay straight'), await shows(page, `${t}x`));
-  });
-  test('a curly quote picked on purpose is kept', async () => {
-    const t = token('k');
-    await k.type(`echo ${t}`);
-    await sleep(700);
-    await k.word('’');
-    await sleep(300);
-    await k.enter();
-    verdict(p('a curly quote picked on purpose is kept'), await shows(page, `${t}’`));
   });
   test('select all and delete clears only the line', async () => {
     const t = token('l');

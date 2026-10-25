@@ -432,67 +432,7 @@ test('a reset model judges the next keystroke on its own', () => {
   assert.deepEqual(h.sent, ['X'], 'one typed character goes out at once');
 });
 
-test('a hyphen that iOS turned into a dash stays two hyphens', () => {
-  const h = harness('', 0, 'prompt> ');
-  h.type('prompt> ls -', 12);
-  // The second hyphen: iOS replaces the first with an em dash.
-  h.type('prompt> ls —', 12, { inputType: 'insertReplacementText' });
-  assert.equal(h.helper.value, 'prompt> ls --', 'the box shows what was typed');
-  assert.equal(h.sent.join(''), 'ls --', 'and the terminal receives two hyphens');
-  h.type('prompt> ls --a', 14);
-  assert.equal(h.sent.join(''), 'ls --a');
-});
-
-test('a dash picked on purpose is kept', () => {
-  const h = harness('', 0, 'prompt> ');
-  h.type('prompt> a', 9);
-  h.type('prompt> a—', 10);
-  assert.equal(h.sent.join(''), 'a—', 'inserting a dash replaces no hyphen');
-  h.type('prompt> a—-', 11);
-  h.type('prompt> a——', 11);
-  assert.equal(h.helper.value, 'prompt> a—--', 'only the hyphen iOS replaced comes back');
-});
-
-test('a curly quote from the plain quote key goes out straight', () => {
-  const h = harness('', 0, 'prompt> ');
-  h.pane.lastTypedKey = { key: "'", at: Date.now() };
-  h.type('prompt> ’', 9);
-  assert.equal(h.sent.join(''), "'");
-  assert.equal(h.helper.value, "prompt> '");
-  h.pane.lastTypedKey = { key: '’', at: Date.now() };
-  h.type("prompt> '’", 10);
-  assert.equal(h.sent.join(''), "'’", 'a curly quote picked from the key variants is kept');
-});
-
-test('a dash that iOS sends as a delete and an insert stays two hyphens', () => {
-  // The sequence an iPhone sent for a second hyphen, from its input log.
-  const h = harness('', 0, 'prompt> ');
-  h.type('prompt> a', 9);
-  h.pane.lastTypedKey = { key: '-', at: Date.now() };
-  h.type('prompt> a-', 10);
-  h.pane.lastTypedKey = { key: '-', at: Date.now() };
-  h.type('prompt> a', 9, { inputType: 'deleteContentBackward' });
-  // iOS reports the caret move between the two edits.
-  h.caret(9);
-  h.type('prompt> a—', 10);
-  assert.equal(h.helper.value, 'prompt> a--', 'the box shows what was typed');
-  assert.equal(h.sent.join(''), 'a-\x7f--', 'and the terminal ends with two hyphens');
-  h.type('prompt> a--b', 12);
-  assert.equal(h.sent.join(''), 'a-\x7f--b');
-});
-
-test('a dash picked after deleting a hyphen with backspace is kept', () => {
-  const h = harness('', 0, 'prompt> ');
-  h.type('prompt> a', 9);
-  h.type('prompt> a-', 10);
-  h.pane.lastTypedKey = { key: 'Backspace', at: Date.now() };
-  h.type('prompt> a', 9, { inputType: 'deleteContentBackward' });
-  h.type('prompt> a—', 10);
-  assert.equal(h.sent.join(''), 'a-\x7f—', 'the deletion was not the hyphen key');
-});
-
-// Replays of an iPhone's input log. `typeEach` types like a keyboard: one
-// input event per character.
+// Types like a keyboard: one input event per character.
 function typeEach(h, prefix, text, from = '') {
   let value = from;
   for (const character of text) {
@@ -504,59 +444,9 @@ function typeEach(h, prefix, text, from = '') {
 test('a space that WebKit stores as a no-break space reaches the shell as a space', () => {
   const h = harness('', 0, 'prompt> ');
   typeEach(h, 'prompt> ', 'echo');
-  h.type('prompt> echo ', 13);
+  h.type('prompt> echo\u00a0', 13);
   assert.equal(h.sent.join(''), 'echo ', 'a shell reads a no-break space as part of a word');
   // At the next key WebKit turns it back into a space: nothing to resend.
   h.type('prompt> echo a', 14);
   assert.equal(h.sent.join(''), 'echo a');
-});
-
-test('curly quotes typed on the quote keys go out straight, as an iPhone sends them', () => {
-  const h = harness('', 0, 'prompt> ');
-  typeEach(h, 'prompt> ', 'echo');
-  h.type('prompt> echo ', 13);
-  h.pane.lastTypedKey = { key: '"', at: Date.now() };
-  h.type('prompt> echo “', 14);
-  assert.equal(h.helper.value, 'prompt> echo "');
-  h.type('prompt> echo "b', 15);
-  h.pane.lastTypedKey = { key: '"', at: Date.now() };
-  h.type('prompt> echo "b”', 16);
-  assert.equal(h.sent.join(''), 'echo "b"');
-});
-
-test('three periods stay periods when iOS sends an ellipsis', () => {
-  const h = harness('', 0, 'prompt> ');
-  typeEach(h, 'prompt> ', 'echo ..');
-  // The third period: the key, two deletions, then the ellipsis.
-  h.pane.lastTypedKey = { key: '.', at: Date.now() };
-  h.type('prompt> echo .', 14, { inputType: 'deleteContentBackward' });
-  h.type('prompt> echo ', 13, { inputType: 'deleteContentBackward' });
-  h.caret(13);
-  h.type('prompt> echo …', 14);
-  assert.equal(h.helper.value, 'prompt> echo ...', 'the box shows what was typed');
-  assert.equal(h.sent.join(''), 'echo ..\x7f\x7f...', 'and the terminal ends with three periods');
-});
-
-test('a double space that iOS turns into a period stays two spaces', () => {
-  for (const shape of ['two edits', 'one edit']) {
-    const h = harness('', 0, 'prompt> ');
-    typeEach(h, 'prompt> ', 'a');
-    h.type('prompt> a ', 10);
-    h.pane.lastTypedKey = { key: ' ', at: Date.now() };
-    if (shape === 'two edits') h.type('prompt> a', 9, { inputType: 'deleteContentBackward' });
-    h.type('prompt> a. ', 11);
-    assert.equal(h.helper.value, 'prompt> a  ', `${shape}: the box shows what was typed`);
-    h.type('prompt> a  b', 12);
-    assert.equal(h.sent.join('').replace(/ \x7f/g, ''), 'a  b', `${shape}: the terminal ends with two spaces`);
-  }
-});
-
-test('a period and space without the space key are left alone', () => {
-  // Android reports no keys: this may be a space after a typed period.
-  const h = harness('', 0, 'prompt> ');
-  typeEach(h, 'prompt> ', 'a ');
-  h.pane.lastTypedKey = { key: 'Unidentified', at: Date.now() };
-  h.type('prompt> a. ', 11);
-  assert.equal(h.helper.value, 'prompt> a. ');
-  assert.ok(h.sent.join('').includes('.'), 'the period goes to the terminal');
 });
