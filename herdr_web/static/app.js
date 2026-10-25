@@ -2378,17 +2378,34 @@ const { WebglAddon } = globalThis.WebglAddon;
   // alone: it is inserted without replacing a hyphen, and without the plain
   // key reported as pressed.
   const SMART_QUOTES = { '‘': "'", '’': "'", '“': '"', '”': '"' };
+  const SMART_PUNCTUATION_MS = 500;
 
   function undoSmartPunctuation(pane, seen, box) {
     const change = terminalTextInputDelta(seen.text, box.text, seen.cursor, box.cursor);
-    if (!change) return undefined;
+    // A caret move between the two edits of a dash changes no text.
+    if (!change || (!change.inserted && !change.removed)) return undefined;
+    const now = performance.now();
+    const keyPressed = (key) => pane.lastTypedKey?.key === key
+      && now - pane.lastTypedKey.at < SMART_PUNCTUATION_MS;
+    const dash = change.inserted === '—' || change.inserted === '–';
+    const replacesHyphen = change.removed === 1
+      && seen.text.slice(change.insertedStart, change.insertedStart + 1) === '-';
+    // iOS sends the dash as two edits, measured on an iPhone: the hyphen key
+    // deletes the previous hyphen, then the dash is inserted in its place.
+    // The deletion has already gone out, so the dash brings back both.
+    if (!change.inserted && replacesHyphen && keyPressed('-')) {
+      pane.smartDashDeletedAt = { index: change.insertedStart, at: now };
+      return undefined;
+    }
+    const followsDeletedHyphen = change.removed === 0
+      && pane.smartDashDeletedAt?.index === change.insertedStart
+      && now - pane.smartDashDeletedAt.at < SMART_PUNCTUATION_MS;
+    pane.smartDashDeletedAt = undefined;
     let typed;
-    if ((change.inserted === '—' || change.inserted === '–') && change.removed === 1
-      && seen.text.slice(change.insertedStart, change.insertedStart + 1) === '-') {
+    if (dash && (replacesHyphen || followsDeletedHyphen)) {
       typed = '--';
     } else if (change.removed === 0 && SMART_QUOTES[change.inserted]
-      && pane.lastTypedKey?.key === SMART_QUOTES[change.inserted]
-      && performance.now() - pane.lastTypedKey.at < 500) {
+      && keyPressed(SMART_QUOTES[change.inserted])) {
       typed = SMART_QUOTES[change.inserted];
     }
     if (!typed) return undefined;
@@ -2431,7 +2448,8 @@ const { WebglAddon } = globalThis.WebglAddon;
     // A held backspace must keep deleting across a row boundary, where the
     // keyboard deletes the break and a character together.
     const explicitDelete = change && change.inserted === '' && change.removed > 0;
-    if (typing || explicitDelete) {
+    // Restored punctuation came from one key press, so it is typing too.
+    if (typing || explicitDelete || typed) {
       pane.composeSettleSince = undefined;
       return composeWrite(pane, helper, box);
     }

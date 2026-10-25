@@ -236,26 +236,42 @@ async function phone(profile) {
     await k.enter();
     verdict(p('a double space becomes a period'), await shows(page, `${t}. x`));
   });
-  // iOS Smart Punctuation: the hyphen key, pressed after a hyphen, replaces
-  // that hyphen with a dash. This stands for that keystroke.
-  const smartDash = async () => {
+  // iOS Smart Punctuation: the hyphen key, pressed after a hyphen, turns that
+  // hyphen into a dash. These stand for that keystroke. An iPhone's input log
+  // showed it as two edits: the key, a deletion of the hyphen, then the dash.
+  const smartDashInTwoEdits = async () => {
+    await k.cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: '-', code: 'Minus', windowsVirtualKeyCode: 189 });
+    await page.evaluate(() => {
+      const box = document.activeElement;
+      box.value = box.value.slice(0, -1);
+      box.setSelectionRange(box.value.length, box.value.length);
+      box.dispatchEvent(new InputEvent('input', { inputType: 'deleteContentBackward', bubbles: true }));
+    });
+    await k.word('—');
+    await k.cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: '-', code: 'Minus', windowsVirtualKeyCode: 189 });
+    await sleep(300);
+  };
+  // The same as one replacement, which other iOS versions may send.
+  const smartDashInOneEdit = async () => {
     const { value } = await k.box();
     await k.select(value.length - 1, value.length);
     await k.word('—');
     await sleep(300);
   };
-  test('two hyphens stay hyphens despite smart punctuation', async () => {
-    const t = token('h');
-    await k.type(`echo ${t}-`);
-    await smartDash();
-    await k.type('a');
-    await k.type('-');
-    await smartDash();
-    await smartDash();
-    await k.type('b');
-    await k.enter();
-    verdict(p('two hyphens stay hyphens despite smart punctuation'), await shows(page, `${t}--a---b`));
-  });
+  for (const [shape, smartDash] of [['two edits', smartDashInTwoEdits], ['one edit', smartDashInOneEdit]]) {
+    test(`two hyphens stay hyphens when iOS sends the dash as ${shape}`, async () => {
+      const t = token('h');
+      await k.type(`echo ${t}-`);
+      await smartDash();
+      await k.type('a');
+      await k.type('-');
+      await smartDash();
+      await smartDash();
+      await k.type('b');
+      await k.enter();
+      verdict(p(`two hyphens stay hyphens when iOS sends the dash as ${shape}`), await shows(page, `${t}--a---b`));
+    });
+  }
   test('a dash picked on purpose is kept', async () => {
     const t = token('j');
     await k.type(`echo ${t}`);

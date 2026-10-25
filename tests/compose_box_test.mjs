@@ -463,3 +463,30 @@ test('a curly quote from the plain quote key goes out straight', () => {
   h.type("prompt> '’", 10);
   assert.equal(h.sent.join(''), "'’", 'a curly quote picked from the key variants is kept');
 });
+
+test('a dash that iOS sends as a delete and an insert stays two hyphens', () => {
+  // The sequence an iPhone sent for a second hyphen, from its input log.
+  const h = harness('', 0, 'prompt> ');
+  h.type('prompt> a', 9);
+  h.pane.lastTypedKey = { key: '-', at: Date.now() };
+  h.type('prompt> a-', 10);
+  h.pane.lastTypedKey = { key: '-', at: Date.now() };
+  h.type('prompt> a', 9, { inputType: 'deleteContentBackward' });
+  // iOS reports the caret move between the two edits.
+  h.caret(9);
+  h.type('prompt> a—', 10);
+  assert.equal(h.helper.value, 'prompt> a--', 'the box shows what was typed');
+  assert.equal(h.sent.join(''), 'a-\x7f--', 'and the terminal ends with two hyphens');
+  h.type('prompt> a--b', 12);
+  assert.equal(h.sent.join(''), 'a-\x7f--b');
+});
+
+test('a dash picked after deleting a hyphen with backspace is kept', () => {
+  const h = harness('', 0, 'prompt> ');
+  h.type('prompt> a', 9);
+  h.type('prompt> a-', 10);
+  h.pane.lastTypedKey = { key: 'Backspace', at: Date.now() };
+  h.type('prompt> a', 9, { inputType: 'deleteContentBackward' });
+  h.type('prompt> a—', 10);
+  assert.equal(h.sent.join(''), 'a-\x7f—', 'the deletion was not the hyphen key');
+});
