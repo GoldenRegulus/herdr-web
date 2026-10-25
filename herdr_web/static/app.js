@@ -141,23 +141,50 @@ const { WebglAddon } = globalThis.WebglAddon;
     || navigator.userAgentData?.platform === 'Android';
   const nativeKeyboardInput = iosKeyboard || androidKeyboard;
 
-  // ?inputlog shows what the keyboard does and what reaches the terminal, on
-  // screen, for diagnosing a phone keyboard. Nothing leaves the page.
-  const inputLog = new URLSearchParams(location.search).has('inputlog')
-    ? (() => {
-      const view = document.createElement('pre');
-      view.className = 'input-log';
-      document.body.append(view);
-      // The first line describes the page and stays.
-      const header = `mobile=${mobileQuery.matches} ios=${iosKeyboard} android=${androidKeyboard} width=${innerWidth}`;
-      const lines = [];
-      return (line) => {
-        lines.push(line);
-        if (lines.length > 16) lines.shift();
-        view.textContent = [header, ...lines].join('\n');
-      };
-    })()
-    : undefined;
+  // The input log shows what the keyboard does and what reaches the terminal,
+  // on screen, for diagnosing a phone keyboard. It is switched on in the
+  // browse menu, or with ?inputlog, and nothing leaves the page.
+  const INPUT_LOG_KEY = 'herdr-web-input-log';
+  const inputLogView = document.createElement('pre');
+  inputLogView.className = 'input-log';
+  inputLogView.hidden = true;
+  document.body.append(inputLogView);
+  const inputLogLines = [];
+  let inputLogEnabled = new URLSearchParams(location.search).has('inputlog') || readInputLogEnabled();
+
+  function readInputLogEnabled() {
+    try {
+      return localStorage.getItem(INPUT_LOG_KEY) === 'true';
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function setInputLogEnabled(enabled) {
+    inputLogEnabled = enabled;
+    inputLogLines.length = 0;
+    try {
+      if (enabled) localStorage.setItem(INPUT_LOG_KEY, 'true');
+      else localStorage.removeItem(INPUT_LOG_KEY);
+    } catch (_) {
+      // The log still applies for this page when storage is unavailable.
+    }
+    renderInputLog();
+  }
+
+  function renderInputLog() {
+    inputLogView.hidden = !inputLogEnabled;
+    // The first line describes the page and stays.
+    const header = `mobile=${mobileQuery.matches} ios=${iosKeyboard} android=${androidKeyboard} width=${innerWidth}`;
+    inputLogView.textContent = [header, ...inputLogLines].join('\n');
+  }
+
+  function inputLog(line) {
+    if (!inputLogEnabled) return;
+    inputLogLines.push(line);
+    if (inputLogLines.length > 16) inputLogLines.shift();
+    renderInputLog();
+  }
   // A dash looks like a hyphen and a curly quote like a straight one: name
   // every character outside printable ASCII.
   const inputLogText = (text) => String(text ?? '').replace(
@@ -1042,7 +1069,24 @@ const { WebglAddon } = globalThis.WebglAddon;
     const options = document.createElement('div');
     options.className = 'sheet-options';
     options.append(sheetHeading('Terminal size'), terminalZoomControls());
+    options.append(sheetHeading('Diagnostics'), inputLogToggle());
     sheetContent.append(options);
+  }
+
+  function inputLogToggle() {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'more-action';
+    const sync = () => {
+      button.textContent = inputLogEnabled ? 'Hide input log' : 'Show input log';
+      button.setAttribute('aria-pressed', String(inputLogEnabled));
+    };
+    button.addEventListener('click', () => {
+      setInputLogEnabled(!inputLogEnabled);
+      sync();
+    });
+    sync();
+    return button;
   }
 
   function sheetItem(label, detail, current, statusValue, action) {
@@ -4308,7 +4352,7 @@ const { WebglAddon } = globalThis.WebglAddon;
   }
 
   function sendInput(data) {
-    inputLog?.(`sent "${inputLogText(data)}"`);
+    inputLog(`sent "${inputLogText(data)}"`);
     try {
       if (viewMode === 'panes' && selectedPaneTerminal()?.snapshot) return;
       if (isDisposableMouseMotion(data)) {
@@ -4878,18 +4922,17 @@ const { WebglAddon } = globalThis.WebglAddon;
     event.clipboardData?.setData('text/plain', snapshotCopyText(pane.terminal, baseRow, rowTexts));
     event.preventDefault();
   }, true);
-  if (inputLog) {
-    // Window listeners run before the document ones that stop these events.
-    const boxEnd = (target) => inputLogText(String(target?.value ?? '').slice(-12));
-    window.addEventListener('keydown', (event) => {
-      inputLog(`key "${inputLogText(event.key)}" code=${event.keyCode}`);
+  // Window listeners run before the document ones that stop these events.
+  const inputLogBoxEnd = (target) => inputLogText(String(target?.value ?? '').slice(-12));
+  window.addEventListener('keydown', (event) => {
+    inputLog(`key "${inputLogText(event.key)}" code=${event.keyCode}`);
+  }, true);
+  for (const type of ['beforeinput', 'input']) {
+    window.addEventListener(type, (event) => {
+      inputLog(`${type} ${event.inputType} "${inputLogText(event.data)}" box="${inputLogBoxEnd(event.target)}"`);
     }, true);
-    for (const type of ['beforeinput', 'input']) {
-      window.addEventListener(type, (event) => {
-        inputLog(`${type} ${event.inputType} "${inputLogText(event.data)}" box="${boxEnd(event.target)}"`);
-      }, true);
-    }
   }
+  renderInputLog();
   document.addEventListener('keydown', handleMobileTerminalKeyDown, true);
   document.addEventListener('beforeinput', handleMobileTerminalBeforeInput, true);
   document.addEventListener('selectionchange', () => {
