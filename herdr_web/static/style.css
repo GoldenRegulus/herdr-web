@@ -517,6 +517,9 @@ header {
 .pane-snapshot-view .xterm-helper-textarea { pointer-events: none !important; }
 .pane-terminal .xterm-viewport { overflow-y: hidden; }
 .xterm-helper-textarea.mobile-keyboard-target {
+  /* xterm's nowrap collapses spaces, and WebKit then types a trailing space
+     as a no-break space. pre keeps the line unwrapped and spaces as typed. */
+  white-space: pre;
   -webkit-appearance: none;
   -webkit-touch-callout: default;
   appearance: none;

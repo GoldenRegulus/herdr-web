@@ -272,6 +272,66 @@ async function phone(profile) {
       verdict(p(`two hyphens stay hyphens when iOS sends the dash as ${shape}`), await shows(page, `${t}--a---b`));
     });
   }
+  // WebKit stores a trailing space as a no-break space, then swaps it back.
+  const nbspSpace = () => page.evaluate(() => {
+    const box = document.activeElement;
+    box.value += ' ';
+    box.setSelectionRange(box.value.length, box.value.length);
+    box.dispatchEvent(new InputEvent('input', { inputType: 'insertText', data: ' ', bubbles: true }));
+  });
+  test('the box keeps spaces as typed', async () => {
+    const whiteSpace = await page.evaluate(() => getComputedStyle(document.activeElement).whiteSpace);
+    check(p('the box keeps spaces as typed'), whiteSpace === 'pre', `white-space: ${whiteSpace}`);
+  });
+  test('a no-break space reaches the shell as a space', async () => {
+    const t = token('s');
+    await k.type('echo');
+    await nbspSpace();
+    await sleep(200);
+    await k.type(t);
+    await k.enter();
+    verdict(p('a no-break space reaches the shell as a space'), await shows(page, t));
+  });
+  test('three periods stay periods when iOS sends an ellipsis', async () => {
+    const t = token('e');
+    await k.type(`echo ${t}..`);
+    // The third period, as an iPhone sent it: the key, two deletions, then …
+    await k.cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: '.', code: 'Period', windowsVirtualKeyCode: 190 });
+    for (let index = 0; index < 2; index += 1) {
+      await page.evaluate(() => {
+        const box = document.activeElement;
+        box.value = box.value.slice(0, -1);
+        box.setSelectionRange(box.value.length, box.value.length);
+        box.dispatchEvent(new InputEvent('input', { inputType: 'deleteContentBackward', bubbles: true }));
+      });
+    }
+    await k.word('…');
+    await k.cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: '.', code: 'Period', windowsVirtualKeyCode: 190 });
+    await sleep(300);
+    await k.type('x');
+    await k.enter();
+    verdict(p('three periods stay periods when iOS sends an ellipsis'), await shows(page, `${t}...x`));
+  });
+  test('a quote after a no-break space goes out straight', async () => {
+    const t = token('q');
+    await k.type(`echo ${t}`);
+    await nbspSpace();
+    await sleep(200);
+    // The quote key reports itself; the curly quote replaces the no-break
+    // space's place along with a plain space.
+    await k.cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: "'", code: 'Quote', windowsVirtualKeyCode: 222 });
+    await page.evaluate(() => {
+      const box = document.activeElement;
+      box.value = `${box.value.slice(0, -1)} ‘`;
+      box.setSelectionRange(box.value.length, box.value.length);
+      box.dispatchEvent(new InputEvent('input', { inputType: 'insertText', data: '‘', bubbles: true }));
+    });
+    await k.cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: "'", code: 'Quote', windowsVirtualKeyCode: 222 });
+    await sleep(200);
+    await k.type("x'");
+    await k.enter();
+    verdict(p('a quote after a no-break space goes out straight'), await shows(page, `${t} x`));
+  });
   test('a dash picked on purpose is kept', async () => {
     const t = token('j');
     await k.type(`echo ${t}`);

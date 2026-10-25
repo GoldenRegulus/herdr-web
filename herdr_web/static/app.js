@@ -2064,12 +2064,18 @@ const { WebglAddon } = globalThis.WebglAddon;
     helper.setAttribute('autocorrect', 'off');
     helper.setAttribute('autocapitalize', 'none');
     helper.setAttribute('autocomplete', 'off');
-    helper.setAttribute('spellcheck', 'true');
+    helper.setAttribute('spellcheck', 'false');
     helper.setAttribute('enterkeyhint', 'send');
   }
 
   function mobilePredictionHelperValue(pane) {
     return `${pane?.mobilePredictionPrefix || ''}${pane?.mobilePredictionText || ''}`;
+  }
+
+  // WebKit can store a typed space as a no-break space, which a shell would
+  // read as part of a word. Read the box with plain spaces.
+  function mobileBoxValue(helper) {
+    return helper.value.replace(/\u00a0/g, ' ');
   }
 
   function restoreMobilePredictionHelper(pane) {
@@ -2141,7 +2147,7 @@ const { WebglAddon } = globalThis.WebglAddon;
         // The base line in front of the editable text changed. Move the box
         // with it, or the box value stops matching the line and typing is
         // silently ignored. Never rewrite while text is waiting to be written.
-        if (helper.value === oldPrefix + pane.mobilePredictionText) {
+        if (mobileBoxValue(helper) === oldPrefix + pane.mobilePredictionText) {
           const at = Math.max(0, helper.selectionStart - oldPrefix.length);
           pane.mobilePredictionPrefix = prefix;
           helper.value = prefix + pane.mobilePredictionText;
@@ -2184,7 +2190,7 @@ const { WebglAddon } = globalThis.WebglAddon;
     // Safari may queue selectionchange behind blur. Send that final movement
     // before xterm clears the helper, then retain the last sent caret position.
     followMobileCaret(pane, true);
-    if (helper.value !== mobilePredictionHelperValue(pane)) {
+    if (mobileBoxValue(helper) !== mobilePredictionHelperValue(pane)) {
       clearMobilePredictionState(pane);
       return;
     }
@@ -2307,15 +2313,16 @@ const { WebglAddon } = globalThis.WebglAddon;
   function keepCaretOutOfPrompt(pane, helper) {
     const prefix = pane.mobilePredictionPrefix || '';
     if (helper.selectionStart < prefix.length && helper.selectionStart === helper.selectionEnd
-      && helper.value.startsWith(prefix)) {
+      && mobileBoxValue(helper).startsWith(prefix)) {
       helper.setSelectionRange(prefix.length, prefix.length);
     }
   }
 
   function composeBoxState(pane, helper) {
     keepCaretOutOfPrompt(pane, helper);
-    const cleaned = stripMobileControlCharacters(helper.value, mobileHelperCaret(helper));
-    if (cleaned.text !== helper.value) {
+    const raw = mobileBoxValue(helper);
+    const cleaned = stripMobileControlCharacters(raw, mobileHelperCaret(helper));
+    if (cleaned.text !== raw) {
       helper.value = cleaned.text;
       helper.setSelectionRange(cleaned.cursor, cleaned.cursor);
     }
@@ -2372,40 +2379,49 @@ const { WebglAddon } = globalThis.WebglAddon;
     return true;
   }
 
-  // iOS Smart Punctuation rewrites what was typed: a second hyphen turns the
-  // first into a dash, and a straight quote comes out curly. A command needs
-  // what the keys say. A dash or quote picked from a key's variants is left
-  // alone: it is inserted without replacing a hyphen, and without the plain
-  // key reported as pressed.
+  // iOS Smart Punctuation rewrites what was typed: a second hyphen becomes a
+  // dash, a third period an ellipsis, straight quotes curly. A command needs
+  // what the keys say. An iPhone's input log showed the rewrite as the key
+  // press, deletions of the characters it replaces, then the new character in
+  // their place; it can also come as one replacement. The deletions have gone
+  // out by then, so the replacement brings them back with the key itself. A
+  // character picked from a key's variants is left alone: it follows no such
+  // deletion, and a quote picked that way does not report the plain key.
   const SMART_QUOTES = { '‘': "'", '’': "'", '“': '"', '”': '"' };
+  const SMART_REPLACEMENTS = { '—': '-', '–': '-', '…': '.' };
   const SMART_PUNCTUATION_MS = 500;
 
   function undoSmartPunctuation(pane, seen, box) {
     const change = terminalTextInputDelta(seen.text, box.text, seen.cursor, box.cursor);
-    // A caret move between the two edits of a dash changes no text.
+    // A caret move between the edits of a rewrite changes no text.
     if (!change || (!change.inserted && !change.removed)) return undefined;
     const now = performance.now();
-    const keyPressed = (key) => pane.lastTypedKey?.key === key
-      && now - pane.lastTypedKey.at < SMART_PUNCTUATION_MS;
-    const dash = change.inserted === '—' || change.inserted === '–';
-    const replacesHyphen = change.removed === 1
-      && seen.text.slice(change.insertedStart, change.insertedStart + 1) === '-';
-    // iOS sends the dash as two edits, measured on an iPhone: the hyphen key
-    // deletes the previous hyphen, then the dash is inserted in its place.
-    // The deletion has already gone out, so the dash brings back both.
-    if (!change.inserted && replacesHyphen && keyPressed('-')) {
-      pane.smartDashDeletedAt = { index: change.insertedStart, at: now };
+    const key = now - (pane.lastTypedKey?.at ?? -Infinity) < SMART_PUNCTUATION_MS
+      ? pane.lastTypedKey.key : undefined;
+    const removed = seen.text.slice(
+      change.insertedStart, seen.text.length - (box.text.length - change.insertedEnd),
+    );
+    const only = (text, character) => !!text && [...text].every((part) => part === character);
+    const pending = pane.smartDeleted && now - pane.smartDeleted.at < SMART_PUNCTUATION_MS
+      ? pane.smartDeleted : undefined;
+    pane.smartDeleted = undefined;
+    if (!change.inserted) {
+      // A deletion made by a key that iOS rewrites: hold on to what it
+      // removed, joined to an earlier one that ended where this one starts.
+      if (Object.values(SMART_REPLACEMENTS).includes(key) && only(removed, key)) {
+        const earlier = pending?.index === change.insertedStart + removed.length ? pending.deleted : '';
+        pane.smartDeleted = { index: change.insertedStart, deleted: removed + earlier, at: now };
+      }
       return undefined;
     }
-    const followsDeletedHyphen = change.removed === 0
-      && pane.smartDashDeletedAt?.index === change.insertedStart
-      && now - pane.smartDashDeletedAt.at < SMART_PUNCTUATION_MS;
-    pane.smartDashDeletedAt = undefined;
+    const replaced = SMART_REPLACEMENTS[change.inserted];
     let typed;
-    if (dash && (replacesHyphen || followsDeletedHyphen)) {
-      typed = '--';
-    } else if (change.removed === 0 && SMART_QUOTES[change.inserted]
-      && keyPressed(SMART_QUOTES[change.inserted])) {
+    if (replaced && only(removed, replaced)) {
+      typed = removed + replaced;
+    } else if (replaced && key === replaced && !removed
+      && pending?.index === change.insertedStart && only(pending.deleted, replaced)) {
+      typed = pending.deleted + replaced;
+    } else if (!removed && SMART_QUOTES[change.inserted] && key === SMART_QUOTES[change.inserted]) {
       typed = SMART_QUOTES[change.inserted];
     }
     if (!typed) return undefined;
@@ -2575,7 +2591,7 @@ const { WebglAddon } = globalThis.WebglAddon;
   // composes text.
   function mobileDeleteAtBoxStart(helper, pane) {
     return !!pane && !pane.nativeComposing
-      && helper?.value === mobilePredictionHelperValue(pane)
+      && helper && mobileBoxValue(helper) === mobilePredictionHelperValue(pane)
       && helper.selectionStart === helper.selectionEnd
       && helper.selectionStart === 0;
   }

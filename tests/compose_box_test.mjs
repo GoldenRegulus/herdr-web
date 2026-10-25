@@ -490,3 +490,49 @@ test('a dash picked after deleting a hyphen with backspace is kept', () => {
   h.type('prompt> a—', 10);
   assert.equal(h.sent.join(''), 'a-\x7f—', 'the deletion was not the hyphen key');
 });
+
+// Replays of an iPhone's input log. `typeEach` types like a keyboard: one
+// input event per character.
+function typeEach(h, prefix, text, from = '') {
+  let value = from;
+  for (const character of text) {
+    value += character;
+    h.type(prefix + value, prefix.length + value.length);
+  }
+}
+
+test('a space that WebKit stores as a no-break space reaches the shell as a space', () => {
+  const h = harness('', 0, 'prompt> ');
+  typeEach(h, 'prompt> ', 'echo');
+  h.type('prompt> echo ', 13);
+  assert.equal(h.sent.join(''), 'echo ', 'a shell reads a no-break space as part of a word');
+  // At the next key WebKit turns it back into a space: nothing to resend.
+  h.type('prompt> echo a', 14);
+  assert.equal(h.sent.join(''), 'echo a');
+});
+
+test('curly quotes typed on the quote keys go out straight, as an iPhone sends them', () => {
+  const h = harness('', 0, 'prompt> ');
+  typeEach(h, 'prompt> ', 'echo');
+  h.type('prompt> echo ', 13);
+  h.pane.lastTypedKey = { key: '"', at: Date.now() };
+  h.type('prompt> echo “', 14);
+  assert.equal(h.helper.value, 'prompt> echo "');
+  h.type('prompt> echo "b', 15);
+  h.pane.lastTypedKey = { key: '"', at: Date.now() };
+  h.type('prompt> echo "b”', 16);
+  assert.equal(h.sent.join(''), 'echo "b"');
+});
+
+test('three periods stay periods when iOS sends an ellipsis', () => {
+  const h = harness('', 0, 'prompt> ');
+  typeEach(h, 'prompt> ', 'echo ..');
+  // The third period: the key, two deletions, then the ellipsis.
+  h.pane.lastTypedKey = { key: '.', at: Date.now() };
+  h.type('prompt> echo .', 14, { inputType: 'deleteContentBackward' });
+  h.type('prompt> echo ', 13, { inputType: 'deleteContentBackward' });
+  h.caret(13);
+  h.type('prompt> echo …', 14);
+  assert.equal(h.helper.value, 'prompt> echo ...', 'the box shows what was typed');
+  assert.equal(h.sent.join(''), 'echo ..\x7f\x7f...', 'and the terminal ends with three periods');
+});
