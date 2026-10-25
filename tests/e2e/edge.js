@@ -224,17 +224,44 @@ async function phone(profile) {
     await k.enter();
     verdict(p('autocorrect replaces a word in the middle'), await shows(page, `the ${t}`));
   });
-  test('a double space becomes a period', async () => {
-    const t = token('d');
+  // The "." shortcut: the space key, pressed after a space, turns it into a
+  // period and a space.
+  for (const shape of ['two edits', 'one edit']) {
+    test(`a double space stays two spaces when iOS sends a period as ${shape}`, async () => {
+      const t = token('d');
+      await k.type(`echo "${t} `);
+      await sleep(200);
+      await k.cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: ' ', code: 'Space', windowsVirtualKeyCode: 32 });
+      await page.evaluate((twoEdits) => {
+        const box = document.activeElement;
+        const edit = (value, inputType, data) => {
+          box.value = value;
+          box.setSelectionRange(value.length, value.length);
+          box.dispatchEvent(new InputEvent('input', { inputType, data, bubbles: true }));
+        };
+        const before = box.value.slice(0, -1);
+        if (twoEdits) edit(before, 'deleteContentBackward', null);
+        edit(`${before}. `, 'insertText', '. ');
+      }, shape === 'two edits');
+      await k.cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: ' ', code: 'Space', windowsVirtualKeyCode: 32 });
+      await sleep(300);
+      await k.type('x"');
+      await k.enter();
+      verdict(p(`a double space stays two spaces when iOS sends a period as ${shape}`), await shows(page, `${t}  x`));
+    });
+  }
+  test('a period and space without the space key are kept', async () => {
+    const t = token('n');
     await k.type(`echo ${t} `);
-    await sleep(200);
+    await sleep(700);
+    // Android reports no key: this may be a space after a typed period.
     const { value } = await k.box();
     await k.select(value.length - 1, value.length);
     await k.word('. ');
     await sleep(400);
     await k.type('x');
     await k.enter();
-    verdict(p('a double space becomes a period'), await shows(page, `${t}. x`));
+    verdict(p('a period and space without the space key are kept'), await shows(page, `${t}. x`));
   });
   // iOS Smart Punctuation: the hyphen key, pressed after a hyphen, turns that
   // hyphen into a dash. These stand for that keystroke. An iPhone's input log

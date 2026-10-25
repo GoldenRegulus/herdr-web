@@ -536,3 +536,27 @@ test('three periods stay periods when iOS sends an ellipsis', () => {
   assert.equal(h.helper.value, 'prompt> echo ...', 'the box shows what was typed');
   assert.equal(h.sent.join(''), 'echo ..\x7f\x7f...', 'and the terminal ends with three periods');
 });
+
+test('a double space that iOS turns into a period stays two spaces', () => {
+  for (const shape of ['two edits', 'one edit']) {
+    const h = harness('', 0, 'prompt> ');
+    typeEach(h, 'prompt> ', 'a');
+    h.type('prompt> a ', 10);
+    h.pane.lastTypedKey = { key: ' ', at: Date.now() };
+    if (shape === 'two edits') h.type('prompt> a', 9, { inputType: 'deleteContentBackward' });
+    h.type('prompt> a. ', 11);
+    assert.equal(h.helper.value, 'prompt> a  ', `${shape}: the box shows what was typed`);
+    h.type('prompt> a  b', 12);
+    assert.equal(h.sent.join('').replace(/ \x7f/g, ''), 'a  b', `${shape}: the terminal ends with two spaces`);
+  }
+});
+
+test('a period and space without the space key are left alone', () => {
+  // Android reports no keys: this may be a space after a typed period.
+  const h = harness('', 0, 'prompt> ');
+  typeEach(h, 'prompt> ', 'a ');
+  h.pane.lastTypedKey = { key: 'Unidentified', at: Date.now() };
+  h.type('prompt> a. ', 11);
+  assert.equal(h.helper.value, 'prompt> a. ');
+  assert.ok(h.sent.join('').includes('.'), 'the period goes to the terminal');
+});

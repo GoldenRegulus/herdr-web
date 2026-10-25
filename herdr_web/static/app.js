@@ -2379,16 +2379,19 @@ const { WebglAddon } = globalThis.WebglAddon;
     return true;
   }
 
-  // iOS Smart Punctuation rewrites what was typed: a second hyphen becomes a
-  // dash, a third period an ellipsis, straight quotes curly. A command needs
-  // what the keys say. An iPhone's input log showed the rewrite as the key
-  // press, deletions of the characters it replaces, then the new character in
-  // their place; it can also come as one replacement. The deletions have gone
-  // out by then, so the replacement brings them back with the key itself. A
-  // character picked from a key's variants is left alone: it follows no such
-  // deletion, and a quote picked that way does not report the plain key.
+  // Keyboards rewrite what was typed: iOS Smart Punctuation makes a second
+  // hyphen a dash, a third period an ellipsis and straight quotes curly, and
+  // the "." shortcut makes a double space a period and a space. spellcheck is
+  // off, which makes WebKit switch off smart quotes and dashes, but not the
+  // rest. A command needs what the keys say. An iPhone's input log showed a
+  // rewrite as the key press, deletions of the characters it replaces, then
+  // the new text in their place; it can also come as one replacement. The
+  // deletions have gone out by then, so the replacement brings them back with
+  // the key itself. A character picked from a key's variants is left alone:
+  // it follows no such deletion, and a quote picked that way does not report
+  // the plain key.
   const SMART_QUOTES = { '‘': "'", '’': "'", '“': '"', '”': '"' };
-  const SMART_REPLACEMENTS = { '—': '-', '–': '-', '…': '.' };
+  const SMART_REPLACEMENTS = { '—': '-', '–': '-', '…': '.', '. ': ' ' };
   const SMART_PUNCTUATION_MS = 500;
 
   function undoSmartPunctuation(pane, seen, box) {
@@ -2406,7 +2409,7 @@ const { WebglAddon } = globalThis.WebglAddon;
       ? pane.smartDeleted : undefined;
     pane.smartDeleted = undefined;
     if (!change.inserted) {
-      // A deletion made by a key that iOS rewrites: hold on to what it
+      // A deletion made by a key that gets rewritten: hold on to what it
       // removed, joined to an earlier one that ended where this one starts.
       if (Object.values(SMART_REPLACEMENTS).includes(key) && only(removed, key)) {
         const earlier = pending?.index === change.insertedStart + removed.length ? pending.deleted : '';
@@ -2416,8 +2419,13 @@ const { WebglAddon } = globalThis.WebglAddon;
     }
     const replaced = SMART_REPLACEMENTS[change.inserted];
     let typed;
-    if (replaced && only(removed, replaced)) {
+    // A period and space can also be a keyboard's space after a typed period,
+    // which Android cannot tell apart: only the space key's own rewrite is
+    // undone. In one edit it arrives as a period before the existing space.
+    if (replaced && only(removed, replaced) && (replaced !== ' ' || key === ' ')) {
       typed = removed + replaced;
+    } else if (change.inserted === '.' && !removed && key === ' ') {
+      typed = ' ';
     } else if (replaced && key === replaced && !removed
       && pending?.index === change.insertedStart && only(pending.deleted, replaced)) {
       typed = pending.deleted + replaced;
