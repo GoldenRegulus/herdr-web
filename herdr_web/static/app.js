@@ -2108,11 +2108,9 @@ const { WebglAddon } = globalThis.WebglAddon;
     pane.composeSettleSince = undefined;
     pane.composeAdoptCandidate = undefined;
     pane.composeWritten = undefined;
-    pane.mobilePredictionPending = false;
     pane.mobilePredictionPrefix = '';
     pane.mobilePredictionText = '';
     pane.mobilePredictionCursor = 0;
-    pane.mobilePredictionConfirmed = false;
     if (clearHelper) {
       const helper = paneKeyboardHelper(pane);
       if (helper) helper.value = '';
@@ -2120,14 +2118,12 @@ const { WebglAddon } = globalThis.WebglAddon;
   }
 
   function replaceMobilePredictionFromTerminal(pane, helper) {
-    pane.mobilePredictionPending = false;
     // The composed text decides how many rows are the user's own: its line
     // breaks are the rows it created.
     const shadow = terminalTextAtCursor(pane.terminal, composeShadow(pane));
     pane.mobilePredictionPrefix = '';
     pane.mobilePredictionText = shadow.text;
     pane.mobilePredictionCursor = shadow.cursor;
-    pane.mobilePredictionConfirmed = true;
     if (helper) restoreMobilePredictionHelper(pane);
   }
 
@@ -2200,12 +2196,10 @@ const { WebglAddon } = globalThis.WebglAddon;
       pane.mobilePredictionPrefix || '',
     );
     if (prefix === undefined) {
-      if (pane.mobilePredictionPending) return;
       clearMobilePredictionState(pane);
       return;
     }
     pane.mobilePredictionPrefix = prefix;
-    pane.mobilePredictionConfirmed = true;
   }
 
   function mobileHelperCaret(helper) {
@@ -2388,10 +2382,6 @@ const { WebglAddon } = globalThis.WebglAddon;
     if (pane.nativeComposing) return true;
     if (!paneAcceptsInput(pane, false) || mobileKeyboardLocked || pane.snapshot) return false;
     const box = composeBoxState(pane, helper);
-    const edit = composeEdit(
-      composeShadow(pane), box, pane.terminal.modes?.applicationCursorKeysMode,
-    );
-    if (!edit) return false;
     // The size of this change decides: one character is typing and goes out at
     // once, with everything already in the box. Anything larger is a swipe
     // word, a dictation hypothesis, or a correction: it waits for a quiet
@@ -3065,9 +3055,7 @@ const { WebglAddon } = globalThis.WebglAddon;
       mobilePredictionPrefix: '',
       mobilePredictionText: '',
       mobilePredictionCursor: 0,
-      mobilePredictionConfirmed: false,
       nativeComposing: undefined,
-      mobilePredictionPending: false,
     };
     paneTerminal.element.addEventListener('focus', (event) => {
       if (event.target === paneKeyboardHelper(record)) prepareMobilePredictionFocus(record);

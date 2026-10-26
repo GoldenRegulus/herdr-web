@@ -618,7 +618,6 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("paneTerminalKeyHandler(record, event)", application)
         self.assertIn("No edit ever corrects the program.", application)
         self.assertIn("Text in the box that is not written yet stays", application)
-        self.assertIn("mobilePredictionPending", application)
         self.assertIn("composeEdit(", application)
         self.assertIn("terminalPredictionPrefix(", application)
         self.assertIn("MOBILE_PREDICTION_TEXT_LIMIT = 1024", prediction)
