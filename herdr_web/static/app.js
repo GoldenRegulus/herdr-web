@@ -2105,7 +2105,6 @@ const { WebglAddon } = globalThis.WebglAddon;
       pane.composeTimer = undefined;
     }
     pane.composeSeen = undefined;
-    pane.composeSettleSince = undefined;
     pane.composeAdoptCandidate = undefined;
     pane.composeWritten = undefined;
     pane.mobilePredictionPrefix = '';
@@ -2395,26 +2394,17 @@ const { WebglAddon } = globalThis.WebglAddon;
     // A held backspace must keep deleting across a row boundary, where the
     // keyboard deletes the break and a character together.
     const explicitDelete = change && change.inserted === '' && change.removed > 0;
-    if (typing || explicitDelete) {
-      pane.composeSettleSince = undefined;
-      return composeWrite(pane, helper, box);
+    if (typing || explicitDelete) return composeWrite(pane, helper, box);
+    // A larger change goes out once, a settle period after it began, with
+    // whatever the box holds by then: the terminal never churns through
+    // recognitions, and a stream of edits cannot hold it back for longer.
+    if (pane.composeTimer === undefined) {
+      pane.composeTimer = setTimeout(() => {
+        pane.composeTimer = undefined;
+        const current = paneKeyboardHelper(pane);
+        if (current) composeWrite(pane, current, composeBoxState(pane, current));
+      }, COMPOSE_SETTLE_MS);
     }
-    // A larger insertion waits for a quiet moment so the terminal never
-    // churns through recognitions — but the wait has a deadline. A stream of
-    // edits, as a held key sends, must not keep resetting it forever.
-    const settledFor = Date.now();
-    if (pane.composeSettleSince === undefined) pane.composeSettleSince = settledFor;
-    if (pane.composeTimer !== undefined) clearTimeout(pane.composeTimer);
-    if (settledFor - pane.composeSettleSince >= COMPOSE_SETTLE_MS) {
-      pane.composeSettleSince = undefined;
-      return composeWrite(pane, helper, box);
-    }
-    pane.composeTimer = setTimeout(() => {
-      pane.composeTimer = undefined;
-      pane.composeSettleSince = undefined;
-      const current = paneKeyboardHelper(pane);
-      if (current) composeWrite(pane, current, composeBoxState(pane, current));
-    }, COMPOSE_SETTLE_MS);
     return true;
   }
 
