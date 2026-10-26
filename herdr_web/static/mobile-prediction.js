@@ -76,11 +76,6 @@ function headMatch(candidate, target) {
   return 0;
 }
 
-export function terminalTextBeforeCursor(terminal, composed) {
-  const shadow = terminalTextAtCursor(terminal, composed);
-  return shadow.text.slice(0, shadow.cursor);
-}
-
 export function terminalTextAtCursor(terminal, composed) {
   const buffer = terminal?.buffer?.active;
   if (!buffer) return { text: '', cursor: 0 };
@@ -180,11 +175,6 @@ function textAroundCursor(terminal, text, limit = text.length) {
   return { before: before.slice(-limit), after: after.slice(0, limit) };
 }
 
-export function terminalHasEditableSuffix(terminal, text) {
-  if (!validText(text) || !text) return false;
-  return textAroundCursor(terminal, text)?.before.endsWith(text) === true;
-}
-
 export function terminalHasEditableText(terminal, text) {
   if (!validText(text) || !text) return false;
   const around = textAroundCursor(terminal, text);
@@ -202,7 +192,8 @@ export function terminalPredictionPrefix(
   terminal, text = '', cursor = text.length, existingPrefix,
 ) {
   if (!validText(text) || terminalCaretInput(text, cursor, cursor) === undefined) return undefined;
-  let before = terminalTextBeforeCursor(terminal, { text, cursor });
+  const shadow = terminalTextAtCursor(terminal, { text, cursor });
+  let before = shadow.text.slice(0, shadow.cursor);
   const maximumPrefixLength = MOBILE_PREDICTION_TEXT_LIMIT - text.length;
   if (!text) return before.slice(-maximumPrefixLength);
   if (!terminalHasEditableText(terminal, text)) return undefined;
