@@ -451,3 +451,12 @@ test('a space that WebKit stores as a no-break space reaches the shell as a spac
   h.type('prompt> echo a', 14);
   assert.equal(h.sent.join(''), 'echo a');
 });
+
+test('focus starts from the line when it changed while the keyboard was down', () => {
+  const h = harness('draft', 5, 'prompt> ');
+  // The line was submitted elsewhere; a fresh prompt shows.
+  h.render('prompt> ', 8);
+  h.context.prepareComposeFocus(h.pane);
+  assert.equal(h.pane.compose.text, '', 'the old draft is not the line any more');
+  assert.equal(h.helper.value, 'prompt> ', 'the box mirrors the line as it is');
+});

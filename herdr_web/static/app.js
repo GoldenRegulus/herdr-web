@@ -2102,19 +2102,29 @@ const { WebglAddon } = globalThis.WebglAddon;
 
   function prepareComposeFocus(pane) {
     // The box must mirror the line the terminal shows before the first
-    // keystroke of this focus.
+    // keystroke of this focus. Text the line no longer shows was changed
+    // while the keyboard was down: start again from the line as it is.
+    const { text, cursor, prefix } = pane.compose;
+    if (terminalPredictionPrefix(pane.terminal, text, cursor, prefix) === undefined) {
+      resetCompose(pane, true);
+    }
     syncComposeFromTerminal(pane);
     restoreComposeBox(pane);
   }
 
+  // Text still settling goes out now, ahead of whatever comes next.
+  function flushComposeSettle(pane) {
+    if (pane.compose.timer === undefined) return;
+    const helper = paneKeyboardHelper(pane);
+    if (helper) composeWrite(pane, helper, composeBoxState(pane, helper));
+    clearTimeout(pane.compose.timer);
+    pane.compose.timer = undefined;
+  }
+
   function resetCompose(pane, clearHelper = false) {
     if (!pane) return;
-    // A control key or paste follows: text still settling goes out first.
-    if (pane.compose.timer !== undefined) {
-      const helper = paneKeyboardHelper(pane);
-      if (helper) composeWrite(pane, helper, composeBoxState(pane, helper));
-      clearTimeout(pane.compose.timer);
-    }
+    // A control key or paste follows.
+    flushComposeSettle(pane);
     pane.compose = emptyCompose();
     if (clearHelper) {
       const helper = paneKeyboardHelper(pane);
@@ -2190,21 +2200,10 @@ const { WebglAddon } = globalThis.WebglAddon;
     const helper = paneKeyboardHelper(pane);
     if (!helper || !nativeKeyboardInput || !mobileQuery.matches) return;
     // Safari may queue selectionchange behind blur. Send that final movement
-    // before xterm clears the helper, then retain the last sent caret position.
+    // before xterm clears the helper, and any text still settling. The next
+    // focus checks the model against the line.
     followMobileCaret(pane, true);
-    if (mobileBoxValue(helper) !== composeLineValue(pane)) {
-      resetCompose(pane);
-      return;
-    }
-    const prefix = terminalPredictionPrefix(
-      pane.terminal, pane.compose.text, pane.compose.cursor,
-      pane.compose.prefix,
-    );
-    if (prefix === undefined) {
-      resetCompose(pane);
-      return;
-    }
-    pane.compose.prefix = prefix;
+    flushComposeSettle(pane);
   }
 
   function mobileHelperCaret(helper) {
