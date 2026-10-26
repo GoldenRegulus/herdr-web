@@ -2132,14 +2132,14 @@ const { WebglAddon } = globalThis.WebglAddon;
     }
   }
 
-  function adoptComposeLine(pane, helper) {
-    // The composed text decides how many rows are the user's own: its line
-    // breaks are the rows it created.
-    const shadow = terminalTextAtCursor(pane.terminal, pane.compose);
-    pane.compose.prefix = '';
-    pane.compose.text = shadow.text;
-    pane.compose.cursor = shadow.cursor;
-    if (helper) restoreComposeBox(pane);
+  // The program changed its own line, and the program wins. The box starts
+  // again from the line as a fresh focus does: what the line shows before the
+  // caret is the prefix, which the box never edits, so a delete past the box
+  // start goes to the program instead of into a prompt it would refuse.
+  function adoptComposeLine(pane) {
+    resetCompose(pane, true);
+    syncComposeFromTerminal(pane);
+    restoreComposeBox(pane);
   }
 
   // The terminal is the truth the box mirrors. A frame that still shows what
@@ -2193,7 +2193,7 @@ const { WebglAddon } = globalThis.WebglAddon;
     pane.compose.candidate = { text: line.text, cursor: line.cursor };
     if (!candidate || candidate.text !== line.text || candidate.cursor !== line.cursor) return;
     pane.compose.candidate = undefined;
-    adoptComposeLine(pane, helper);
+    adoptComposeLine(pane);
   }
 
   function preserveComposeBeforeBlur(pane) {

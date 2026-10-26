@@ -592,7 +592,7 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("lineText, boxText, lineCursor, boxCursor", application)
         self.assertIn("Math.max(0, Math.min(lineText.length, line.cursor))", application)
         self.assertIn("compose: emptyCompose()", application)
-        self.assertIn("function adoptComposeLine(pane, helper)", application)
+        self.assertIn("function adoptComposeLine(pane)", application)
         # A delete at the row start must reach the terminal. The old gate
         # required flags from the retired event model and swallowed it.
         self.assertIn("function mobileDeleteAtBoxStart(helper, pane)", application)
@@ -668,7 +668,7 @@ class FrontendContractTests(unittest.TestCase):
         self.assertIn("function followMobileCaret(pane, beforeBlur = false)", application)
         self.assertIn("followMobileCaret(pane, true)", application)
         self.assertNotIn("mobilePredictionInvalidated", application)
-        self.assertIn("adoptComposeLine(pane, helper);", application)
+        self.assertIn("adoptComposeLine(pane);", application)
         self.assertIn("helper.selectionStart !== helper.selectionEnd", application)
         self.assertIn("pane.nativeComposing", application)
         self.assertIn("if (!sendMobilePaneKeyboardData(pane, edit.data)) return false;", application)

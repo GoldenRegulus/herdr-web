@@ -460,3 +460,17 @@ test('focus starts from the line when it changed while the keyboard was down', (
   assert.equal(h.pane.compose.text, '', 'the old draft is not the line any more');
   assert.equal(h.helper.value, 'prompt> ', 'the box mirrors the line as it is');
 });
+
+test('a line the program rewrote keeps its prompt out of the editable text', () => {
+  const h = harness('ab', 2, 'prompt> ');
+  // Another client appends to the draft; the line repeats, so it is adopted.
+  h.render('prompt> abX', 11);
+  h.frame();
+  h.frame();
+  assert.equal(h.pane.compose.text, '', 'the draft starts again after the program wrote');
+  assert.equal(h.pane.compose.prefix, 'prompt> abX', 'and the prompt is never editable text');
+  assert.equal(h.helper.value, 'prompt> abX', 'the box still mirrors the line');
+  // A caret moved into the prompt shows where typing lands.
+  h.caret(2);
+  assert.equal(h.helper.selectionStart, 11);
+});
