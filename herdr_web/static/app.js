@@ -2574,8 +2574,7 @@ const { WebglAddon } = globalThis.WebglAddon;
 
   function terminalLinkAtPoint(pane, clientX, clientY) {
     const screen = pane.terminal.element?.querySelector('.xterm-screen');
-    const point = terminalMousePoint(pane, clientX, clientY);
-    if (!screen || !point) return undefined;
+    if (!screen) return undefined;
     const move = (x) => screen.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: x, clientY }));
     terminalLinkReplay = { links: [] };
     try {
@@ -2583,11 +2582,14 @@ const { WebglAddon } = globalThis.WebglAddon;
       // row's other end first; it clamps a point off the screen to the edge.
       // That end can hold the same link, which xterm then does not report
       // again, so keep every link reported and take the one at the point.
+      // The cell under the point, rounded as xterm rounds it.
       const bounds = screen.getBoundingClientRect();
-      move(point.column === 1 ? bounds.right + 1 : bounds.left - 1);
+      const { cols, rows } = pane.terminal;
+      const cell = (offset, size, count) => Math.min(Math.max(Math.ceil((offset / size) * count), 1), count);
+      const x = cell(clientX - bounds.left, bounds.width, cols);
+      const y = pane.terminal.buffer.active.viewportY + cell(clientY - bounds.top, bounds.height, rows);
+      move(x === 1 ? bounds.right + 1 : bounds.left - 1);
       move(clientX);
-      const x = point.column;
-      const y = pane.terminal.buffer.active.viewportY + point.row;
       return terminalLinkReplay.links.findLast(({ range }) => range
         && (y > range.start.y || (y === range.start.y && x >= range.start.x))
         && (y < range.end.y || (y === range.end.y && x <= range.end.x)))?.uri;
@@ -3540,8 +3542,6 @@ const { WebglAddon } = globalThis.WebglAddon;
       }
       event.preventDefault();
       event.stopImmediatePropagation();
-      // A tap on a link opens it instead of raising the keyboard.
-      if (openTerminalLink(terminalLinkAtPoint(record, event.clientX, event.clientY))) return;
       focusPaneKeyboard(record);
     }, true);
 
@@ -4907,6 +4907,26 @@ const { WebglAddon } = globalThis.WebglAddon;
   // own taps, the keyboard lock still holds it shut, and only the end of a
   // gesture may focus: a swipe starts exactly like a tap and must never
   // raise the keyboard.
+  // A tap on a link opens it where the finger lifted, and nothing else
+  // happens: no click, no keyboard. A tap's click is no help here: phones
+  // move it toward nearby targets, such as the compose box on the cursor row.
+  let tapStart;
+  document.addEventListener('touchstart', (event) => {
+    const touch = event.touches.length === 1 ? event.touches[0] : undefined;
+    tapStart = touch && { x: touch.clientX, y: touch.clientY, at: performance.now() };
+  }, true);
+  const openLinkFromTap = (event) => {
+    if (!mobileQuery.matches || mobileMouseMode || !tapStart) return;
+    const touch = event.changedTouches?.[0];
+    const pane = [...paneTerminals.values()].find((candidate) => candidate.host.contains(event.target));
+    if (!touch || !pane || pane.snapshot) return;
+    const elapsed = performance.now() - tapStart.at;
+    if (elapsed >= MOBILE_LONG_PRESS_MS
+      || !isMobileTapGesture(touch.clientX - tapStart.x, touch.clientY - tapStart.y, elapsed)) return;
+    if (!openTerminalLink(terminalLinkAtPoint(pane, touch.clientX, touch.clientY))) return;
+    event.preventDefault();
+  };
+  document.addEventListener('touchend', openLinkFromTap, true);
   const openKeyboardFromTap = (event) => {
     if (!mobileQuery.matches || mobileKeyboardLocked || mobileMouseMode) return;
     const target = event.target;
@@ -4915,10 +4935,8 @@ const { WebglAddon } = globalThis.WebglAddon;
     )) return;
     const pane = selectedPaneTerminal();
     if (!pane) return;
-    // The click that follows opens a tapped link; the keyboard stays down.
-    const touch = event.changedTouches?.[0];
-    if (touch && pane.host.contains(target)
-      && openableTerminalUrl(terminalLinkAtPoint(pane, touch.clientX, touch.clientY))) return;
+    // A tapped link opened instead.
+    if (event.defaultPrevented) return;
     focusPaneKeyboard(pane);
   };
   // iOS focuses a button from its compatibility mousedown, and that focus
