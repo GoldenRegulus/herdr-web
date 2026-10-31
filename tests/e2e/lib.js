@@ -111,8 +111,10 @@ function rowPointNow(page, text, column, rowOffset, index) {
         const range = document.createRange();
         range.setStart(node, left);
         range.setEnd(node, left + 1);
+        // A character's box can be taller than its row: aim at the row.
         const box = range.getBoundingClientRect();
-        return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+        const line = row.getBoundingClientRect();
+        return { x: box.x + box.width / 2, y: line.y + line.height / 2 };
       }
       left -= node.length;
     }

@@ -453,12 +453,14 @@ async function phone(profile) {
     await k.blur();
     await L.recordOpenedLinks(page);
     const long = `https://wrap.example/${'a'.repeat(100)}/end`;
-    L.run(PANE, `clear; printf '\\e]8;;https://osc.example/x\\e\\\\agent link\\e]8;;\\e\\\\\\n'; echo "see ${long}."`);
+    L.run(PANE, `clear; printf '\\e]8;;https://osc.example/x\\e\\\\agent link\\e]8;;\\e\\\\\\n'; echo "see ${long}."; echo '  ➜  Network: http://192.168.1.20:5173/'`);
     await sleep(800);
     for (const [name, point, want] of [
       ['an OSC 8 link', ['agent link', 3], 'https://osc.example/x'],
       ['a URL', ['see https', 6], long],
       ['the wrapped part of a URL', ['see https', 2, 1], long],
+      // Right above the prompt, where a tap's click lands on the compose box.
+      ['a URL above the prompt', ['Network: http', 20], 'http://192.168.1.20:5173/'],
     ]) {
       await k.tap(await L.rowPoint(page, ...point));
       await sleep(300);
