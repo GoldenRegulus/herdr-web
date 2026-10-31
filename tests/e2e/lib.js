@@ -75,6 +75,51 @@ async function shows(page, want, index = 0, timeout = 3000) {
   return `pane ${index} ends ${JSON.stringify(lines.filter(Boolean).slice(-3))}`;
 }
 
+// Record the pages the app opens instead of opening them.
+function recordOpenedLinks(page) {
+  return page.evaluate(() => {
+    window.herdrE2eOpened = [];
+    window.open = (url) => { window.herdrE2eOpened.push(String(url)); return null; };
+  });
+}
+const openedLinks = (page) => page.evaluate(() => window.herdrE2eOpened.splice(0));
+
+// The viewport point of character `column` in the row `rowOffset` rows below
+// the first row of pane `index` that contains `text`, once the pane shows it.
+async function rowPoint(page, text, column, rowOffset = 0, index = 0) {
+  const end = Date.now() + 3000;
+  let point;
+  while (!point && Date.now() < end) {
+    point = await rowPointNow(page, text, column, rowOffset, index);
+    if (!point) await sleep(100);
+  }
+  if (!point) throw new Error(`no row shows ${JSON.stringify(text)}`);
+  return point;
+}
+
+function rowPointNow(page, text, column, rowOffset, index) {
+  return page.evaluate(([want, at, offset, pane]) => {
+    const rows = [...document.querySelectorAll('#pane-grid .xterm-rows')[pane].children];
+    // xterm's DOM rows may hold no-break spaces.
+    const first = rows.findIndex((candidate) => candidate.textContent.replace(/\u00a0/g, ' ').includes(want));
+    const row = first < 0 ? undefined : rows[first + offset];
+    if (!row) return undefined;
+    const walker = document.createTreeWalker(row, NodeFilter.SHOW_TEXT);
+    let left = at;
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      if (left < node.length) {
+        const range = document.createRange();
+        range.setStart(node, left);
+        range.setEnd(node, left + 1);
+        const box = range.getBoundingClientRect();
+        return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+      }
+      left -= node.length;
+    }
+    return undefined;
+  }, [text, column, rowOffset, index]);
+}
+
 const results = [];
 function check(name, ok, detail = '') {
   results.push({ name, ok });
@@ -107,5 +152,5 @@ async function main(runs) {
 
 module.exports = {
   SESSION, SHOTS, VIEWPORTS, sleep, herdr, sendText, sendKeys, run,
-  open, panesMode, paneTexts, shows, check, verdict, main,
+  open, panesMode, paneTexts, shows, check, verdict, main, recordOpenedLinks, openedLinks, rowPoint,
 };

@@ -181,6 +181,27 @@ async function desktop() {
     await page.keyboard.press('Control+C');
     await sleep(200);
 
+    // Links open on click: an OSC 8 link, and a URL, also from a wrapped row.
+    await L.recordOpenedLinks(page);
+    const long = `https://wrap.example/${'a'.repeat(100)}/end`;
+    L.run('w1:p1', `clear; printf '\\e]8;;https://osc.example/x\\e\\\\agent link\\e]8;;\\e\\\\\\n'; echo "see ${long}."`);
+    await sleep(800);
+    for (const [name, point, want] of [
+      ['an OSC 8 link', ['agent link', 3], 'https://osc.example/x'],
+      ['a URL', ['see https', 6], long],
+      ['the wrapped part of a URL', ['see https', 2, 1], long],
+      ['text beside a link', ['see https', 1], undefined],
+    ]) {
+      const at = await L.rowPoint(page, ...point);
+      await page.mouse.move(at.x, at.y);
+      await sleep(200);
+      await page.mouse.click(at.x, at.y);
+      await sleep(300);
+      const opened = await L.openedLinks(page);
+      check(`desktop panes: a click on ${name} ${want ? 'opens it' : 'opens nothing'}`,
+        want ? opened.length === 1 && opened[0] === want : opened.length === 0, JSON.stringify(opened));
+    }
+
     await page.setViewportSize({ width: 600, height: 800 });
     await sleep(800);
     await page.locator('#pane-grid .xterm-screen').first().click();

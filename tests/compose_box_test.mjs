@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import vm from 'node:vm';
 import * as prediction from '../herdr_web/static/mobile-prediction.js';
+import * as links from '../herdr_web/static/terminal-links.js';
 
 // The compose box behaviour. The invisible textarea holds the text being
 // composed, the terminal line is what it mirrors, and the terminal wins every
@@ -53,6 +54,7 @@ function harness(text = '', cursor = text.length, prefix = '') {
   };
   const context = vm.createContext({
     ...prediction,
+    ...links,
     pane,
     helper,
     document: {
@@ -191,7 +193,7 @@ function copyTerminal(rows, cols) {
       return column < cols ? { getChars: () => padded[column], getWidth: () => 1 } : undefined;
     },
   }));
-  return { cols, buffer: { active: { getLine: (row) => lines[row] } } };
+  return { cols, buffer: { active: { length: lines.length, getLine: (row) => lines[row] } } };
 }
 
 test('copy joins a wrapped row without a break and a newline with one', () => {
@@ -227,6 +229,37 @@ test('copy keeps the space of a wrap that fell on a word break', () => {
     h.context.snapshotCopyText(terminal, 0, ['aaaa bbbb ', 'cccc      ', 'short     ', 'end']),
     'aaaa bbbb cccc\nshort\nend',
   );
+});
+
+test('copy adds no break for a row the selection only touches', () => {
+  const h = harness('', 0);
+  const terminal = copyTerminal([
+    { text: 'see:' }, { text: 'https://e.com/a/' }, { text: 'b/c' }, { text: 'next' },
+  ], 16);
+  // Phones put selection handles in the padding of the row above, or at the
+  // start of the row below.
+  assert.equal(
+    h.context.snapshotCopyText(terminal, 0, ['            ', 'https://e.com/a/', 'b/c             ', '']),
+    'https://e.com/a/b/c',
+  );
+  assert.equal(
+    h.context.snapshotCopyText(terminal, 0, ['see:        ', 'https://e.com/a/', 'b/c             ', 'next']),
+    'see:\nhttps://e.com/a/b/c\nnext',
+    'rows with selected text keep their breaks',
+  );
+  assert.equal(h.context.snapshotCopyText(terminal, 2, ['   ']), '', 'a blank selection stays blank');
+});
+
+test('a link runs across the rows a URL wraps over', () => {
+  const h = harness('', 0);
+  const terminal = copyTerminal([
+    { text: 'go https://e.com' }, { text: '/long/path. ok' }, { text: 'https://f.com' },
+  ], 16);
+  const found = (row) => h.context.terminalLinksAround(terminal, row)
+    .map(({ url, start, end }) => [url, start.x, start.y, end.x, end.y]);
+  assert.deepEqual(found(0), [['https://e.com/long/path', 3, 0, 9, 1]]);
+  assert.deepEqual(found(1), [['https://e.com/long/path', 3, 0, 9, 1]], 'the link is found from its second row too');
+  assert.deepEqual(found(2), [['https://f.com', 0, 2, 12, 2]], 'a hard break ends the line');
 });
 
 test('a delete at the row start goes to the terminal', () => {

@@ -404,12 +404,17 @@ async function phone(profile) {
       const rows = [...document.querySelectorAll('.pane-snapshot-view .xterm-rows > div')];
       const a = rows.findIndex((row) => row.textContent.startsWith(first));
       const b = rows.findIndex((row, index) => index >= a && row.textContent.startsWith(last));
-      const text = (row) => {
+      // The text node and offset of character `offset` in a row.
+      const at = (row, offset) => {
         const walker = document.createTreeWalker(row, NodeFilter.SHOW_TEXT);
-        walker.nextNode();
-        return walker.currentNode;
+        let node = walker.nextNode();
+        while (offset > node.length && walker.nextNode()) {
+          offset -= node.length;
+          node = walker.currentNode;
+        }
+        return [node, offset];
       };
-      document.getSelection().setBaseAndExtent(text(rows[a]), start, text(rows[b]), end);
+      document.getSelection().setBaseAndExtent(...at(rows[a], start), ...at(rows[b], end));
       const data = new DataTransfer();
       rows[a].dispatchEvent(new ClipboardEvent('copy', { clipboardData: data, bubbles: true, cancelable: true }));
       // Nothing set means the browser's own copy of the selection is used.
@@ -434,9 +439,38 @@ async function phone(profile) {
     `printf '%s\\n' "$(printf 'x%.0s' $(seq $(($(tput cols) - 1)))) next"`, ['xxxx', 0, 'next', 4],
     async () => `${'x'.repeat(await page.evaluate(() => [...document.querySelectorAll('.pane-snapshot-view .xterm-rows > div')]
       .find((row) => row.textContent.startsWith('xxxx')).textContent.trimEnd().length))} next`);
+  // Phones put a selection handle in the padding of the row above, or at the
+  // start of the row below: those rows add no line break.
+  const url = `https://example.com/${'a'.repeat(70)}/end`;
+  copyCase('copy of a wrapped URL adds no break for rows the handles touch',
+    `printf 'above\\n%s\\nbelow\\n' '${url}'`, ['above', 8, 'below', 0], url);
   copyCase('copy keeps spaces inside a line and blank lines',
     "printf 'a  b   c\\n\\nlast\\n'", ['a  b', 0, 'last', 4],
     'a  b   c\n\nlast');
+
+  // ---- links ----
+  test('a tap on a link opens it and leaves the keyboard down', async () => {
+    await k.blur();
+    await L.recordOpenedLinks(page);
+    const long = `https://wrap.example/${'a'.repeat(100)}/end`;
+    L.run(PANE, `clear; printf '\\e]8;;https://osc.example/x\\e\\\\agent link\\e]8;;\\e\\\\\\n'; echo "see ${long}."`);
+    await sleep(800);
+    for (const [name, point, want] of [
+      ['an OSC 8 link', ['agent link', 3], 'https://osc.example/x'],
+      ['a URL', ['see https', 6], long],
+      ['the wrapped part of a URL', ['see https', 2, 1], long],
+    ]) {
+      await k.tap(await L.rowPoint(page, ...point));
+      await sleep(300);
+      const opened = await L.openedLinks(page);
+      check(p(`a tap on ${name} opens it`), opened.length === 1 && opened[0] === want, JSON.stringify(opened));
+      check(p(`a tap on ${name} leaves the keyboard down`), !(await k.focused()));
+    }
+    await k.tap(await L.rowPoint(page, 'see https', 1));
+    await sleep(300);
+    check(p('a tap beside a link opens nothing'), (await L.openedLinks(page)).length === 0);
+    check(p('a tap beside a link raises the keyboard'), await k.focused());
+  });
 
   try {
     for (const { name, body, fresh: clean } of cases) {
