@@ -4920,6 +4920,12 @@ const { WebglAddon } = globalThis.WebglAddon;
     const touch = event.changedTouches?.[0];
     const pane = [...paneTerminals.values()].find((candidate) => candidate.host.contains(event.target));
     if (!touch || !pane || pane.snapshot) return;
+    // A tap on the compose box, the cursor row, is the iOS paste-menu
+    // gesture; leave it to iOS. The finger's point decides, not the target:
+    // a tap on the row above can be moved onto the box.
+    const box = paneKeyboardHelper(pane)?.getBoundingClientRect();
+    if (box && touch.clientX >= box.left && touch.clientX < box.right
+      && touch.clientY >= box.top && touch.clientY < box.bottom) return;
     const elapsed = performance.now() - tapStart.at;
     if (elapsed >= MOBILE_LONG_PRESS_MS
       || !isMobileTapGesture(touch.clientX - tapStart.x, touch.clientY - tapStart.y, elapsed)) return;
