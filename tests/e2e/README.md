@@ -14,7 +14,8 @@ differently.
 
 `suite.js`: core input.
 
-- Desktop: Full mode, Panes mode with two panes, narrow window.
+- Desktop: Full mode, Panes mode with two panes, narrow window, clicking
+  links.
 - Phones: tap versus swipe and fling for raising the keyboard, typing,
   predictive words (also right before Enter), backspace, caret moves,
   arrow and Tab keys, bracketed and plain paste, the iOS paste menu,
@@ -34,7 +35,10 @@ differently.
 - A multi-line prompt like an agent's (`ml.py`): newlines, joining lines,
   moving up a line, multi-line paste, a long wrapped line.
 - Hold-to-copy across wrapped lines and real newlines, partial rows, a
-  wrap that falls on a space, blank lines and repeated spaces.
+  wrap that falls on a space, blank lines and repeated spaces, and selection
+  handles in the rows around a wrapped URL.
+- Tapping a link: OSC 8 links and URLs, also on a wrapped row, open without
+  raising the keyboard; a tap beside one still raises it.
 
 ## Requirements
 

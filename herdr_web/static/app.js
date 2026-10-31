@@ -17,6 +17,7 @@ import {
   terminalTextAtCursor,
   terminalTextInputDelta,
 } from './mobile-prediction.js';
+import { openableTerminalUrl, terminalUrls } from './terminal-links.js';
 import './vendor/xterm.js';
 import './vendor/xterm-addon-fit.js';
 import './vendor/xterm-addon-webgl.js';
@@ -2500,12 +2501,119 @@ const { WebglAddon } = globalThis.WebglAddon;
 
   // Hold-to-copy joins rows by their meaning: a wrapped row continues the
   // same line and joins with nothing, a hard break joins with a line break.
-  // The padding before a hard break is not text.
+  // The padding before a hard break is not text. A selection that starts in
+  // the padding of the row above, or ends at the start of the row below, has
+  // nothing selected on that row, so the row adds no break.
   function snapshotCopyText(terminal, firstRow, rowTexts) {
-    return rowTexts.map((rowText, index) => {
-      if (index === rowTexts.length - 1) return rowText.trimEnd();
-      return snapshotRowContinues(terminal, firstRow + index) ? rowText : `${rowText.trimEnd()}\n`;
+    let start = 0;
+    let end = rowTexts.length;
+    while (end - start > 1 && rowTexts[start].trim() === '') start += 1;
+    while (end - start > 1 && rowTexts[end - 1].trim() === '') end -= 1;
+    return rowTexts.slice(start, end).map((rowText, index, kept) => {
+      if (index === kept.length - 1) return rowText.trimEnd();
+      return snapshotRowContinues(terminal, firstRow + start + index) ? rowText : `${rowText.trimEnd()}\n`;
     }).join('');
+  }
+
+  // The line through buffer row `row`, joined across the rows it wraps over
+  // the way copy joins them, with the cell under each character.
+  const LINK_LINE_MAX_ROWS = 64;
+  function terminalLineAround(terminal, row) {
+    const buffer = terminal.buffer.active;
+    let first = row;
+    while (first > 0 && row - first < LINK_LINE_MAX_ROWS && snapshotRowContinues(terminal, first - 1)) first -= 1;
+    let last = row;
+    while (last < buffer.length - 1 && last - row < LINK_LINE_MAX_ROWS && snapshotRowContinues(terminal, last)) last += 1;
+    let text = '';
+    const cells = [];
+    for (let y = first; y <= last; y += 1) {
+      const line = buffer.getLine(y);
+      for (let x = 0; x < terminal.cols; x += 1) {
+        const cell = line?.getCell(x);
+        // The second cell of a wide character has no text of its own.
+        if (!cell || cell.getWidth() === 0) continue;
+        const characters = cell.getChars() || ' ';
+        text += characters;
+        for (let unit = 0; unit < characters.length; unit += 1) cells.push({ x, y });
+      }
+    }
+    return { text, cells };
+  }
+
+  // Web links in the line through `row`, as xterm link ranges (1-based,
+  // inclusive), including one that wraps onto other rows.
+  function terminalLinksAround(terminal, row) {
+    const { text, cells } = terminalLineAround(terminal, row);
+    return terminalUrls(text).map(({ start, end, url }) => ({
+      url,
+      start: cells[start],
+      end: cells[end - 1],
+    })).filter(({ start, end }) => start.y <= row && end.y >= row);
+  }
+
+  function openTerminalLink(uri) {
+    const url = openableTerminalUrl(uri);
+    if (!url) return false;
+    window.open(url, '_blank', 'noopener,noreferrer');
+    return true;
+  }
+
+  // Links open on click: web URLs in the text, and links a program made with
+  // OSC 8, which xterm tracks per cell.
+  function enableTerminalLinks(activeTerminal) {
+    activeTerminal.options.linkHandler = {
+      activate: (_event, uri) => openTerminalLink(uri),
+      hover: (_event, uri, range) => noteTerminalLinkHover(uri, range),
+    };
+    activeTerminal.registerLinkProvider({
+      provideLinks(bufferLineNumber, callback) {
+        const links = terminalLinksAround(activeTerminal, bufferLineNumber - 1).map(({ url, start, end }) => {
+          const range = { start: { x: start.x + 1, y: start.y + 1 }, end: { x: end.x + 1, y: end.y + 1 } };
+          return {
+            range,
+            text: url,
+            decorations: { underline: true, pointerCursor: true },
+            activate: () => openTerminalLink(url),
+            hover: () => noteTerminalLinkHover(url, range),
+          };
+        });
+        callback(links.length ? links : undefined);
+      },
+    });
+  }
+
+  // A phone tap never reaches xterm's link handling: the pane keeps the
+  // compatibility mouse events from xterm, whose mousedown would also focus
+  // the keyboard. Move xterm's mouse to the tapped point instead: xterm finds
+  // the link there, an OSC 8 link included, and reports it as hovered.
+  let terminalLinkReplay;
+  function noteTerminalLinkHover(uri, range) {
+    if (terminalLinkReplay) terminalLinkReplay.links.push({ uri, range });
+  }
+
+  function terminalLinkAtPoint(pane, clientX, clientY) {
+    const screen = pane.terminal.element?.querySelector('.xterm-screen');
+    const point = terminalMousePoint(pane, clientX, clientY);
+    if (!screen || !point) return undefined;
+    const move = (x) => screen.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: x, clientY }));
+    terminalLinkReplay = { links: [] };
+    try {
+      // xterm ignores a move within the cell it saw last, so step to the
+      // row's other end first; it clamps a point off the screen to the edge.
+      // That end can hold the same link, which xterm then does not report
+      // again, so keep every link reported and take the one at the point.
+      const bounds = screen.getBoundingClientRect();
+      move(point.column === 1 ? bounds.right + 1 : bounds.left - 1);
+      move(clientX);
+      const x = point.column;
+      const y = pane.terminal.buffer.active.viewportY + point.row;
+      return terminalLinkReplay.links.findLast(({ range }) => range
+        && (y > range.start.y || (y === range.start.y && x >= range.start.x))
+        && (y < range.end.y || (y === range.end.y && x <= range.end.x)))?.uri;
+    } finally {
+      terminalLinkReplay = undefined;
+      screen.dispatchEvent(new MouseEvent('mouseleave'));
+    }
   }
 
   // A pane's own selection copies by line meaning too.
@@ -3039,6 +3147,7 @@ const { WebglAddon } = globalThis.WebglAddon;
     paneTerminal.loadAddon(paneFitAddon);
     paneTerminal.open(host);
     paneTerminal.parser.registerOscHandler(52, handleOsc52);
+    enableTerminalLinks(paneTerminal);
     paneTerminal.attachCustomKeyEventHandler((event) => paneTerminalKeyHandler(record, event));
     paneTerminal.element.addEventListener('contextmenu', (event) => {
       if (mobileQuery.matches && !mobileMouseMode) {
@@ -3454,6 +3563,8 @@ const { WebglAddon } = globalThis.WebglAddon;
       }
       event.preventDefault();
       event.stopImmediatePropagation();
+      // A tap on a link opens it instead of raising the keyboard.
+      if (openTerminalLink(terminalLinkAtPoint(record, event.clientX, event.clientY))) return;
       focusPaneKeyboard(record);
     }, true);
 
@@ -3501,7 +3612,7 @@ const { WebglAddon } = globalThis.WebglAddon;
     host.addEventListener('pointercancel', releasePointerMouse, true);
     for (const eventName of ['mousedown', 'mousemove', 'mouseup']) {
       host.addEventListener(eventName, (event) => {
-        if (!mobileQuery.matches) return;
+        if (!mobileQuery.matches || terminalLinkReplay) return;
         const preserveClipboardFocus = !mobileMouseMode
           && eventName === 'mousedown'
           && document.activeElement === paneKeyboardHelper(record)
@@ -4607,6 +4718,7 @@ const { WebglAddon } = globalThis.WebglAddon;
     terminal.open(terminalHost);
     enableWebglRenderer(terminal);
     terminal.parser.registerOscHandler(52, handleOsc52);
+    enableTerminalLinks(terminal);
     terminal.attachCustomKeyEventHandler((event) => {
       if (event.type !== 'keydown') return true;
       const modifiedEnter = physicalModifiedEnterData(event);
@@ -4826,6 +4938,10 @@ const { WebglAddon } = globalThis.WebglAddon;
     )) return;
     const pane = selectedPaneTerminal();
     if (!pane) return;
+    // The click that follows opens a tapped link; the keyboard stays down.
+    const touch = event.changedTouches?.[0];
+    if (touch && pane.host.contains(target)
+      && openableTerminalUrl(terminalLinkAtPoint(pane, touch.clientX, touch.clientY))) return;
     focusPaneKeyboard(pane);
   };
   // iOS focuses a button from its compatibility mousedown, and that focus
@@ -4855,15 +4971,23 @@ const { WebglAddon } = globalThis.WebglAddon;
   document.addEventListener('touchend', openKeyboardFromTap, true);
   // Hold-to-copy keeps the line structure: a wrapped row joins with nothing,
   // a hard break joins with a break. The selection stays native; only the
-  // clipboard text is rebuilt from the row markers.
-  const rowDivIndex = (node) => {
+  // clipboard text is rebuilt, from the snapshot's own rows. Each row's part
+  // of the selection is read from the row itself, not from the browser's text
+  // of the whole selection, whose line breaks and spaces vary by browser.
+  const snapshotRowPosition = (node, offset, end) => {
     let element = node?.nodeType === 1 ? node : node?.parentElement;
+    if (element?.classList?.contains('xterm-rows')) {
+      // A boundary between rows: the row after it starts, the row before it ends.
+      const index = end ? offset - 1 : offset;
+      const row = element.children[index];
+      return row ? { rows: element, index, node: row, offset: end ? row.childNodes.length : 0 } : undefined;
+    }
     while (element?.parentElement && !element.parentElement.classList.contains('xterm-rows')) {
       element = element.parentElement;
     }
     const rows = element?.parentElement;
     if (!rows?.classList?.contains('xterm-rows')) return undefined;
-    return [...rows.children].indexOf(element);
+    return { rows, index: [...rows.children].indexOf(element), node, offset };
   };
   document.addEventListener('copy', (event) => {
     const selected = [...paneTerminals.values()].find((candidate) => candidate.terminal.hasSelection());
@@ -4874,25 +4998,25 @@ const { WebglAddon } = globalThis.WebglAddon;
       return;
     }
     const pane = selectedPaneTerminal();
-    if (!pane?.snapshot) return;
+    const snapshot = pane?.snapshot?.terminal;
+    if (!snapshot) return;
     const selection = document.getSelection();
     if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return;
     const range = selection.getRangeAt(0);
-    const first = rowDivIndex(range.startContainer);
-    const last = rowDivIndex(range.endContainer);
-    if (first === undefined || last === undefined) return;
-    const rowTexts = selection.toString().split('\n');
-    if (rowTexts.length !== last - first + 1) return;
-    const buffer = pane.terminal.buffer?.active;
-    const baseRow = (buffer?.viewportY ?? 0) + first;
-    // Rebuild only when the rows match what the selection shows: a selection
-    // can start and end inside a row. Otherwise the browser's own text is the
-    // honest copy.
-    // Herdr pads rows with written spaces, which xterm does not trim.
-    const rowText = (index) => buffer?.getLine(baseRow + index)?.translateToString(true).trimEnd();
-    if (!rowText(0)?.endsWith(rowTexts[0].trimEnd())
-      || !rowText(last - first)?.startsWith(rowTexts.at(-1).trimEnd())) return;
-    event.clipboardData?.setData('text/plain', snapshotCopyText(pane.terminal, baseRow, rowTexts));
+    const first = snapshotRowPosition(range.startContainer, range.startOffset, false);
+    const last = snapshotRowPosition(range.endContainer, range.endOffset, true);
+    if (!first || !last || first.rows !== last.rows || last.index < first.index) return;
+    if (!pane.snapshot.view.contains(first.rows)) return;
+    const rowTexts = [];
+    for (let index = first.index; index <= last.index; index += 1) {
+      const part = document.createRange();
+      part.selectNodeContents(first.rows.children[index]);
+      if (index === first.index) part.setStart(first.node, first.offset);
+      if (index === last.index) part.setEnd(last.node, last.offset);
+      rowTexts.push(part.toString().replace(/\u00a0/g, ' '));
+    }
+    // The snapshot has no scrollback: its row n is DOM row n.
+    event.clipboardData?.setData('text/plain', snapshotCopyText(snapshot, first.index, rowTexts));
     event.preventDefault();
   }, true);
   // Window listeners run before the document ones that stop these events.
