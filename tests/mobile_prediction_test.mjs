@@ -3,7 +3,6 @@ import test from 'node:test';
 import {
   MOBILE_PREDICTION_TEXT_LIMIT,
   terminalCaretInput,
-  terminalHasEditableSuffix,
   terminalHasEditableText,
   terminalPredictionPrefix,
   terminalTextAtCursor,
@@ -164,13 +163,13 @@ test('all small bounded text edits preserve unknown terminal text and final care
 
 test('confirmation requires complete owned text across physical rows and the cursor', () => {
   const text = 'git chekout';
-  assert.equal(terminalHasEditableSuffix(terminalWithRows(['prompt> git ch', 'ekout']), text), true);
+  assert.equal(terminalHasEditableText(terminalWithRows(['prompt> git ch', 'ekout']), text), true);
   assert.equal(terminalHasEditableText(terminalWithRows(['prompt> git ch', 'ekout'], 10, 0), text), true);
   assert.equal(terminalHasEditableText(terminalWithRows(['prompt> abc ', 'def'], 9, 0), 'abc def'), true);
   assert.equal(terminalHasEditableText(terminalWithRows(['prompt> abcdef'], 8), 'abcdef'), true);
   assert.equal(terminalHasEditableText(terminalWithRows(['prompt> abcdef'], 14), 'abcdef'), true);
   assert.equal(terminalHasEditableText(terminalWithRows(['prompt> abcdef'], 2), 'abcdef'), false);
-  assert.equal(terminalHasEditableSuffix(terminalWithRows(['output: chekout']), text), false);
+  assert.equal(terminalHasEditableText(terminalWithRows(['output: chekout']), text), false);
   assert.equal(terminalHasEditableText(terminalWithRows(['eted']), 'deploy completed'), false);
   assert.equal(terminalHasEditableText(terminalWithRows(['unrelated output']), text), false);
 });

@@ -12,7 +12,7 @@ import * as links from '../herdr_web/static/terminal-links.js';
 const app = readFileSync(new URL('../herdr_web/static/app.js', import.meta.url), 'utf8');
 const core = app.slice(
   app.indexOf('  function paneKeyboardHelper(pane)'),
-  app.indexOf('  function noteMobilePredictionTerminalData(pane, data)'),
+  app.indexOf('  function noteComposeTerminalData(pane, data)'),
 );
 
 const settle = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -47,9 +47,10 @@ function harness(text = '', cursor = text.length, prefix = '') {
     closed: false,
     streamId: 'w1:p1',
     terminal: { textarea: helper, modes: {}, buffer: { active: buffer }, clearSelection() {} },
-    mobilePredictionPrefix: prefix,
-    mobilePredictionText: text,
-    mobilePredictionCursor: cursor,
+    compose: {
+      prefix, text, cursor,
+      seen: undefined, written: undefined, candidate: undefined, timer: undefined,
+    },
   };
   const context = vm.createContext({
     ...prediction,
@@ -83,7 +84,7 @@ function harness(text = '', cursor = text.length, prefix = '') {
     },
     applyMobileModifiers: (data) => data,
     consumeMobileModifiers() {},
-    setMobilePredictionAttributes() {},
+    setComposeBoxTraits() {},
     showBrowserToast() {},
     reportClientIssue() {},
     performance: { now: () => Date.now() },
@@ -110,7 +111,7 @@ function harness(text = '', cursor = text.length, prefix = '') {
       context.handleMobileTextInput(pane, event({ inputType: 'insertText', ...fields }));
     },
     render(next, at = next.length) { rendered = next; buffer.cursorX = at; },
-    frame() { context.syncMobilePredictionFromTerminal(pane); },
+    frame() { context.syncComposeFromTerminal(pane); },
     caret(at) {
       helper.setSelectionRange(at, at);
       context.handleMobileCaretSelection();
@@ -122,7 +123,7 @@ test('focus puts the line back into the invisible box', () => {
   const h = harness('hello', 5, 'prompt> ');
   h.helper.value = '';
   h.helper.setSelectionRange(0, 0);
-  h.context.prepareMobilePredictionFocus(h.pane);
+  h.context.prepareComposeFocus(h.pane);
   assert.equal(h.helper.value, 'prompt> hello', 'the box mirrors the terminal line');
   assert.equal(
     h.helper.selectionStart, 'prompt> hello'.length,
@@ -134,7 +135,7 @@ test('a deletion is an instruction and never waits for the settle', () => {
   const h = harness('abcdef', 6, 'prompt> ');
   h.type('prompt> abcd', 12);
   assert.equal(h.sent.join(''), '\x7f\x7f', 'both deletes go out at once');
-  assert.equal(h.pane.mobilePredictionText, 'abcd');
+  assert.equal(h.pane.compose.text, 'abcd');
 });
 
 test('a stream of larger edits cannot starve the settle deadline', async () => {
@@ -161,7 +162,7 @@ test('multi-line text is never replaced by one row', async () => {
   h.frame();
   h.frame();
   assert.equal(
-    h.pane.mobilePredictionText, 'line1\nline2',
+    h.pane.compose.text, 'line1\nline2',
     'the multi-line text survives a program row that repeated',
   );
 });
@@ -169,17 +170,17 @@ test('multi-line text is never replaced by one row', async () => {
 test('a write keeps its moment through a confirming frame', async () => {
   const h = harness('o', 1, 'prompt> ');
   h.type('prompt> ', 8);
-  assert.equal(h.pane.mobilePredictionText, '', 'the delete leaves nothing owned');
+  assert.equal(h.pane.compose.text, '', 'the delete leaves nothing owned');
   // A stale frame that still shows the deleted text must not end the
   // write's moment: nothing may adopt it back.
   h.render('prompt> o', 9);
   h.frame();
-  assert.ok(h.pane.composeWritten, 'the write in flight keeps its moment');
+  assert.ok(h.pane.compose.written, 'the write in flight keeps its moment');
 });
 
 test('a stale caret can never lock the box', () => {
   const h = harness('ab', 2, 'prompt> ');
-  h.pane.mobilePredictionCursor = 99;
+  h.pane.compose.cursor = 99;
   h.type('prompt> abc', 11);
   assert.equal(h.sent.join(''), 'c', 'typing goes through even from a caret the model lost');
 });
@@ -283,7 +284,7 @@ test('one character of typing goes out at once', () => {
   const h = harness('hello', 5, 'prompt> ');
   h.type('prompt> hello!');
   assert.deepEqual(h.sent, ['!']);
-  assert.equal(h.pane.mobilePredictionText, 'hello!');
+  assert.equal(h.pane.compose.text, 'hello!');
 });
 
 test('a swipe word or a hypothesis settles into one edit', async () => {
@@ -293,7 +294,7 @@ test('a swipe word or a hypothesis settles into one edit', async () => {
   await settle(320);
   assert.equal(h.sent.length, 1);
   assert.equal(h.sent[0].includes('seems fine'), true);
-  assert.equal(h.pane.mobilePredictionText, 'seems fine');
+  assert.equal(h.pane.compose.text, 'seems fine');
 });
 
 test('typing during the settle sends everything at once', async () => {
@@ -310,15 +311,15 @@ test('a caret move sends cursor movement and no text', () => {
   const h = harness('hello', 5, 'prompt> ');
   h.caret('prompt> '.length + 2);
   assert.deepEqual(h.sent, ['\x1b[D'.repeat(3)]);
-  assert.equal(h.pane.mobilePredictionCursor, 2);
-  assert.equal(h.pane.mobilePredictionText, 'hello', 'a caret move is not an edit');
+  assert.equal(h.pane.compose.cursor, 2);
+  assert.equal(h.pane.compose.text, 'hello', 'a caret move is not an edit');
 });
 
 test('backspace deletes exactly one character', () => {
   const h = harness('abc', 3, 'prompt> ');
   h.type('prompt> ab');
   assert.deepEqual(h.sent, ['\x7f']);
-  assert.equal(h.pane.mobilePredictionText, 'ab');
+  assert.equal(h.pane.compose.text, 'ab');
 });
 
 test('a partial echo does not swallow what was typed', () => {
@@ -344,7 +345,7 @@ test('a program that changes its own line is left alone with the draft', () => {
 
 test('a composition that never ends does not block typing', async () => {
   const h = harness('', 0, 'prompt> ');
-  h.context.handleMobilePredictionCompositionStart({
+  h.context.handleComposeCompositionStart({
     target: h.helper,
     stopImmediatePropagation() {},
   });
@@ -361,7 +362,7 @@ test('a control character in the box never eats the next character', () => {
   const h = harness('hello', 5, 'prompt> ');
   h.type('prompt> hello\x00q', 'prompt> hello\x00q'.length);
   assert.equal(h.helper.value.includes('\x00'), false, 'a control character is not text');
-  assert.equal(h.pane.mobilePredictionText, 'helloq');
+  assert.equal(h.pane.compose.text, 'helloq');
   assert.deepEqual(h.sent, ['q'], 'the next character is not eaten');
 });
 
@@ -406,11 +407,11 @@ test('a delete crosses the line break of multi-line text', async () => {
   const h = harness('line1\nline2', 11, 'prompt> ');
   h.type('prompt> line1\nline', 'prompt> line1\nline'.length);
   assert.deepEqual(h.sent, ['\x7f'], 'the delete crosses into the second line');
-  assert.equal(h.pane.mobilePredictionText, 'line1\nline');
+  assert.equal(h.pane.compose.text, 'line1\nline');
   h.type('prompt> line1', 'prompt> line1'.length);
   await settle(320);
   assert.equal(h.sent[1], '\x7f'.repeat(5), 'the line break itself is deleted too');
-  assert.equal(h.pane.mobilePredictionText, 'line1');
+  assert.equal(h.pane.compose.text, 'line1');
 });
 
 test('the shadow crosses a row boundary and a delete crosses with it', () => {
@@ -448,18 +449,18 @@ test('a control key sends text that is still settling before itself', () => {
   h.type('prompt> echo ', 13);
   h.type('prompt> echo quick', 18);
   assert.equal(h.sent.join(''), '', 'a predictive word waits for the settle');
-  h.context.clearMobilePredictionState(h.pane, true);
+  h.context.resetCompose(h.pane, true);
   h.sent.push('\r');
   assert.deepEqual(h.sent, ['echo quick', '\r'], 'the word reaches the terminal ahead of Return');
-  assert.equal(h.pane.composeTimer, undefined, 'and the settle is cancelled');
+  assert.equal(h.pane.compose.timer, undefined, 'and the settle is cancelled');
 });
 
 test('a reset model judges the next keystroke on its own', () => {
   const h = harness('', 0, 'prompt> ');
   h.type('prompt> echo ab', 15);
-  h.context.clearMobilePredictionState(h.pane, true);
+  h.context.resetCompose(h.pane, true);
   h.sent.length = 0;
-  h.pane.mobilePredictionPrefix = 'prompt> echo a';
+  h.pane.compose.prefix = 'prompt> echo a';
   h.helper.value = 'prompt> echo a';
   h.type('prompt> echo aX', 15);
   assert.deepEqual(h.sent, ['X'], 'one typed character goes out at once');
@@ -482,4 +483,27 @@ test('a space that WebKit stores as a no-break space reaches the shell as a spac
   // At the next key WebKit turns it back into a space: nothing to resend.
   h.type('prompt> echo a', 14);
   assert.equal(h.sent.join(''), 'echo a');
+});
+
+test('focus starts from the line when it changed while the keyboard was down', () => {
+  const h = harness('draft', 5, 'prompt> ');
+  // The line was submitted elsewhere; a fresh prompt shows.
+  h.render('prompt> ', 8);
+  h.context.prepareComposeFocus(h.pane);
+  assert.equal(h.pane.compose.text, '', 'the old draft is not the line any more');
+  assert.equal(h.helper.value, 'prompt> ', 'the box mirrors the line as it is');
+});
+
+test('a line the program rewrote keeps its prompt out of the editable text', () => {
+  const h = harness('ab', 2, 'prompt> ');
+  // Another client appends to the draft; the line repeats, so it is adopted.
+  h.render('prompt> abX', 11);
+  h.frame();
+  h.frame();
+  assert.equal(h.pane.compose.text, '', 'the draft starts again after the program wrote');
+  assert.equal(h.pane.compose.prefix, 'prompt> abX', 'and the prompt is never editable text');
+  assert.equal(h.helper.value, 'prompt> abX', 'the box still mirrors the line');
+  // A caret moved into the prompt shows where typing lands.
+  h.caret(2);
+  assert.equal(h.helper.selectionStart, 11);
 });
