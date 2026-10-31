@@ -174,6 +174,23 @@ header {
   padding: .65rem .8rem;
 }
 .clipboard-retry { pointer-events: auto; text-align: left; }
+.input-log {
+  background: color-mix(in srgb, var(--theme-background) 88%, transparent);
+  border: 1px solid var(--theme-accent);
+  color: var(--theme-text);
+  font: 11px/1.35 "Herdr MesloLGS NF", monospace;
+  left: .5rem;
+  margin: 0;
+  max-width: calc(100vw - 1rem);
+  overflow: hidden;
+  padding: .4rem .5rem;
+  pointer-events: none;
+  position: fixed;
+  top: calc(var(--visual-viewport-top) + 3rem);
+  white-space: pre-wrap;
+  word-break: break-all;
+  z-index: 20;
+}
 @keyframes toast-in { from { opacity: 0; transform: translateY(6px); } }
 #telemetry {
   align-items: center;
@@ -500,6 +517,9 @@ header {
 .pane-snapshot-view .xterm-helper-textarea { pointer-events: none !important; }
 .pane-terminal .xterm-viewport { overflow-y: hidden; }
 .xterm-helper-textarea.mobile-keyboard-target {
+  /* xterm's nowrap collapses spaces, and WebKit then types a trailing space
+     as a no-break space. pre keeps the line unwrapped and spaces as typed. */
+  white-space: pre;
   -webkit-appearance: none;
   -webkit-touch-callout: default;
   appearance: none;

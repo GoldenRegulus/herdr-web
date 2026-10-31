@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   MOBILE_PREDICTION_TEXT_LIMIT,
-  mobileTextWithoutRedundantSeparator,
   terminalCaretInput,
   terminalHasEditableSuffix,
   terminalHasEditableText,
@@ -13,6 +12,17 @@ import {
 
 const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
 const parts = (text) => [...segmenter.segment(text)].map((part) => part.segment);
+// The terminal model follows readline, measured against bash in Herdr: one
+// arrow or delete covers a code point and the zero-width marks after it.
+const ZERO_WIDTH = /[\p{Mn}\p{Me}\u200d\ufe00-\ufe0f]/u;
+const characters = (text) => {
+  const units = [];
+  for (const point of text) {
+    if (units.length && ZERO_WIDTH.test(point)) units[units.length - 1] += point;
+    else units.push(point);
+  }
+  return units;
+};
 const prefix = 'unknown prefix|';
 const suffix = '|unknown suffix';
 
@@ -21,11 +31,11 @@ function applyTerminalData(state, data) {
     const arrow = /^\x1b[\[O]([CD])/.exec(data);
     if (arrow) {
       state.cursor += arrow[1] === 'D'
-        ? -(parts(state.text.slice(0, state.cursor)).at(-1)?.length || 0)
-        : (parts(state.text.slice(state.cursor))[0]?.length || 0);
+        ? -(characters(state.text.slice(0, state.cursor)).at(-1)?.length || 0)
+        : (characters(state.text.slice(state.cursor))[0]?.length || 0);
       data = data.slice(arrow[0].length);
     } else if (data[0] === '\x7f') {
-      const length = parts(state.text.slice(0, state.cursor)).at(-1)?.length || 0;
+      const length = characters(state.text.slice(0, state.cursor)).at(-1)?.length || 0;
       state.text = state.text.slice(0, state.cursor - length) + state.text.slice(state.cursor);
       state.cursor -= length;
       data = data.slice(1);
@@ -90,27 +100,6 @@ test('terminal shadow prefix excludes the owned editable suffix', () => {
   ), undefined);
 });
 
-test('native automatic separators are removed only after existing whitespace', () => {
-  assert.deepEqual(mobileTextWithoutRedundantSeparator('', ' hello', 6, 'prompt> '), {
-    text: 'hello', cursor: 5,
-  });
-  assert.deepEqual(mobileTextWithoutRedundantSeparator('one ', 'one  swipe', 10, 'prompt> '), {
-    text: 'one swipe', cursor: 9,
-  });
-  assert.deepEqual(mobileTextWithoutRedundantSeparator('one', 'one swipe', 9, 'prompt> '), {
-    text: 'one swipe', cursor: 9,
-  });
-  assert.deepEqual(mobileTextWithoutRedundantSeparator('hello', ' hello', 6, 'prompt> '), {
-    text: 'hello', cursor: 5,
-  });
-  assert.deepEqual(mobileTextWithoutRedundantSeparator('one ', 'one  ', 5, 'prompt> '), {
-    text: 'one ', cursor: 4,
-  });
-  assert.deepEqual(mobileTextWithoutRedundantSeparator('', ' ', 1, 'prompt> '), {
-    text: '', cursor: 0,
-  });
-});
-
 test('native input preserves unchanged text on both sides of the edit', () => {
   assert.deepEqual(checkEdit('th', 'they are being'), {
     data: 'ey are being', removed: 0, inserted: 'ey are being',
@@ -151,10 +140,11 @@ test('dictation revisions and unchanged duplicates produce one final hypothesis'
   }
 });
 
-test('caret movement and replacement use grapheme boundaries, not UTF-16 units or cell width', () => {
+test('caret offsets use grapheme boundaries, moves count terminal characters', () => {
   const text = 'a👍🏽e\u0301日本';
-  assert.equal(terminalCaretInput(text, text.length, 1), '\x1b[D'.repeat(4));
-  assert.equal(terminalCaretInput(text, 1, 5), '\x1b[C');
+  // 本, 日, é and the two characters of 👍🏽.
+  assert.equal(terminalCaretInput(text, text.length, 1), '\x1b[D'.repeat(5));
+  assert.equal(terminalCaretInput(text, 1, 5), '\x1b[C'.repeat(2));
   assert.equal(terminalCaretInput(text, 2, 5), undefined);
   assert.equal(terminalCaretInput(text, 5, 6), undefined);
   checkEdit('go 👍🏽 now', 'go 👩‍💻 now', 7, 8);
@@ -186,12 +176,24 @@ test('confirmation requires complete owned text across physical rows and the cur
 });
 
 test('invalid text, caret offsets, and oversized replacements produce no input', () => {
-  for (const value of [null, undefined, 42, '\n', 'a\x1bb', 'x'.repeat(MOBILE_PREDICTION_TEXT_LIMIT + 1)]) {
+  for (const value of [null, undefined, 42, '\x00', 'a\x1bb', 'x'.repeat(MOBILE_PREDICTION_TEXT_LIMIT + 1)]) {
     assert.equal(terminalTextInputDelta('abc', value), undefined);
     assert.equal(terminalCaretInput(value, 0, 0), undefined);
   }
+  // A line break is text: multi-line input must stay editable.
+  assert.notEqual(terminalTextInputDelta('abc', 'a\nb'), undefined);
   for (const cursor of [-1, 4, 0.5, NaN]) {
     assert.equal(terminalTextInputDelta('abc', 'abc', cursor, 0), undefined);
     assert.equal(terminalCaretInput('abc', 0, cursor), undefined);
   }
+});
+
+test('deletes and caret moves count terminal characters, not graphemes', () => {
+  // Readline deletes a code point; a zero-width mark goes with the one before.
+  const remove = (text) => terminalTextInputDelta(`a${text}`, 'a', text.length + 1, 1).data;
+  assert.equal(remove('👍🏽'), '\x7f\x7f', 'a skin tone is its own character');
+  assert.equal(remove('e\u0301'), '\x7f', 'a combining accent is not');
+  assert.equal(remove('❤️'), '\x7f', 'nor is a variation selector');
+  assert.equal(remove('👨‍💻'), '\x7f\x7f', 'a joined emoji is its visible parts');
+  assert.equal(terminalCaretInput('x👍🏽y', 6, 1), '\x1b[D'.repeat(3), 'moves step over each character');
 });

@@ -14,7 +14,8 @@ function graphemes(text) {
 function validText(text) {
   return typeof text === 'string'
     && text.length <= MOBILE_PREDICTION_TEXT_LIMIT
-    && !/[\x00-\x1f\x7f]/u.test(text);
+    // A line break is text: multi-line input must stay editable.
+    && !/[\x00-\x09\x0b-\x1f\x7f]/u.test(text);
 }
 
 function caretIndex(parts, offset) {
@@ -27,9 +28,23 @@ function caretIndex(parts, offset) {
   return undefined;
 }
 
-function moveCaret(from, to, applicationCursorKeys) {
+// A terminal line editor moves and deletes one character at a time. As in
+// readline, a character is a code point, and a zero-width mark belongs to the
+// one before it: 👍🏽 is two characters there, é with a combining accent one.
+const ZERO_WIDTH = /[\p{Mn}\p{Me}\u200d\ufe00-\ufe0f\u{e0100}-\u{e01ef}]/u;
+
+function terminalCharacters(parts) {
+  let count = 0;
+  for (const part of parts) {
+    count += Math.max(1, [...part].filter((point) => !ZERO_WIDTH.test(point)).length);
+  }
+  return count;
+}
+
+function moveCaret(parts, from, to, applicationCursorKeys) {
   const prefix = applicationCursorKeys ? '\x1bO' : '\x1b[';
-  return (prefix + (to < from ? 'D' : 'C')).repeat(Math.abs(to - from));
+  const steps = terminalCharacters(parts.slice(Math.min(from, to), Math.max(from, to)));
+  return (prefix + (to < from ? 'D' : 'C')).repeat(steps);
 }
 
 export function terminalCaretInput(text, from, to, applicationCursorKeys = false) {
@@ -38,39 +53,85 @@ export function terminalCaretInput(text, from, to, applicationCursorKeys = false
   const start = caretIndex(parts, from);
   const end = caretIndex(parts, to);
   if (start === undefined || end === undefined) return undefined;
-  return moveCaret(start, end, applicationCursorKeys);
+  return moveCaret(parts, start, end, applicationCursorKeys);
 }
 
-export function terminalTextBeforeCursor(terminal) {
-  const shadow = terminalTextAtCursor(terminal);
+// The fold around the cursor covers the text being composed or confirmed.
+// Rows join with no break when they are one wrapped line. A hard row
+// boundary joins with a line break only when the composed text has that
+// break. A row the text does not cover is program output and stays out.
+function tailMatch(candidate, target) {
+  const limit = Math.min(candidate.length, target.length);
+  for (let size = limit; size > 0; size -= 1) {
+    if (candidate.endsWith(target.slice(target.length - size))) return size;
+  }
+  return 0;
+}
+
+function headMatch(candidate, target) {
+  const limit = Math.min(candidate.length, target.length);
+  for (let size = limit; size > 0; size -= 1) {
+    if (target.startsWith(candidate.slice(0, size))) return size;
+  }
+  return 0;
+}
+
+export function terminalTextBeforeCursor(terminal, composed) {
+  const shadow = terminalTextAtCursor(terminal, composed);
   return shadow.text.slice(0, shadow.cursor);
 }
 
-export function terminalTextAtCursor(terminal) {
+export function terminalTextAtCursor(terminal, composed) {
   const buffer = terminal?.buffer?.active;
   if (!buffer) return { text: '', cursor: 0 };
   const cursorRow = buffer.baseY + buffer.cursorY;
-  let row = cursorRow;
-  let line = buffer.getLine(row);
+  const line = buffer.getLine(cursorRow);
   if (!line) return { text: '', cursor: 0 };
 
-  const beforeParts = [line.translateToString(false, 0, buffer.cursorX)];
-  while (line.isWrapped && row > 0 && beforeParts.join('').length < MOBILE_PREDICTION_TEXT_LIMIT) {
+  const composedText = typeof composed?.text === 'string' ? composed.text : '';
+  const composedCursor = Number.isInteger(composed?.cursor)
+    ? Math.max(0, Math.min(composedText.length, composed.cursor))
+    : composedText.length;
+  const targetBefore = composedText.slice(0, composedCursor);
+  const targetAfter = composedText.slice(composedCursor);
+
+  let row = cursorRow;
+  let before = line.translateToString(false, 0, buffer.cursorX);
+  while (row > 0 && before.length < MOBILE_PREDICTION_TEXT_LIMIT) {
+    if (targetBefore && before.endsWith(targetBefore)) break;
+    const wrapped = buffer.getLine(row)?.isWrapped === true;
+    const above = buffer.getLine(row - 1);
+    if (!above) break;
+    const chunk = above.translateToString(true);
+    let best;
+    for (const sep of wrapped ? [''] : ['', '\n']) {
+      const candidate = chunk + sep + before;
+      const match = targetBefore ? tailMatch(candidate, targetBefore) : (wrapped ? 1 : 0);
+      if (!best || match > best.match) best = { candidate, match };
+    }
+    if (!best || best.match <= 0) break;
+    before = best.candidate;
     row -= 1;
-    line = buffer.getLine(row);
-    if (!line) break;
-    beforeParts.unshift(line.translateToString(false));
   }
-  const before = beforeParts.join('');
-  const afterParts = [buffer.getLine(cursorRow).translateToString(true, buffer.cursorX)];
+  let after = line.translateToString(true, buffer.cursorX);
   row = cursorRow + 1;
-  line = buffer.getLine(row);
-  while (line?.isWrapped && before.length + afterParts.join('').length < MOBILE_PREDICTION_TEXT_LIMIT) {
-    afterParts.push(line.translateToString(true));
+  let next = buffer.getLine(row);
+  while (next && before.length + after.length < MOBILE_PREDICTION_TEXT_LIMIT) {
+    if (targetAfter && after.startsWith(targetAfter)) break;
+    const wrapped = next.isWrapped === true;
+    const chunk = next.translateToString(true);
+    let best;
+    for (const sep of wrapped ? [''] : ['', '\n']) {
+      const candidate = after + sep + chunk;
+      const match = targetAfter ? headMatch(candidate, targetAfter) : (wrapped ? 1 : 0);
+      if (!best || match > best.match) best = { candidate, match };
+    }
+    if (!best || best.match <= 0) break;
+    after = best.candidate;
     row += 1;
-    line = buffer.getLine(row);
+    next = buffer.getLine(row);
   }
-  const after = afterParts.join('').trimEnd();
+  after = after.trimEnd();
   const start = Math.max(0, before.length + after.length - MOBILE_PREDICTION_TEXT_LIMIT);
   return {
     text: (before + after).slice(start, start + MOBILE_PREDICTION_TEXT_LIMIT),
@@ -78,37 +139,55 @@ export function terminalTextAtCursor(terminal) {
   };
 }
 
-// Read only enough physical rows to confirm the owned text. Herdr's explicit
-// cursor positioning does not always retain xterm's isWrapped markers.
-function textAroundCursor(terminal, limit) {
+function lineBreaks(text) {
+  return (typeof text === 'string' ? text.match(/\n/g) : null)?.length || 0;
+}
+
+// Read enough physical rows to find or confirm the owned text. This window
+// searches, so rows fold freely; only the join follows the text, since its
+// line breaks are the only hard boundaries it can know.
+function textAroundCursor(terminal, text, limit = text.length) {
   const buffer = terminal?.buffer?.active;
   if (!buffer) return undefined;
   const row = buffer.baseY + buffer.cursorY;
   const line = buffer.getLine(row);
   if (!line) return undefined;
+  let breaks = lineBreaks(text);
   let before = line.translateToString(false, 0, buffer.cursorX);
   let after = line.translateToString(false, buffer.cursorX);
   for (let step = 1; step <= limit && before.length < limit && row >= step; step += 1) {
+    const wrapped = buffer.getLine(row - step + 1)?.isWrapped === true;
+    let sep = '';
+    if (!wrapped && breaks > 0) {
+      sep = '\n';
+      breaks -= 1;
+    }
     const previous = buffer.getLine(row - step);
     if (!previous) break;
-    before = previous.translateToString(false) + before;
+    before = previous.translateToString(false) + sep + before;
   }
   for (let step = 1; step <= limit && after.length < limit; step += 1) {
     const next = buffer.getLine(row + step);
     if (!next) break;
-    after += next.translateToString(false);
+    const wrapped = next.isWrapped === true;
+    let sep = '';
+    if (!wrapped && breaks > 0) {
+      sep = '\n';
+      breaks -= 1;
+    }
+    after += sep + next.translateToString(false);
   }
   return { before: before.slice(-limit), after: after.slice(0, limit) };
 }
 
 export function terminalHasEditableSuffix(terminal, text) {
   if (!validText(text) || !text) return false;
-  return textAroundCursor(terminal, text.length)?.before.endsWith(text) === true;
+  return textAroundCursor(terminal, text)?.before.endsWith(text) === true;
 }
 
 export function terminalHasEditableText(terminal, text) {
   if (!validText(text) || !text) return false;
-  const around = textAroundCursor(terminal, text.length);
+  const around = textAroundCursor(terminal, text);
   if (!around) return false;
   const joined = around.before + around.after;
   // A rendered frame can still show an earlier caret position while ordered
@@ -123,7 +202,7 @@ export function terminalPredictionPrefix(
   terminal, text = '', cursor = text.length, existingPrefix,
 ) {
   if (!validText(text) || terminalCaretInput(text, cursor, cursor) === undefined) return undefined;
-  let before = terminalTextBeforeCursor(terminal);
+  let before = terminalTextBeforeCursor(terminal, { text, cursor });
   const maximumPrefixLength = MOBILE_PREDICTION_TEXT_LIMIT - text.length;
   if (!text) return before.slice(-maximumPrefixLength);
   if (!terminalHasEditableText(terminal, text)) return undefined;
@@ -135,7 +214,7 @@ export function terminalPredictionPrefix(
       if (maximumPrefixLength === 0) return '';
       return existingPrefix.slice(-maximumPrefixLength);
     }
-    before = textAroundCursor(terminal, MOBILE_PREDICTION_TEXT_LIMIT)?.before || before;
+    before = textAroundCursor(terminal, text, MOBILE_PREDICTION_TEXT_LIMIT)?.before || before;
   }
   let editableBeforeCursor = '';
   let candidate = '';
@@ -145,31 +224,6 @@ export function terminalPredictionPrefix(
   }
   if (maximumPrefixLength === 0) return '';
   return before.slice(0, before.length - editableBeforeCursor.length).slice(-maximumPrefixLength);
-}
-
-export function mobileTextWithoutRedundantSeparator(
-  previousText, nextText, nextCursor, staticPrefix = '',
-) {
-  if (!validText(previousText) || !validText(nextText)
-    || terminalCaretInput(nextText, nextCursor, nextCursor) === undefined) return undefined;
-  const previous = graphemes(previousText);
-  const next = graphemes(nextText);
-  let shared = 0;
-  while (shared < previous.length && shared < next.length
-    && previous[shared] === next[shared]) shared += 1;
-  let tail = 0;
-  while (tail < previous.length - shared && tail < next.length - shared
-    && previous[previous.length - tail - 1] === next[next.length - tail - 1]) tail += 1;
-  const inserted = next.slice(shared, next.length - tail);
-  const before = shared > 0 ? previous[shared - 1] : graphemes(staticPrefix).at(-1);
-  if (inserted[0] !== ' ' || !/^\s$/u.test(before || '')) {
-    return { text: nextText, cursor: nextCursor };
-  }
-  const separatorOffset = next.slice(0, shared).join('').length;
-  return {
-    text: next.slice(0, shared).join('') + next.slice(shared + 1).join(''),
-    cursor: nextCursor > separatorOffset ? nextCursor - 1 : nextCursor,
-  };
 }
 
 export function terminalTextInputDelta(
@@ -188,7 +242,7 @@ export function terminalTextInputDelta(
     && previous[shared] === next[shared]) shared += 1;
   if (shared === previous.length && shared === next.length) {
     return {
-      data: moveCaret(from, to, applicationCursorKeys),
+      data: moveCaret(next, from, to, applicationCursorKeys),
       removed: 0,
       inserted: '',
       insertedStart: 0,
@@ -202,9 +256,10 @@ export function terminalTextInputDelta(
   const inserted = next.slice(shared, next.length - tail).join('');
   const insertedStart = next.slice(0, shared).join('').length;
   return {
-    data: moveCaret(from, shared + removed, applicationCursorKeys)
-      + DELETE_CHARACTER.repeat(removed) + inserted
-      + moveCaret(next.length - tail, to, applicationCursorKeys),
+    data: moveCaret(previous, from, shared + removed, applicationCursorKeys)
+      + DELETE_CHARACTER.repeat(terminalCharacters(previous.slice(shared, shared + removed)))
+      + inserted
+      + moveCaret(next, next.length - tail, to, applicationCursorKeys),
     removed,
     inserted,
     insertedStart,

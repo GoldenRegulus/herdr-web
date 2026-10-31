@@ -13,12 +13,11 @@ import {
 } from './input-buffer.js';
 import {
   MOBILE_PREDICTION_TEXT_LIMIT,
-  mobileTextWithoutRedundantSeparator,
-  terminalCaretInput,
   terminalPredictionPrefix,
   terminalTextAtCursor,
   terminalTextInputDelta,
 } from './mobile-prediction.js';
+import { openableTerminalUrl, terminalUrls } from './terminal-links.js';
 import './vendor/xterm.js';
 import './vendor/xterm-addon-fit.js';
 import './vendor/xterm-addon-webgl.js';
@@ -142,6 +141,56 @@ const { WebglAddon } = globalThis.WebglAddon;
   const androidKeyboard = /Android/.test(navigator.userAgent)
     || navigator.userAgentData?.platform === 'Android';
   const nativeKeyboardInput = iosKeyboard || androidKeyboard;
+
+  // The input log shows what the keyboard does and what reaches the terminal,
+  // on screen, for diagnosing a phone keyboard. It is switched on in the
+  // browse menu, or with ?inputlog, and nothing leaves the page.
+  const INPUT_LOG_KEY = 'herdr-web-input-log';
+  const inputLogView = document.createElement('pre');
+  inputLogView.className = 'input-log';
+  inputLogView.hidden = true;
+  document.body.append(inputLogView);
+  const inputLogLines = [];
+  let inputLogEnabled = new URLSearchParams(location.search).has('inputlog') || readInputLogEnabled();
+
+  function readInputLogEnabled() {
+    try {
+      return localStorage.getItem(INPUT_LOG_KEY) === 'true';
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function setInputLogEnabled(enabled) {
+    inputLogEnabled = enabled;
+    inputLogLines.length = 0;
+    try {
+      if (enabled) localStorage.setItem(INPUT_LOG_KEY, 'true');
+      else localStorage.removeItem(INPUT_LOG_KEY);
+    } catch (_) {
+      // The log still applies for this page when storage is unavailable.
+    }
+    renderInputLog();
+  }
+
+  function renderInputLog() {
+    inputLogView.hidden = !inputLogEnabled;
+    // The first line describes the page and stays.
+    const header = `mobile=${mobileQuery.matches} ios=${iosKeyboard} android=${androidKeyboard} width=${innerWidth}`;
+    inputLogView.textContent = [header, ...inputLogLines].join('\n');
+  }
+
+  function inputLog(line) {
+    if (!inputLogEnabled) return;
+    inputLogLines.push(line);
+    if (inputLogLines.length > 16) inputLogLines.shift();
+    renderInputLog();
+  }
+  // A dash looks like a hyphen and a curly quote like a straight one: name
+  // every character outside printable ASCII.
+  const inputLogText = (text) => String(text ?? '').replace(
+    /[^\x20-\x7e]/gu, (character) => `\\u{${character.codePointAt(0).toString(16)}}`,
+  );
   // A touch-capable device owns the pane gesture in every layout, not only
   // the mobile layout. The stylesheet reads this marker to set touch-action.
   const touchInput = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
@@ -1021,7 +1070,24 @@ const { WebglAddon } = globalThis.WebglAddon;
     const options = document.createElement('div');
     options.className = 'sheet-options';
     options.append(sheetHeading('Terminal size'), terminalZoomControls());
+    options.append(sheetHeading('Diagnostics'), inputLogToggle());
     sheetContent.append(options);
+  }
+
+  function inputLogToggle() {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'more-action';
+    const sync = () => {
+      button.textContent = inputLogEnabled ? 'Hide input log' : 'Show input log';
+      button.setAttribute('aria-pressed', String(inputLogEnabled));
+    };
+    button.addEventListener('click', () => {
+      setInputLogEnabled(!inputLogEnabled);
+      sync();
+    });
+    sync();
+    return button;
   }
 
   function sheetItem(label, detail, current, statusValue, action) {
@@ -1569,8 +1635,16 @@ const { WebglAddon } = globalThis.WebglAddon;
     }
     const pane = selectedPaneTerminal();
     if (!pane) return;
-    const keyboardFocused = document.activeElement === paneKeyboardHelper(pane);
-    if (!keyboardFocused && document.documentElement.dataset.mobileKeyboard !== 'open') return;
+    const helper = paneKeyboardHelper(pane);
+    const keyboardFocused = document.activeElement === helper;
+    // Restore focus when the keyboard is ours. A control tap moves focus to
+    // its button and losing focus closes the keyboard. A swipe or scroll
+    // must never raise it: only our own focus state counts — never the
+    // viewport, whose URL bar collapse looks exactly like a keyboard.
+    const controlFocused = document.activeElement?.closest?.(
+      '#pane-mobile-bar, #mobile-toolbar',
+    ) != null;
+    if (!keyboardFocused && !controlFocused) return;
     focusPaneKeyboard(pane);
   }
 
@@ -1973,28 +2047,37 @@ const { WebglAddon } = globalThis.WebglAddon;
     };
   }
 
-  // The native iOS helper owns text, replacement, composition, caret, and
-  // deletion edits for the complete visible input line. This application sends
-  // each proposed line delta once. The shell decides whether an edit is valid,
-  // and returned terminal cells replace a rejected proposal. xterm owns
-  // explicit terminal controls. The native marker is only an empty-helper
-  // Backspace fallback. It is never terminal data.
+  // On phones, xterm's hidden textarea is the compose box: it mirrors the
+  // terminal line at the cursor, and every change to its value is sent as the
+  // smallest terminal edit that reproduces it. xterm owns explicit controls.
   function paneKeyboardHelper(pane) {
     return pane?.terminal.textarea;
   }
 
-  function setMobilePredictionAttributes(helper, enabled) {
-    if (!helper) return;
-    helper.setAttribute('autocorrect', enabled ? 'on' : 'off');
+  function setMobilePredictionAttributes(helper) {
+    if (!helper || helper.mobileKeyboardTraits) return;
+    helper.mobileKeyboardTraits = true;
+    // The keyboard traits must stay constant while the field is focused:
+    // changing them makes the system keyboard rebuild, which pops the
+    // prediction bar and can discard text that is being composed.
+    // Commands, flags and file names are not dictionary words: the keyboard
+    // must not replace what was typed. WebKit also switches off iOS smart
+    // quotes and dashes for a field with spellcheck off.
+    helper.setAttribute('autocorrect', 'off');
     helper.setAttribute('autocapitalize', 'none');
     helper.setAttribute('autocomplete', 'off');
-    helper.setAttribute('spellcheck', enabled ? 'true' : 'false');
-    if (enabled) helper.setAttribute('enterkeyhint', 'send');
-    else helper.removeAttribute('enterkeyhint');
+    helper.setAttribute('spellcheck', 'false');
+    helper.setAttribute('enterkeyhint', 'send');
   }
 
   function mobilePredictionHelperValue(pane) {
     return `${pane?.mobilePredictionPrefix || ''}${pane?.mobilePredictionText || ''}`;
+  }
+
+  // WebKit can store a typed space as a no-break space, which a shell would
+  // read as part of a word. Read the box with plain spaces.
+  function mobileBoxValue(helper) {
+    return helper.value.replace(/\u00a0/g, ' ');
   }
 
   function restoreMobilePredictionHelper(pane) {
@@ -2006,88 +2089,101 @@ const { WebglAddon } = globalThis.WebglAddon;
     helper.setSelectionRange(cursor, cursor);
   }
 
+  function prepareMobilePredictionFocus(pane) {
+    // The box must mirror the line the terminal shows before the first
+    // keystroke of this focus.
+    syncMobilePredictionFromTerminal(pane);
+    restoreMobilePredictionHelper(pane);
+  }
+
   function clearMobilePredictionState(pane, clearHelper = false) {
     if (!pane) return;
+    // A control key or paste follows: text still settling goes out first.
+    if (pane.composeTimer !== undefined) {
+      const helper = paneKeyboardHelper(pane);
+      if (helper) composeWrite(pane, helper, composeBoxState(pane, helper));
+      clearTimeout(pane.composeTimer);
+      pane.composeTimer = undefined;
+    }
+    pane.composeSeen = undefined;
+    pane.composeSettleSince = undefined;
+    pane.composeAdoptCandidate = undefined;
+    pane.composeWritten = undefined;
     pane.mobilePredictionPending = false;
     pane.mobilePredictionPrefix = '';
     pane.mobilePredictionText = '';
     pane.mobilePredictionCursor = 0;
     pane.mobilePredictionConfirmed = false;
-    pane.mobilePredictionComposition = undefined;
-    const helper = paneKeyboardHelper(pane);
-    setMobilePredictionAttributes(helper, false);
     if (clearHelper) {
+      const helper = paneKeyboardHelper(pane);
       if (helper) helper.value = '';
     }
   }
 
   function replaceMobilePredictionFromTerminal(pane, helper) {
     pane.mobilePredictionPending = false;
-    const shadow = terminalTextAtCursor(pane.terminal);
+    // The composed text decides how many rows are the user's own: its line
+    // breaks are the rows it created.
+    const shadow = terminalTextAtCursor(pane.terminal, composeShadow(pane));
     pane.mobilePredictionPrefix = '';
     pane.mobilePredictionText = shadow.text;
     pane.mobilePredictionCursor = shadow.cursor;
     pane.mobilePredictionConfirmed = true;
-    setMobilePredictionAttributes(helper, true);
     if (helper) restoreMobilePredictionHelper(pane);
   }
 
+  // The terminal is the truth the box mirrors. A frame that still shows what
+  // we wrote confirms the line. A write in flight gets its moment. Anything
+  // else is the program changing its own line, and the program wins: the box
+  // adopts it. No edit ever corrects the program.
   function syncMobilePredictionFromTerminal(pane) {
-    if (!pane || pane.mobilePredictionComposition) return;
-    const oldPrefix = pane.mobilePredictionPrefix || '';
-    const oldValue = mobilePredictionHelperValue(pane);
     const helper = paneKeyboardHelper(pane);
-    if (!oldValue) {
-      if (pane.mobilePredictionPending) return;
-      replaceMobilePredictionFromTerminal(pane, helper);
-      return;
-    }
-    const selectionStart = helper?.selectionStart;
-    const selectionEnd = helper?.selectionEnd;
-    const selectionDirection = helper?.selectionDirection;
+    if (!helper || pane.nativeComposing) return;
     const prefix = terminalPredictionPrefix(
-      pane.terminal, pane.mobilePredictionText, pane.mobilePredictionCursor, oldPrefix,
+      pane.terminal, pane.mobilePredictionText, pane.mobilePredictionCursor,
+      pane.mobilePredictionPrefix || '',
     );
-    if (prefix === undefined) {
-      // Keep the complete known input-session shadow across partial echoes and
-      // physical line wraps. A terminal control ends that session explicitly.
-      if (pane.mobilePredictionPending) return;
-      replaceMobilePredictionFromTerminal(pane, helper);
+    if (prefix !== undefined) {
+      const oldPrefix = pane.mobilePredictionPrefix || '';
+      if (prefix !== oldPrefix) {
+        // The base line in front of the editable text changed. Move the box
+        // with it, or the box value stops matching the line and typing is
+        // silently ignored. Never rewrite while text is waiting to be written.
+        if (mobileBoxValue(helper) === oldPrefix + pane.mobilePredictionText) {
+          const at = Math.max(0, helper.selectionStart - oldPrefix.length);
+          pane.mobilePredictionPrefix = prefix;
+          helper.value = prefix + pane.mobilePredictionText;
+          helper.setSelectionRange(prefix.length + at, prefix.length + at);
+        }
+      } else {
+        pane.mobilePredictionPrefix = prefix;
+      }
+      // A confirming frame does not end the write's moment. The frames in
+      // flight still show the old line, and nothing may adopt it back.
+      if (pane.composeWritten && Date.now() - pane.composeWritten.at >= COMPOSE_CONFIRM_MS) {
+        pane.composeWritten = undefined;
+      }
       return;
     }
-    pane.mobilePredictionPending = false;
-    pane.mobilePredictionConfirmed = true;
-    pane.mobilePredictionPrefix = prefix;
-    setMobilePredictionAttributes(helper, true);
-    if (
-      !helper || helper.value !== oldValue
-      || oldPrefix === prefix
-    ) return;
-    const relativeStart = Math.max(0, selectionStart - oldPrefix.length);
-    const relativeEnd = Math.max(0, selectionEnd - oldPrefix.length);
-    helper.value = mobilePredictionHelperValue(pane);
-    helper.setSelectionRange(
-      prefix.length + relativeStart,
-      prefix.length + relativeEnd,
-      selectionDirection,
-    );
-  }
-
-  function prepareMobilePredictionFocus(pane) {
-    const helper = paneKeyboardHelper(pane);
-    if (!helper || !nativeKeyboardInput || !mobileQuery.matches) return;
-    syncMobilePredictionFromTerminal(pane);
-    setMobilePredictionAttributes(
-      helper, pane.mobilePredictionConfirmed || pane.mobilePredictionPending,
-    );
-    if (
-      (pane.mobilePredictionConfirmed || pane.mobilePredictionPending)
-      && mobilePredictionHelperValue(pane)
-      && !pane.mobilePredictionComposition
-      && helper.value !== mobilePredictionHelperValue(pane)
-    ) {
-      restoreMobilePredictionHelper(pane);
-    }
+    const written = pane.composeWritten;
+    if (written && Date.now() - written.at < COMPOSE_CONFIRM_MS) return;
+    pane.composeWritten = undefined;
+    // Text in the box that is not written yet stays: the next write rebases it
+    // on the line the program now shows.
+    if (pane.composeTimer !== undefined) return;
+    // The draft in the box is the user's text. A shown line that holds that
+    // text is the same line, and the program may change it. Any other shown
+    // line is content from a redraw. The draft stays and is left alone.
+    const line = terminalTextAtCursor(pane.terminal, composeShadow(pane));
+    if (pane.mobilePredictionText && !line.text.includes(pane.mobilePredictionText)) return;
+    // A program mid-redraw shows a line that changes from frame to frame.
+    // Adopt only a line that repeated itself, so a reflow never throws away
+    // what the user typed.
+    const candidate = pane.composeAdoptCandidate;
+    pane.composeAdoptCandidate = { text: line.text, cursor: line.cursor };
+    if (!candidate || candidate.text !== line.text || candidate.cursor !== line.cursor) return;
+    pane.composeAdoptCandidate = undefined;
+    replaceMobilePredictionFromTerminal(pane, helper);
   }
 
   function preserveMobilePredictionBeforeBlur(pane) {
@@ -2096,7 +2192,7 @@ const { WebglAddon } = globalThis.WebglAddon;
     // Safari may queue selectionchange behind blur. Send that final movement
     // before xterm clears the helper, then retain the last sent caret position.
     followMobileCaret(pane, true);
-    if (helper.value !== mobilePredictionHelperValue(pane)) {
+    if (mobileBoxValue(helper) !== mobilePredictionHelperValue(pane)) {
       clearMobilePredictionState(pane);
       return;
     }
@@ -2118,79 +2214,22 @@ const { WebglAddon } = globalThis.WebglAddon;
       ? helper.selectionStart : helper.selectionEnd;
   }
 
-  // Keep the last native edits and sends so an anomaly report carries context.
-  const recentInputTrace = [];
-
-  function noteRecentInput(kind, detail) {
-    recentInputTrace.push(`${kind}:${String(detail).slice(0, 24)}`);
-    if (recentInputTrace.length > 6) recentInputTrace.shift();
-  }
-
-  function recentInputSummary() {
-    return recentInputTrace.length ? `recent=${recentInputTrace.join('|')}` : 'recent=none';
-  }
-
-  let caretBlockedReportedAt = 0;
-  let insertReplacedReportedAt = 0;
-  let swallowedInputReportedAt = 0;
-
-  function reportSwallowedInput(pane, reason, inputType) {
-    const now = Date.now();
-    if (now - swallowedInputReportedAt < 5_000) return;
-    swallowedInputReportedAt = now;
-    reportClientIssue('input-swallowed', [
-      reason,
-      `inputType=${inputType || 'unknown'}`,
-      `mode=${pane.mode}`,
-      `pending=${pane.mobilePredictionPending === true}`,
-      recentInputSummary(),
-    ].join(' '));
-  }
-
-  function reportCaretBlocked(pane, reason, cursor) {
-    const now = Date.now();
-    if (now - caretBlockedReportedAt < 10_000) return;
-    caretBlockedReportedAt = now;
-    reportClientIssue('caret-blocked', [
-      reason,
-      `cursor=${cursor}`,
-      `shadow=${pane.mobilePredictionText.length}`,
-      `pending=${pane.mobilePredictionPending === true}`,
-      recentInputSummary(),
-    ].join(' '));
-  }
-
   function followMobileCaret(pane, beforeBlur = false) {
     const helper = paneKeyboardHelper(pane);
-    // Android IMEs move the native selection without a user gesture. The
-    // ordered delta already carries a real caret change, so caret following
-    // stays iOS-only until a device validates it.
-    if (!iosKeyboard || !mobileQuery.matches || mobileKeyboardLocked
+    if (!nativeKeyboardInput || !mobileQuery.matches || mobileKeyboardLocked
       || !helper || (!beforeBlur && document.activeElement !== helper)
       || helper.selectionStart !== helper.selectionEnd) return;
-    const prefixLength = (pane.mobilePredictionPrefix || '').length;
-    if (helper.selectionStart < prefixLength) return;
-    const cursor = helper.selectionStart - prefixLength;
-    if (cursor === pane.mobilePredictionCursor) return;
-    // Relative moves keep their order in the input queue, so a caret swipe can
-    // follow the native caret while an earlier echo is still in flight. A
-    // pending shadow must not freeze caret movement: nothing else clears it.
-    const blocked = !paneAcceptsInput(pane, false) ? 'read-only'
-      : pane.snapshot ? 'snapshot'
-      : pane.mobilePredictionComposition ? 'composition'
-      : helper.value !== mobilePredictionHelperValue(pane) ? 'native-diverged'
-      : '';
-    if (blocked) {
-      reportCaretBlocked(pane, blocked, cursor);
+    // Android IMEs move the native selection without a user gesture, so caret
+    // following stays iOS-only until a device validates it. A caret in the
+    // prompt is never valid on either.
+    if (!iosKeyboard) {
+      if (!pane.nativeComposing) keepCaretOutOfPrompt(pane, helper);
       return;
     }
-    const data = terminalCaretInput(
-      pane.mobilePredictionText, pane.mobilePredictionCursor, cursor,
-      pane.terminal.modes?.applicationCursorKeysMode,
-    );
-    if (!data) return;
-    noteRecentInput('caret', `${cursor}`);
-    if (sendMobilePaneKeyboardData(pane, data)) pane.mobilePredictionCursor = cursor;
+    // A caret-only change sends cursor movement and no text. Anything else is
+    // an edit and belongs to the value sync.
+    if (composeBoxState(pane, helper).text !== pane.mobilePredictionText) return;
+    composeSync(pane);
   }
 
   function handleMobileCaretSelection() {
@@ -2221,15 +2260,33 @@ const { WebglAddon } = globalThis.WebglAddon;
     }
   }
 
-  // The terminal maps one editable line, so a control character can never be
-  // part of the shadow text. Removing one keeps the next edit usable instead
-  // of rejecting it as invalid text.
+  // The smallest edit that turns the line the terminal holds into the text the
+  // box holds, with caret placement. Undefined means the change cannot be
+  // mapped to terminal input, and the program is left alone.
+  function composeEdit(line, box, applicationCursorKeys = false) {
+    // A caret the model lost (a fragment adoption can misplace it) must
+    // never lock the box: heal it to the text it belongs to.
+    const lineText = typeof line.text === 'string' ? line.text : '';
+    const boxText = typeof box.text === 'string' ? box.text : '';
+    const lineCursor = Number.isInteger(line.cursor)
+      ? Math.max(0, Math.min(lineText.length, line.cursor))
+      : lineText.length;
+    const boxCursor = Number.isInteger(box.cursor)
+      ? Math.max(0, Math.min(boxText.length, box.cursor))
+      : boxText.length;
+    return terminalTextInputDelta(
+      lineText, boxText, lineCursor, boxCursor, applicationCursorKeys,
+    );
+  }
+
+  // A control character can never be part of the line text. Removing one keeps
+  // the next edit usable instead of rejecting it as invalid text.
   function stripMobileControlCharacters(text, cursor) {
-    if (!/[\x00-\x1f\x7f]/u.test(text)) return { text, cursor };
+    if (!/[\x00-\x09\x0b-\x1f\x7f]/u.test(text)) return { text, cursor };
     let result = '';
     let adjusted = cursor;
     for (let index = 0; index < text.length; index += 1) {
-      if (/[\x00-\x1f\x7f]/u.test(text[index])) {
+      if (/[\x00-\x09\x0b-\x1f\x7f]/u.test(text[index])) {
         if (index < cursor) adjusted -= 1;
         continue;
       }
@@ -2238,28 +2295,6 @@ const { WebglAddon } = globalThis.WebglAddon;
     return { text: result, cursor: Math.max(0, Math.min(adjusted, result.length)) };
   }
 
-  function normalizeMobileHelperText(pane, helperValue, helperCursor) {
-    const cleaned = stripMobileControlCharacters(helperValue, helperCursor);
-    helperValue = cleaned.text;
-    helperCursor = cleaned.cursor;
-    const prefix = pane.mobilePredictionPrefix || '';
-    if (!helperValue.startsWith(prefix)) return { helperValue, helperCursor };
-    const normalized = mobileTextWithoutRedundantSeparator(
-      pane.mobilePredictionText,
-      helperValue.slice(prefix.length),
-      helperCursor - prefix.length,
-      prefix,
-    );
-    if (!normalized) return { helperValue, helperCursor };
-    return {
-      helperValue: prefix + normalized.text,
-      helperCursor: prefix.length + normalized.cursor,
-    };
-  }
-
-  // Apply the active modifier to one inserted character. Some keyboards append
-  // a separator space when they commit a word; a modifier gesture must not
-  // send that space.
   function mobileModifiedInsertion(inserted) {
     if (!mobileQuery.matches
       || !Object.values(mobileModifierState).some(Boolean)) return undefined;
@@ -2270,348 +2305,345 @@ const { WebglAddon } = globalThis.WebglAddon;
     return converted === parts[0] ? undefined : converted;
   }
 
-  // A type-over-selection reports the replaced text as a target range. An
-  // insertion without one is pure typing.
-  // A revision rewrites text the keyboard already reported, as dictation does
-  // when it refines its hypothesis. Ordinary typing appends to it.
-  function nativeRevision(edit, keyboardData) {
-    if (!keyboardData) return false;
-    const core = keyboardData.trim();
-    // Typing is one character added and nothing removed. Anything larger is a
-    // swipe word or a dictation hypothesis.
-    if (edit.removed === 0 && [...core].length <= 1) return false;
-    const stripped = keyboardData.replace(/^\s+/u, '');
-    return !(edit.inserted.endsWith(keyboardData)
-      || (stripped && edit.inserted.endsWith(stripped)));
-  }
+  // A multi-character change waits this long for the keyboard to settle. A
+  // write owns the line for the confirm window while its echo is in flight.
+  const COMPOSE_SETTLE_MS = 250;
+  const COMPOSE_CONFIRM_MS = 1000;
 
-  function nativeReplacedLength(event) {
-    if (typeof event.getTargetRanges !== 'function') return 0;
-    let length = 0;
-    for (const range of event.getTargetRanges()) {
-      if (range.endOffset > range.startOffset) length += range.endOffset - range.startOffset;
-    }
-    return length;
-  }
-
-  // Keep the invisible field equal to the line the terminal holds, so a native
-  // caret offset maps to a real position in that line. Never rewrite during a
-  // composition: that cancels the text the keyboard is committing.
-  function alignMobilePredictionHelper(pane) {
-    if (pane.mobilePredictionComposition) return;
-    const helper = paneKeyboardHelper(pane);
-    if (helper && helper.value !== mobilePredictionHelperValue(pane)) {
-      restoreMobilePredictionHelper(pane);
+  // The prompt in front of the line cannot be edited. A caret moved into it
+  // shows at the start of the editable text, where typing will land.
+  function keepCaretOutOfPrompt(pane, helper) {
+    const prefix = pane.mobilePredictionPrefix || '';
+    if (helper.selectionStart < prefix.length && helper.selectionStart === helper.selectionEnd
+      && mobileBoxValue(helper).startsWith(prefix)) {
+      helper.setSelectionRange(prefix.length, prefix.length);
     }
   }
 
-  // The software keyboard reports exactly what it inserted. Sending that text
-  // can neither erase nor rewrite anything else, and the field and the
-  // terminal stay on the same line. The field text itself is not trusted:
-  // padded screens and separator spaces drift from it.
-  function applyNativeInsertion(pane, inserted, useModifiers) {
-    let text = inserted;
-    const shadowText = pane.mobilePredictionText;
-    const at = pane.mobilePredictionCursor;
-    if (/^\s/u.test(text) && /\s$/u.test(shadowText.slice(0, at))) {
-      // Some keyboards commit a word with a separator the line already has.
-      text = text.replace(/^\s+/u, '');
-      if (!text) {
-        alignMobilePredictionHelper(pane);
-        return true;
-      }
+  function composeBoxState(pane, helper) {
+    keepCaretOutOfPrompt(pane, helper);
+    const raw = mobileBoxValue(helper);
+    const cleaned = stripMobileControlCharacters(raw, mobileHelperCaret(helper));
+    if (cleaned.text !== raw) {
+      helper.value = cleaned.text;
+      helper.setSelectionRange(cleaned.cursor, cleaned.cursor);
     }
-    let data = text;
-    if (useModifiers) data = mobileModifiedInsertion(text) ?? text;
-    if (!sendMobilePaneKeyboardData(pane, data)) return false;
-    if (data !== text) {
-      // The modifier sent bytes the field cannot model. Start a clean shadow.
+    let prefix = pane.mobilePredictionPrefix || '';
+    const base = prefix + pane.mobilePredictionText;
+    if (!cleaned.text.startsWith(prefix)) {
+      // The box edited into the base line, as a paste or a deletion can do.
+      // The base ends where the two texts diverge: split there instead of
+      // ignoring every later keystroke.
+      let common = 0;
+      const limit = Math.min(base.length, cleaned.text.length);
+      while (common < limit && base[common] === cleaned.text[common]) common += 1;
+      pane.mobilePredictionPrefix = cleaned.text.slice(0, common);
+      pane.mobilePredictionText = base.slice(common);
+      pane.mobilePredictionCursor = Math.max(
+        0, Math.min(pane.mobilePredictionText.length, prefix.length + pane.mobilePredictionCursor - common),
+      );
+      prefix = pane.mobilePredictionPrefix;
+    }
+    const value = cleaned.text.startsWith(prefix)
+      ? cleaned.text.slice(prefix.length)
+      : pane.mobilePredictionText;
+    return {
+      text: value,
+      cursor: Math.max(0, Math.min(value.length, cleaned.cursor - prefix.length)),
+    };
+  }
+
+  function composeShadow(pane) {
+    return { text: pane.mobilePredictionText, cursor: pane.mobilePredictionCursor };
+  }
+
+  function composeWrite(pane, helper, box) {
+    if (pane.composeTimer !== undefined) {
+      clearTimeout(pane.composeTimer);
+      pane.composeTimer = undefined;
+    }
+    const edit = composeEdit(
+      composeShadow(pane), box, pane.terminal.modes?.applicationCursorKeysMode,
+    );
+    if (!edit) return false;
+    const modified = edit.inserted ? mobileModifiedInsertion(edit.inserted) : undefined;
+    if (modified) {
+      if (!sendMobilePaneKeyboardData(pane, modified)) return false;
       clearMobilePredictionState(pane, true);
       consumeMobileModifiers();
       return true;
     }
-    pane.mobilePredictionText = shadowText.slice(0, at) + text + shadowText.slice(at);
-    pane.mobilePredictionCursor = at + text.length;
-    pane.mobilePredictionConfirmed = false;
-    pane.mobilePredictionPending = true;
-    alignMobilePredictionHelper(pane);
+    if (!edit.data) return true;
+    if (!sendMobilePaneKeyboardData(pane, edit.data)) return false;
+    pane.mobilePredictionText = box.text;
+    pane.mobilePredictionCursor = box.cursor;
+    pane.composeWritten = { text: box.text, cursor: box.cursor, at: Date.now() };
     return true;
   }
 
-  function applyMobileTextValue(
-    pane, helperValue, helperCursor, useModifiers = false, viaComposition = false,
-    inputType = '', keyboardData = '', replacedLength = 0,
-  ) {
-    const prefix = pane.mobilePredictionPrefix || '';
-    if (!helperValue.startsWith(prefix) || helperCursor < prefix.length) {
-      restoreMobilePredictionHelper(pane);
-      return false;
-    }
-    const text = helperValue.slice(prefix.length);
-    let cursor = helperCursor - prefix.length;
-    const edit = terminalTextInputDelta(
-      pane.mobilePredictionText, text, pane.mobilePredictionCursor, cursor,
-      pane.terminal.modes?.applicationCursorKeysMode,
+  // The box value changed: make the line the terminal holds match it. Keyboard
+  // events are never interpreted, only compared.
+  function composeSync(pane) {
+    const helper = paneKeyboardHelper(pane);
+    if (!helper || !nativeKeyboardInput || !mobileQuery.matches) return false;
+    if (pane.nativeComposing) return true;
+    if (!paneAcceptsInput(pane, false) || mobileKeyboardLocked || pane.snapshot) return false;
+    const box = composeBoxState(pane, helper);
+    const edit = composeEdit(
+      composeShadow(pane), box, pane.terminal.modes?.applicationCursorKeysMode,
     );
-    if (!edit) {
-      // The native field holds text the shadow cannot represent. Record it so
-      // a lost keystroke leaves evidence instead of a mystery.
-      reportClientIssue('native-edit-rejected', [
-        `native=${JSON.stringify(text.slice(-24))}`,
-        `shadow=${JSON.stringify(pane.mobilePredictionText.slice(-24))}`,
-        `cursor=${cursor}`,
-        recentInputSummary(),
-      ].join(' '));
-      if (pane.mobilePredictionComposition) {
-        // The keyboard owns provisional text. Rewriting the field here makes
-        // it re-insert its hypothesis beside the restored text, which
-        // duplicates the sentence. Leave the field alone and keep holding.
-        armMobilePredictionCompositionStall(pane);
-        return false;
-      }
-      restoreMobilePredictionHelper(pane);
-      return false;
+    if (!edit) return false;
+    // The size of this change decides: one character is typing and goes out at
+    // once, with everything already in the box. Anything larger is a swipe
+    // word, a dictation hypothesis, or a correction: it waits for a quiet
+    // moment so the terminal never churns through recognitions.
+    const seen = pane.composeSeen || composeShadow(pane);
+    const change = composeEdit(seen, box, pane.terminal.modes?.applicationCursorKeysMode);
+    pane.composeSeen = { text: box.text, cursor: box.cursor };
+    // One character of change is typing: one typed character or one deletion.
+    const typing = change && change.removed + [...change.inserted].length <= 1;
+    // A deletion is an instruction, not a hypothesis: it goes out at once.
+    // A held backspace must keep deleting across a row boundary, where the
+    // keyboard deletes the break and a character together.
+    const explicitDelete = change && change.inserted === '' && change.removed > 0;
+    if (typing || explicitDelete) {
+      pane.composeSettleSince = undefined;
+      return composeWrite(pane, helper, box);
     }
-    const insertReplacedNow = Date.now();
-    if (edit.removed > 0
-      && insertReplacedNow - insertReplacedReportedAt >= 5_000
-      && (viaComposition
-        || inputType === 'insertText'
-        || inputType === 'insertReplacementText')) {
-      insertReplacedReportedAt = insertReplacedNow;
-      // An insertion event that would delete known text means the native field
-      // lost text before this event, for example a second swipe that replaced
-      // the first word. Record the evidence before the terminal follows it.
-      reportClientIssue('native-insert-replaced', [
-        inputType || 'insertCompositionText',
-        `removed=${edit.removed}`,
-        `inserted=${JSON.stringify(edit.inserted.slice(0, 20))}`,
-        `native=${JSON.stringify(text.slice(-20))}`,
-        `shadow=${JSON.stringify(pane.mobilePredictionText.slice(-20))}`,
-        `cursor=${cursor}`,
-        `pending=${pane.mobilePredictionPending === true}`,
-        recentInputSummary(),
-      ].join(' '));
+    // A larger insertion waits for a quiet moment so the terminal never
+    // churns through recognitions — but the wait has a deadline. A stream of
+    // edits, as a held key sends, must not keep resetting it forever.
+    const settledFor = Date.now();
+    if (pane.composeSettleSince === undefined) pane.composeSettleSince = settledFor;
+    if (pane.composeTimer !== undefined) clearTimeout(pane.composeTimer);
+    if (settledFor - pane.composeSettleSince >= COMPOSE_SETTLE_MS) {
+      pane.composeSettleSince = undefined;
+      return composeWrite(pane, helper, box);
     }
-    const holding = pane.mobilePredictionProvisional === true;
-    if (holding && edit.removed > 1 && edit.inserted.trim().length <= 1) {
-      // A tiny insertion that removes a lot is a hypothesis separator while
-      // the keyboard rewrites the line. Keep holding and delete nothing.
-      armMobilePredictionCompositionStall(pane);
-      return true;
-    }
-    const endingProvisional = holding && !nativeRevision(edit, keyboardData);
-    if (endingProvisional) {
-      // Typing resumed while a hypothesis was held. Commit the held text
-      // together with this edit through the diff below, in one step: real
-      // typing never waits for a quiet period.
-      pane.mobilePredictionProvisional = false;
-      pane.mobilePredictionComposition = undefined;
-      clearTimeout(pane.mobilePredictionCompositionTimer);
-      pane.mobilePredictionCompositionTimer = undefined;
-    }
-    if (!endingProvisional
-      && inputType === 'insertText' && keyboardData && replacedLength === 0) {
-      // The diff still runs first as a guard: an event that changes nothing is
-      // a duplicate or a caret-only change and must not resend text.
-      if (edit.removed === 0 && !edit.inserted) return true;
-      // Genuine typing changes the line by exactly the reported text and loses
-      // nothing but a separator the line already had. A revision, such as
-      // dictation rewriting its hypothesis, does not match and needs the diff
-      // below, which replaces the previous text exactly.
-      if (!nativeRevision(edit, keyboardData)) {
-        return applyNativeInsertion(pane, keyboardData, useModifiers);
-      }
-      // A revision rewrites text the keyboard already reported: dictation
-      // refining its hypothesis. Typing and erasing each hypothesis live
-      // moves the terminal caret back and forth and lands text at stale
-      // positions. Hold it as a composition and commit once when it settles.
-      pane.mobilePredictionComposition = true;
-      pane.mobilePredictionProvisional = true;
-      armMobilePredictionCompositionStall(pane);
-      return true;
-    }
-    if (inputType === 'insertText' && edit.removed > 0 && pane.mobilePredictionPending) {
-      // A plain insertion cannot require a terminal deletion. While the echo is
-      // still in flight the shadow can hold text from a screen that pads or
-      // rewrites its input area, and the diff then asks to erase text the user
-      // typed. Deliver what the keyboard reported and keep the terminal text.
-      const typed = edit.inserted || keyboardData;
-      if (!typed) {
-        reportSwallowedInput(pane, 'diverged-insert', inputType);
-        restoreMobilePredictionHelper(pane);
-        return false;
-      }
-      const shadowText = pane.mobilePredictionText;
-      const insertAt = Math.min(edit.insertedStart, shadowText.length);
-      const moved = terminalCaretInput(
-        shadowText, pane.mobilePredictionCursor, insertAt,
-        pane.terminal.modes?.applicationCursorKeysMode,
-      );
-      if (!sendMobilePaneKeyboardData(pane, (moved || '') + typed)) {
-        restoreMobilePredictionHelper(pane);
-        return false;
-      }
-      pane.mobilePredictionText = shadowText.slice(0, insertAt) + typed
-        + shadowText.slice(insertAt);
-      pane.mobilePredictionCursor = insertAt + typed.length;
-      pane.mobilePredictionConfirmed = false;
-      pane.mobilePredictionPending = true;
-      return true;
-    }
-    const input = edit.data;
-    if (input) {
-      // A pure IME insertion always leaves the native caret after the text it
-      // wrote. Some keyboards report the caret at its start, which would add
-      // a spurious backward move and hide the insertion from the modifier.
-      let applied = edit;
-      if (edit.removed === 0 && edit.inserted
-        && cursor >= edit.insertedStart && cursor < edit.insertedEnd) {
-        cursor = edit.insertedEnd;
-        applied = terminalTextInputDelta(
-          pane.mobilePredictionText, text, pane.mobilePredictionCursor, cursor,
-          pane.terminal.modes?.applicationCursorKeysMode,
-        ) || edit;
-      }
-      const data = useModifiers && applied.data === applied.inserted
-        ? mobileModifiedInsertion(applied.inserted) ?? applied.data
-        : applied.data;
-      if (!sendMobilePaneKeyboardData(pane, data)) {
-        restoreMobilePredictionHelper(pane);
-        return false;
-      }
-      if (data !== applied.data) {
-        // Modifier keys can send controls or different text. Do not keep the
-        // native helper value as an editable model of that terminal input.
-        clearMobilePredictionState(pane, true);
-        consumeMobileModifiers();
-        return true;
-      }
-    } else {
-    }
-    pane.mobilePredictionText = text;
-    pane.mobilePredictionCursor = cursor;
-    pane.mobilePredictionConfirmed = terminalPredictionPrefix(
-      pane.terminal, text, cursor, prefix,
-    ) !== undefined;
-    pane.mobilePredictionPending = !pane.mobilePredictionConfirmed;
+    pane.composeTimer = setTimeout(() => {
+      pane.composeTimer = undefined;
+      pane.composeSettleSince = undefined;
+      const current = paneKeyboardHelper(pane);
+      if (current) composeWrite(pane, current, composeBoxState(pane, current));
+    }, COMPOSE_SETTLE_MS);
     return true;
   }
 
   function handleMobileTextInput(pane, event) {
     const helper = paneKeyboardHelper(pane);
-    if (
-      !helper
-      || event.target !== helper
-      || !nativeKeyboardInput
-      || !mobileQuery.matches
-      || event.inputType === 'insertFromPaste'
-    ) return false;
-    if (pane.mobilePredictionComposition && !pane.mobilePredictionProvisional) {
-      event.stopImmediatePropagation();
-      armMobilePredictionCompositionStall(pane);
-      reportSwallowedInput(pane, 'composition', event.inputType);
-      return true;
+    if (!helper || event.target !== helper || !nativeKeyboardInput || !mobileQuery.matches
+      || event.inputType === 'insertFromPaste') {
+      return false;
     }
-    if (
-      event.isComposing
-      || event.inputType === 'insertCompositionText'
-      || event.inputType === 'deleteCompositionText'
-      || event.inputType === 'insertFromComposition'
-    ) return false;
-    if (
-      event.inputType
-      && event.inputType !== 'insertText'
-      && event.inputType !== 'insertReplacementText'
-      && event.inputType !== 'deleteContentBackward'
-      && event.inputType !== 'deleteWordBackward'
-      && event.inputType !== 'insertLineBreak'
-      && event.inputType !== 'insertParagraph'
-    ) return false;
-
     event.stopImmediatePropagation();
-    const blocked = !paneAcceptsInput(pane) ? 'read-only'
-      : mobileKeyboardLocked ? 'keyboard-lock'
-      : pane.snapshot ? 'frozen-pane'
-      : '';
-    if (blocked) {
-      if (blocked === 'keyboard-lock') showBrowserToast('Keyboard lock is on');
-      if (blocked === 'frozen-pane') showBrowserToast('This pane is frozen for selection');
-      reportSwallowedInput(pane, blocked, event.inputType);
-      return true;
-    }
-    const normalized = normalizeMobileHelperText(
-      pane, helper.value, mobileHelperCaret(helper),
-    );
-    if (normalized.helperValue !== helper.value) {
-      helper.value = normalized.helperValue;
-      helper.setSelectionRange(normalized.helperCursor, normalized.helperCursor);
-    }
-    const useModifiers = event.inputType === 'insertText'
-      || event.inputType === 'insertReplacementText';
-    noteRecentInput('native', `${event.inputType}:${event.data || ''}`);
-    if (!applyMobileTextValue(
-      pane, normalized.helperValue, normalized.helperCursor, useModifiers, false,
-      event.inputType, event.data || '', nativeReplacedLength(event),
-    ) && normalized.helperValue.length > MOBILE_PREDICTION_TEXT_LIMIT) {
-      clearMobilePredictionState(pane, true);
-      showBrowserToast('Mobile input was too long');
-    }
-    return true;
+    return composeSync(pane);
   }
 
   function handleMobilePredictionCompositionStart(event) {
-    if (!nativeKeyboardInput || !mobileQuery.matches || mobileKeyboardLocked) return;
     const pane = paneForKeyboardTarget(event.target);
-    if (!pane || !paneKeyboardHelper(pane)) return;
-    if (!paneAcceptsInput(pane, false) || pane.snapshot) return;
-    // The native shadow owns the text. Do not rewrite the helper here: the
-    // IME has already applied its first native edit, and a value change
-    // cancels that edit. Stop xterm from reading the composition and read the
-    // committed value at compositionend instead.
-    pane.mobilePredictionComposition = true;
-    armMobilePredictionCompositionStall(pane);
+    if (!pane) return;
+    // The system composes in the box. Nothing may rewrite the box until it
+    // settles; the value sync handles the result like any other change.
+    pane.nativeComposing = true;
+    armComposeCompositionStall(pane);
     event.stopImmediatePropagation();
   }
 
   function handleMobilePredictionCompositionUpdate(event) {
     const pane = paneForKeyboardTarget(event.target);
-    if (!pane?.mobilePredictionComposition) return;
-    armMobilePredictionCompositionStall(pane);
+    if (!pane?.nativeComposing) return;
+    armComposeCompositionStall(pane);
     event.stopImmediatePropagation();
+  }
+
+  // A software keyboard can start a composition and never end it. When it goes
+  // quiet the box belongs to the user again, so typing must not stay blocked.
+  function armComposeCompositionStall(pane) {
+    clearTimeout(pane.nativeComposingTimer);
+    pane.nativeComposingTimer = setTimeout(() => {
+      pane.nativeComposingTimer = undefined;
+      pane.nativeComposing = undefined;
+      composeSync(pane);
+    }, COMPOSE_SETTLE_MS * 4);
   }
 
   function handleMobilePredictionCompositionEnd(event) {
     const pane = paneForKeyboardTarget(event.target);
-    if (!pane) return;
-    const helper = paneKeyboardHelper(pane);
-    if (!helper || !pane.mobilePredictionComposition) return;
+    if (!pane || !pane.nativeComposing) return;
+    pane.nativeComposing = undefined;
     event.stopImmediatePropagation();
-    clearTimeout(pane.mobilePredictionCompositionTimer);
-    pane.mobilePredictionCompositionTimer = undefined;
-    setTimeout(() => commitMobilePredictionComposition(pane, helper), 0);
+    composeSync(pane);
   }
 
-  function commitMobilePredictionComposition(pane, helper) {
-    if (!pane.mobilePredictionComposition) return;
-    pane.mobilePredictionComposition = undefined;
-    pane.mobilePredictionProvisional = false;
-    clearTimeout(pane.mobilePredictionCompositionTimer);
-    pane.mobilePredictionCompositionTimer = undefined;
-    if (!paneAcceptsInput(pane, false) || pane.snapshot || mobileKeyboardLocked) return;
-    // The IME has committed the final value. Send what the helper holds,
-    // with any active modifier applied to a single inserted character.
-    applyMobileTextValue(pane, helper.value, mobileHelperCaret(helper), true, true);
+  // A tap raises the keyboard. A swipe or a scroll never does, however short.
+  const MOBILE_TAP_SLOP_PX = 12;
+  const MOBILE_TAP_MAX_MS = 700;
+  let suppressKeyboardFocusUntil = 0;
+
+  function isMobileTapGesture(deltaX, deltaY, elapsedMs) {
+    return Math.abs(deltaX) <= MOBILE_TAP_SLOP_PX
+      && Math.abs(deltaY) <= MOBILE_TAP_SLOP_PX
+      && elapsedMs <= MOBILE_TAP_MAX_MS;
   }
 
-  function armMobilePredictionCompositionStall(pane) {
-    clearTimeout(pane.mobilePredictionCompositionTimer);
-    pane.mobilePredictionCompositionTimer = setTimeout(() => {
-      pane.mobilePredictionCompositionTimer = undefined;
-      const helper = paneKeyboardHelper(pane);
-      if (!helper || !pane.mobilePredictionComposition) return;
-      commitMobilePredictionComposition(pane, helper);
-    }, MOBILE_COMPOSITION_STALL_MS);
+  // Herdr draws every row at an explicit position, so xterm rarely marks a
+  // row as wrapped. A row whose last cell holds text continues on the next
+  // row; Herdr clears unused cells with spaces. A wrap that falls on a word
+  // break leaves its space in the last cell, after text in the one before.
+  function snapshotRowContinues(terminal, row) {
+    const buffer = terminal.buffer.active;
+    if (buffer.getLine(row + 1)?.isWrapped === true) return true;
+    const line = buffer.getLine(row);
+    const filled = (cell) => !!cell && (cell.getWidth() === 0 || cell.getChars().trim() !== '');
+    const last = line?.getCell(terminal.cols - 1);
+    return filled(last) || (last?.getChars() === ' ' && filled(line.getCell(terminal.cols - 2)));
+  }
+
+  // Hold-to-copy joins rows by their meaning: a wrapped row continues the
+  // same line and joins with nothing, a hard break joins with a line break.
+  // The padding before a hard break is not text. A selection that starts in
+  // the padding of the row above, or ends at the start of the row below, has
+  // nothing selected on that row, so the row adds no break.
+  function snapshotCopyText(terminal, firstRow, rowTexts) {
+    let start = 0;
+    let end = rowTexts.length;
+    while (end - start > 1 && rowTexts[start].trim() === '') start += 1;
+    while (end - start > 1 && rowTexts[end - 1].trim() === '') end -= 1;
+    return rowTexts.slice(start, end).map((rowText, index, kept) => {
+      if (index === kept.length - 1) return rowText.trimEnd();
+      return snapshotRowContinues(terminal, firstRow + start + index) ? rowText : `${rowText.trimEnd()}\n`;
+    }).join('');
+  }
+
+  // The line through buffer row `row`, joined across the rows it wraps over
+  // the way copy joins them, with the cell under each character.
+  const LINK_LINE_MAX_ROWS = 64;
+  function terminalLineAround(terminal, row) {
+    const buffer = terminal.buffer.active;
+    let first = row;
+    while (first > 0 && row - first < LINK_LINE_MAX_ROWS && snapshotRowContinues(terminal, first - 1)) first -= 1;
+    let last = row;
+    while (last < buffer.length - 1 && last - row < LINK_LINE_MAX_ROWS && snapshotRowContinues(terminal, last)) last += 1;
+    let text = '';
+    const cells = [];
+    for (let y = first; y <= last; y += 1) {
+      const line = buffer.getLine(y);
+      for (let x = 0; x < terminal.cols; x += 1) {
+        const cell = line?.getCell(x);
+        // The second cell of a wide character has no text of its own.
+        if (!cell || cell.getWidth() === 0) continue;
+        const characters = cell.getChars() || ' ';
+        text += characters;
+        for (let unit = 0; unit < characters.length; unit += 1) cells.push({ x, y });
+      }
+    }
+    return { text, cells };
+  }
+
+  // Web links in the line through `row`, as xterm link ranges (1-based,
+  // inclusive), including one that wraps onto other rows.
+  function terminalLinksAround(terminal, row) {
+    const { text, cells } = terminalLineAround(terminal, row);
+    return terminalUrls(text).map(({ start, end, url }) => ({
+      url,
+      start: cells[start],
+      end: cells[end - 1],
+    })).filter(({ start, end }) => start.y <= row && end.y >= row);
+  }
+
+  function openTerminalLink(uri) {
+    const url = openableTerminalUrl(uri);
+    if (!url) return false;
+    window.open(url, '_blank', 'noopener,noreferrer');
+    return true;
+  }
+
+  // Links open on click: web URLs in the text, and links a program made with
+  // OSC 8, which xterm tracks per cell.
+  function enableTerminalLinks(activeTerminal) {
+    activeTerminal.options.linkHandler = {
+      activate: (_event, uri) => openTerminalLink(uri),
+      hover: (_event, uri, range) => noteTerminalLinkHover(uri, range),
+    };
+    activeTerminal.registerLinkProvider({
+      provideLinks(bufferLineNumber, callback) {
+        const links = terminalLinksAround(activeTerminal, bufferLineNumber - 1).map(({ url, start, end }) => {
+          const range = { start: { x: start.x + 1, y: start.y + 1 }, end: { x: end.x + 1, y: end.y + 1 } };
+          return {
+            range,
+            text: url,
+            decorations: { underline: true, pointerCursor: true },
+            activate: () => openTerminalLink(url),
+            hover: () => noteTerminalLinkHover(url, range),
+          };
+        });
+        callback(links.length ? links : undefined);
+      },
+    });
+  }
+
+  // A phone tap never reaches xterm's link handling: the pane keeps the
+  // compatibility mouse events from xterm, whose mousedown would also focus
+  // the keyboard. Move xterm's mouse to the tapped point instead: xterm finds
+  // the link there, an OSC 8 link included, and reports it as hovered.
+  let terminalLinkReplay;
+  function noteTerminalLinkHover(uri, range) {
+    if (terminalLinkReplay) terminalLinkReplay.links.push({ uri, range });
+  }
+
+  function terminalLinkAtPoint(pane, clientX, clientY) {
+    const screen = pane.terminal.element?.querySelector('.xterm-screen');
+    if (!screen) return undefined;
+    const move = (x) => screen.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: x, clientY }));
+    terminalLinkReplay = { links: [] };
+    try {
+      // xterm ignores a move within the cell it saw last, so step to the
+      // row's other end first; it clamps a point off the screen to the edge.
+      // That end can hold the same link, which xterm then does not report
+      // again, so keep every link reported and take the one at the point.
+      // The cell under the point, rounded as xterm rounds it.
+      const bounds = screen.getBoundingClientRect();
+      const { cols, rows } = pane.terminal;
+      const cell = (offset, size, count) => Math.min(Math.max(Math.ceil((offset / size) * count), 1), count);
+      const x = cell(clientX - bounds.left, bounds.width, cols);
+      const y = pane.terminal.buffer.active.viewportY + cell(clientY - bounds.top, bounds.height, rows);
+      move(x === 1 ? bounds.right + 1 : bounds.left - 1);
+      move(clientX);
+      return terminalLinkReplay.links.findLast(({ range }) => range
+        && (y > range.start.y || (y === range.start.y && x >= range.start.x))
+        && (y < range.end.y || (y === range.end.y && x <= range.end.x)))?.uri;
+    } finally {
+      terminalLinkReplay = undefined;
+      screen.dispatchEvent(new MouseEvent('mouseleave'));
+    }
+  }
+
+  // A pane's own selection copies by line meaning too.
+  function paneSelectionCopyText(terminal) {
+    const range = terminal.getSelectionPosition();
+    if (!range) return undefined;
+    const buffer = terminal.buffer.active;
+    const rowTexts = [];
+    for (let row = range.start.y; row <= range.end.y; row += 1) {
+      rowTexts.push(buffer.getLine(row)?.translateToString(
+        false,
+        row === range.start.y ? range.start.x : 0,
+        row === range.end.y ? range.end.x : terminal.cols,
+      ) ?? '');
+    }
+    return snapshotCopyText(terminal, range.start.y, rowTexts);
+  }
+
+  // When the box holds nothing before the caret, the native delete has no
+  // character to remove. The delete goes to the terminal instead, and the
+  // program decides what it means: join with the previous row, or nothing.
+  // The box must mirror the model, so this never fires while the keyboard
+  // composes text.
+  function mobileDeleteAtBoxStart(helper, pane) {
+    return !!pane && !pane.nativeComposing
+      && helper && mobileBoxValue(helper) === mobilePredictionHelperValue(pane)
+      && helper.selectionStart === helper.selectionEnd
+      && helper.selectionStart === 0;
   }
 
   function noteMobilePredictionTerminalData(pane, data) {
@@ -2626,7 +2658,6 @@ const { WebglAddon } = globalThis.WebglAddon;
     const helper = paneKeyboardHelper(pane);
     if (!helper) return;
     helper.classList.remove('mobile-keyboard-target', 'mobile-native-paste-target');
-    setMobilePredictionAttributes(helper, false);
     for (const property of [
       'left', 'top', 'width', 'height', 'fontSize', 'lineHeight', 'zIndex',
     ]) {
@@ -2649,9 +2680,7 @@ const { WebglAddon } = globalThis.WebglAddon;
       return;
     }
     syncMobilePredictionFromTerminal(pane);
-    setMobilePredictionAttributes(
-      helper, pane.mobilePredictionConfirmed || pane.mobilePredictionPending,
-    );
+    setMobilePredictionAttributes(helper);
     const screen = pane.terminal.element?.querySelector('.xterm-screen');
     const screenBounds = screen?.getBoundingClientRect();
     const terminalBounds = pane.terminal.element?.getBoundingClientRect();
@@ -2682,6 +2711,9 @@ const { WebglAddon } = globalThis.WebglAddon;
   }
 
   function focusPaneKeyboard(pane) {
+    // A moved gesture must never raise the keyboard — only a tap does. This
+    // also stops the click the browser sends after a swipe.
+    if (performance.now() < suppressKeyboardFocusUntil) return false;
     if (mobileKeyboardLocked || pane.mode !== 'control' || pane.closed || pane.snapshot) return false;
     if (!setActivePane(pane.streamId)) return false;
     syncPaneKeyboardHelper(pane);
@@ -2708,7 +2740,6 @@ const { WebglAddon } = globalThis.WebglAddon;
 
   function sendMobilePaneKeyboardData(pane, data) {
     if (!paneAcceptsInput(pane)) return false;
-    noteRecentInput('send', data);
     if (!setActivePane(pane.streamId)) {
       showBrowserToast('Waiting for input to reach the previous pane');
       return false;
@@ -2746,7 +2777,7 @@ const { WebglAddon } = globalThis.WebglAddon;
       // applies the text mutation, and stop the event before xterm can read
       // the textarea itself.
       if (event.key === 'Unidentified' || event.keyCode === 229) {
-        if (!event.isComposing || pane.mobilePredictionComposition) {
+        if (!event.isComposing || pane.nativeComposing) {
           event.stopImmediatePropagation();
         }
         return;
@@ -2757,11 +2788,7 @@ const { WebglAddon } = globalThis.WebglAddon;
     if (event.isComposing) return;
     followMobileCaret(pane);
     const helper = paneKeyboardHelper(pane);
-    const atNativeStart = (
-      pane.mobilePredictionConfirmed || pane.mobilePredictionPending
-    ) && helper?.value === mobilePredictionHelperValue(pane)
-      && helper.selectionStart === helper.selectionEnd
-      && helper.selectionStart === 0;
+    const atNativeStart = mobileDeleteAtBoxStart(helper, pane);
     if (atNativeStart) {
       event.preventDefault();
       event.stopImmediatePropagation();
@@ -3046,7 +3073,7 @@ const { WebglAddon } = globalThis.WebglAddon;
       && (event.type === 'keydown' || event.type === 'keypress')
       && (
         (!event.isComposing && (event.key?.length === 1 || imeKey))
-        || (imeKey && Boolean(pane?.mobilePredictionComposition))
+        || (imeKey && Boolean(pane?.nativeComposing))
       )
     ) {
       // The helper input event owns native mobile text. Do not also let xterm
@@ -3122,6 +3149,7 @@ const { WebglAddon } = globalThis.WebglAddon;
     paneTerminal.loadAddon(paneFitAddon);
     paneTerminal.open(host);
     paneTerminal.parser.registerOscHandler(52, handleOsc52);
+    enableTerminalLinks(paneTerminal);
     paneTerminal.attachCustomKeyEventHandler((event) => paneTerminalKeyHandler(record, event));
     paneTerminal.element.addEventListener('contextmenu', (event) => {
       if (mobileQuery.matches && !mobileMouseMode) {
@@ -3149,7 +3177,7 @@ const { WebglAddon } = globalThis.WebglAddon;
       mobilePredictionText: '',
       mobilePredictionCursor: 0,
       mobilePredictionConfirmed: false,
-      mobilePredictionComposition: undefined,
+      nativeComposing: undefined,
       mobilePredictionPending: false,
     };
     paneTerminal.element.addEventListener('focus', (event) => {
@@ -3187,16 +3215,25 @@ const { WebglAddon } = globalThis.WebglAddon;
         event.inputType !== 'insertFromPaste'
         || event.target !== paneKeyboardHelper(record)
       ) return;
-      const text = event.target.value;
-      if (!text) return;
+      const helper = event.target;
       event.stopImmediatePropagation();
-      event.target.value = '';
-      clearMobilePredictionState(record);
-      if (mobileMouseMode) {
-        showBrowserToast('Turn mouse input off to Paste');
+      // The box holds the line it mirrors plus the pasted text. Paste only the
+      // inserted text; the caret move or replaced selection before it is
+      // ordinary terminal input.
+      const edit = composeEdit(
+        composeShadow(record), composeBoxState(record, helper),
+        record.terminal.modes?.applicationCursorKeysMode,
+      );
+      const lead = edit?.inserted && edit.data.endsWith(edit.inserted)
+        ? edit.data.slice(0, -edit.inserted.length) : undefined;
+      if (lead === undefined || mobileMouseMode) {
+        restoreMobilePredictionHelper(record);
+        if (mobileMouseMode) showBrowserToast('Turn mouse input off to Paste');
         return;
       }
-      queuePaneTextPaste(record, text);
+      clearMobilePredictionState(record, true);
+      if (lead && !sendMobilePaneKeyboardData(record, lead)) return;
+      queuePaneTextPaste(record, edit.inserted);
     }, true);
     paneTerminals.set(streamId, record);
     syncPaneConnectionStatus();
@@ -3342,6 +3379,14 @@ const { WebglAddon } = globalThis.WebglAddon;
     host.addEventListener('touchstart', (event) => {
       if (event.touches.length !== 1) return;
       const touch = event.touches[0];
+      // A new touch is a new gesture, unless it catches a scroll in flight:
+      // that touch only stops the scroll.
+      if (touchScrollAnimation === undefined) {
+        suppressKeyboardFocusUntil = 0;
+        suppressClipboardClickUntil = 0;
+      } else {
+        suppressKeyboardFocusUntil = performance.now() + MOBILE_TAP_MAX_MS;
+      }
       if (!mobileMouseMode) {
         const retainKeyboard = document.activeElement === paneKeyboardHelper(record);
         cancelTouchScroll();
@@ -3399,6 +3444,7 @@ const { WebglAddon } = globalThis.WebglAddon;
         cancelTouchLongPress();
         if (!touchMoved && !mobileMouseMode) paneTerminal.clearSelection();
         touchMoved = true;
+        suppressKeyboardFocusUntil = performance.now() + MOBILE_TAP_MAX_MS;
         if (mobileMouseMode && touchMouseGesture === undefined) {
           const held = performance.now() - (touchStartTime || performance.now());
           const horizontal = Math.abs(touch.clientX - touchStartX);
@@ -3472,7 +3518,13 @@ const { WebglAddon } = globalThis.WebglAddon;
         startTouchMomentum();
         return;
       }
-      if (!touchMoved && touchDuration < MOBILE_LONG_PRESS_MS) {
+      const endTouch = event.changedTouches?.[0];
+      const tapLike = isMobileTapGesture(
+        (endTouch?.clientX ?? touchPointerX) - (touchStartX ?? touchPointerX),
+        (endTouch?.clientY ?? touchPointerY) - (touchStartY ?? touchPointerY),
+        touchDuration,
+      );
+      if (!touchMoved && tapLike && touchDuration < MOBILE_LONG_PRESS_MS) {
         event.preventDefault();
         event.stopPropagation();
         sendTerminalMouseClick(record, 0, touchPointerX, touchPointerY);
@@ -3560,7 +3612,7 @@ const { WebglAddon } = globalThis.WebglAddon;
     host.addEventListener('pointercancel', releasePointerMouse, true);
     for (const eventName of ['mousedown', 'mousemove', 'mouseup']) {
       host.addEventListener(eventName, (event) => {
-        if (!mobileQuery.matches) return;
+        if (!mobileQuery.matches || terminalLinkReplay) return;
         const preserveClipboardFocus = !mobileMouseMode
           && eventName === 'mousedown'
           && document.activeElement === paneKeyboardHelper(record)
@@ -4171,6 +4223,10 @@ const { WebglAddon } = globalThis.WebglAddon;
     } catch (error) {
       disposePaneTerminals();
       setStatus(error.message, 'disconnected');
+      // The status area is hidden on phones: say it where the user is
+      // looking, and keep it in the log.
+      showBrowserToast(`Pane view failed: ${error.message}`);
+      reportClientIssue('pane-view', error.message);
     }
   }
 
@@ -4263,6 +4319,8 @@ const { WebglAddon } = globalThis.WebglAddon;
     } catch (error) {
       if (token !== paneViewToken) return;
       setStatus(error.message, 'disconnected');
+      showBrowserToast(`Pane view failed: ${error.message}`);
+      reportClientIssue('pane-view', error.message);
     }
   }
 
@@ -4378,6 +4436,7 @@ const { WebglAddon } = globalThis.WebglAddon;
   }
 
   function sendInput(data) {
+    inputLog(`sent "${inputLogText(data)}"`);
     try {
       if (viewMode === 'panes' && selectedPaneTerminal()?.snapshot) return;
       if (isDisposableMouseMotion(data)) {
@@ -4659,6 +4718,7 @@ const { WebglAddon } = globalThis.WebglAddon;
     terminal.open(terminalHost);
     enableWebglRenderer(terminal);
     terminal.parser.registerOscHandler(52, handleOsc52);
+    enableTerminalLinks(terminal);
     terminal.attachCustomKeyEventHandler((event) => {
       if (event.type !== 'keydown') return true;
       const modifiedEnter = physicalModifiedEnterData(event);
@@ -4844,7 +4904,6 @@ const { WebglAddon } = globalThis.WebglAddon;
   mobileKeyboardLockButton.addEventListener('click', () => {
     setMobileKeyboardLocked(!mobileKeyboardLocked);
   });
-  mobileNavigationModeButton.addEventListener('pointerdown', (event) => event.preventDefault());
   mobileNavigationModeButton.addEventListener('click', () => {
     setMobileNavigationMode(!mobileNavigationMode);
   });
@@ -4867,6 +4926,128 @@ const { WebglAddon } = globalThis.WebglAddon;
   document.querySelector('#sheet-backdrop').addEventListener('click', () => closeMobileSheet());
   sheetSessions.addEventListener('click', () => showPicker());
   document.querySelector('#sheet-close').addEventListener('click', () => closeMobileSheet());
+  // Tapping anywhere on the screen opens the keyboard. Controls keep their
+  // own taps, the keyboard lock still holds it shut, and only the end of a
+  // gesture may focus: a swipe starts exactly like a tap and must never
+  // raise the keyboard.
+  // A tap on a link opens it where the finger lifted, and nothing else
+  // happens: no click, no keyboard. A tap's click is no help here: phones
+  // move it toward nearby targets, such as the compose box on the cursor row.
+  let tapStart;
+  document.addEventListener('touchstart', (event) => {
+    const touch = event.touches.length === 1 ? event.touches[0] : undefined;
+    tapStart = touch && { x: touch.clientX, y: touch.clientY, at: performance.now() };
+  }, true);
+  const openLinkFromTap = (event) => {
+    if (!mobileQuery.matches || mobileMouseMode || !tapStart) return;
+    const touch = event.changedTouches?.[0];
+    const pane = [...paneTerminals.values()].find((candidate) => candidate.host.contains(event.target));
+    if (!touch || !pane || pane.snapshot) return;
+    const elapsed = performance.now() - tapStart.at;
+    if (elapsed >= MOBILE_LONG_PRESS_MS
+      || !isMobileTapGesture(touch.clientX - tapStart.x, touch.clientY - tapStart.y, elapsed)) return;
+    if (!openTerminalLink(terminalLinkAtPoint(pane, touch.clientX, touch.clientY))) return;
+    event.preventDefault();
+  };
+  document.addEventListener('touchend', openLinkFromTap, true);
+  const openKeyboardFromTap = (event) => {
+    if (!mobileQuery.matches || mobileKeyboardLocked || mobileMouseMode) return;
+    const target = event.target;
+    if (target?.closest?.(
+      'button, a, input, textarea, select, [role="dialog"], #sheet-backdrop',
+    )) return;
+    const pane = selectedPaneTerminal();
+    if (!pane) return;
+    // A tapped link opened instead.
+    if (event.defaultPrevented) return;
+    focusPaneKeyboard(pane);
+  };
+  // iOS focuses a button from its compatibility mousedown, and that focus
+  // steal blurs the invisible box and closes the keyboard. Prevent that
+  // mousedown for every control on the key rows: the click still fires and
+  // focus never leaves the box.
+  for (const eventName of ['mousedown', 'pointerdown']) {
+    document.addEventListener(eventName, (event) => {
+      if (event.target?.closest?.('#pane-mobile-bar, #mobile-toolbar')) {
+        event.preventDefault();
+      }
+    }, true);
+  }
+  // A key tap steals focus to its button, and iOS closes the keyboard the
+  // moment the field blurs. Take focus straight back in the same task, so the
+  // keyboard never notices.
+  document.addEventListener('focusin', (event) => {
+    if (!mobileQuery.matches) return;
+    if (event.target?.closest?.('#pane-mobile-bar, #mobile-toolbar')) {
+      focusTerminalAfterControl();
+    }
+  }, true);
+  // Any movement marks the gesture: its end may not raise the keyboard.
+  document.addEventListener('touchmove', () => {
+    suppressKeyboardFocusUntil = performance.now() + MOBILE_TAP_MAX_MS;
+  }, true);
+  document.addEventListener('touchend', openKeyboardFromTap, true);
+  // Hold-to-copy keeps the line structure: a wrapped row joins with nothing,
+  // a hard break joins with a break. The selection stays native; only the
+  // clipboard text is rebuilt, from the snapshot's own rows. Each row's part
+  // of the selection is read from the row itself, not from the browser's text
+  // of the whole selection, whose line breaks and spaces vary by browser.
+  const snapshotRowPosition = (node, offset, end) => {
+    let element = node?.nodeType === 1 ? node : node?.parentElement;
+    if (element?.classList?.contains('xterm-rows')) {
+      // A boundary between rows: the row after it starts, the row before it ends.
+      const index = end ? offset - 1 : offset;
+      const row = element.children[index];
+      return row ? { rows: element, index, node: row, offset: end ? row.childNodes.length : 0 } : undefined;
+    }
+    while (element?.parentElement && !element.parentElement.classList.contains('xterm-rows')) {
+      element = element.parentElement;
+    }
+    const rows = element?.parentElement;
+    if (!rows?.classList?.contains('xterm-rows')) return undefined;
+    return { rows, index: [...rows.children].indexOf(element), node, offset };
+  };
+  document.addEventListener('copy', (event) => {
+    const selected = [...paneTerminals.values()].find((candidate) => candidate.terminal.hasSelection());
+    if (selected) {
+      event.clipboardData?.setData('text/plain', paneSelectionCopyText(selected.terminal));
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      return;
+    }
+    const pane = selectedPaneTerminal();
+    const snapshot = pane?.snapshot?.terminal;
+    if (!snapshot) return;
+    const selection = document.getSelection();
+    if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return;
+    const range = selection.getRangeAt(0);
+    const first = snapshotRowPosition(range.startContainer, range.startOffset, false);
+    const last = snapshotRowPosition(range.endContainer, range.endOffset, true);
+    if (!first || !last || first.rows !== last.rows || last.index < first.index) return;
+    if (!pane.snapshot.view.contains(first.rows)) return;
+    const rowTexts = [];
+    for (let index = first.index; index <= last.index; index += 1) {
+      const part = document.createRange();
+      part.selectNodeContents(first.rows.children[index]);
+      if (index === first.index) part.setStart(first.node, first.offset);
+      if (index === last.index) part.setEnd(last.node, last.offset);
+      rowTexts.push(part.toString().replace(/\u00a0/g, ' '));
+    }
+    // The snapshot has no scrollback: its row n is DOM row n.
+    event.clipboardData?.setData('text/plain', snapshotCopyText(snapshot, first.index, rowTexts));
+    event.preventDefault();
+  }, true);
+  // Window listeners run before the document ones that stop these events.
+  const inputLogBoxEnd = (target) => inputLogText(String(target?.value ?? '').slice(-12));
+  window.addEventListener('keydown', (event) => {
+    inputLog(`key "${inputLogText(event.key)}" code=${event.keyCode}`);
+  }, true);
+  for (const type of ['beforeinput', 'input']) {
+    window.addEventListener(type, (event) => {
+      inputLog(`${type} ${event.inputType} "${inputLogText(event.data)}" box="${inputLogBoxEnd(event.target)}"`);
+    }, true);
+  }
+  renderInputLog();
   document.addEventListener('keydown', handleMobileTerminalKeyDown, true);
   document.addEventListener('beforeinput', handleMobileTerminalBeforeInput, true);
   document.addEventListener('selectionchange', () => {
