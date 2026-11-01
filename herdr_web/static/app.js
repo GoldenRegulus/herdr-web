@@ -1180,6 +1180,19 @@ const { WebglAddon } = globalThis.WebglAddon;
     navigationFingerprint = JSON.stringify(snapshot);
   }
 
+  // The tab on screen can be gone from a new snapshot, closed here or by
+  // another client, and any snapshot can be the first to show it: the poll's,
+  // or one a focus change returned. Choose again as a fresh load does, which
+  // follows Herdr's focus.
+  function reselectIfTabGone() {
+    if (viewMode !== 'panes' || !navigationSnapshot) return false;
+    if ((navigationSnapshot.tabs || []).some((tab) => tab.tab_id === selectedTab)) return false;
+    initializePaneSelection();
+    renderPaneNavigation();
+    schedulePaneStructureRebuild();
+    return true;
+  }
+
   // Changes to Herdr's navigation run one at a time, and the poll waits for
   // them: a poll that started earlier never lands on top of their result.
   // `apply` runs with the response while the change still holds the queue.
@@ -1216,7 +1229,7 @@ const { WebglAddon } = globalThis.WebglAddon;
       'focus', { kind, target_id: targetId }, `could not focus ${kind}`,
       (result) => {
         storeNavigationSnapshot(result);
-        if (viewMode === 'panes') renderPaneNavigation();
+        if (!reselectIfTabGone() && viewMode === 'panes') renderPaneNavigation();
         renderMobileSheet();
       },
     );
@@ -1367,12 +1380,7 @@ const { WebglAddon } = globalThis.WebglAddon;
         : undefined;
       navigationSnapshot = result;
       navigationFingerprint = fingerprint;
-      if (viewMode === 'panes' && !(result.tabs || []).some((tab) => tab.tab_id === selectedTab)) {
-        // The tab on screen is gone, closed here or by another client. Choose
-        // again as a fresh load does, which follows Herdr's focus.
-        initializePaneSelection();
-        renderPaneNavigation();
-        schedulePaneStructureRebuild();
+      if (reselectIfTabGone()) {
         renderMobileSheet();
         return;
       }
