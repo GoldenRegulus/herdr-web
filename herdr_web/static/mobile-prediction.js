@@ -4,6 +4,14 @@ const graphemeSegmenter = typeof Intl !== 'undefined' && typeof Intl.Segmenter =
   ? new Intl.Segmenter(undefined, { granularity: 'grapheme' })
   : undefined;
 
+// A row as the compose box reads its own value: a no-break space is a space.
+// Prompts draw one after their marker (Claude Code's "❯\u00a0"), and the box
+// stores typed spaces as plain ones; read differently, the prefix never
+// matches the box and every keystroke looks like an edit of the prompt.
+function rowText(line, trimRight, start, end) {
+  return line.translateToString(trimRight, start, end).replace(/\u00a0/g, ' ');
+}
+
 function graphemes(text) {
   if (graphemeSegmenter) {
     return [...graphemeSegmenter.segment(text)].map((part) => part.segment);
@@ -96,13 +104,13 @@ export function terminalTextAtCursor(terminal, composed) {
   const targetAfter = composedText.slice(composedCursor);
 
   let row = cursorRow;
-  let before = line.translateToString(false, 0, buffer.cursorX);
+  let before = rowText(line, false, 0, buffer.cursorX);
   while (row > 0 && before.length < MOBILE_PREDICTION_TEXT_LIMIT) {
     if (targetBefore && before.endsWith(targetBefore)) break;
     const wrapped = buffer.getLine(row)?.isWrapped === true;
     const above = buffer.getLine(row - 1);
     if (!above) break;
-    const chunk = above.translateToString(true);
+    const chunk = rowText(above, true);
     let best;
     for (const sep of wrapped ? [''] : ['', '\n']) {
       const candidate = chunk + sep + before;
@@ -113,13 +121,13 @@ export function terminalTextAtCursor(terminal, composed) {
     before = best.candidate;
     row -= 1;
   }
-  let after = line.translateToString(true, buffer.cursorX);
+  let after = rowText(line, true, buffer.cursorX);
   row = cursorRow + 1;
   let next = buffer.getLine(row);
   while (next && before.length + after.length < MOBILE_PREDICTION_TEXT_LIMIT) {
     if (targetAfter && after.startsWith(targetAfter)) break;
     const wrapped = next.isWrapped === true;
-    const chunk = next.translateToString(true);
+    const chunk = rowText(next, true);
     let best;
     for (const sep of wrapped ? [''] : ['', '\n']) {
       const candidate = after + sep + chunk;
@@ -153,8 +161,8 @@ function textAroundCursor(terminal, text, limit = text.length) {
   const line = buffer.getLine(row);
   if (!line) return undefined;
   let breaks = lineBreaks(text);
-  let before = line.translateToString(false, 0, buffer.cursorX);
-  let after = line.translateToString(false, buffer.cursorX);
+  let before = rowText(line, false, 0, buffer.cursorX);
+  let after = rowText(line, false, buffer.cursorX);
   for (let step = 1; step <= limit && before.length < limit && row >= step; step += 1) {
     const wrapped = buffer.getLine(row - step + 1)?.isWrapped === true;
     let sep = '';
@@ -164,7 +172,7 @@ function textAroundCursor(terminal, text, limit = text.length) {
     }
     const previous = buffer.getLine(row - step);
     if (!previous) break;
-    before = previous.translateToString(false) + sep + before;
+    before = rowText(previous, false) + sep + before;
   }
   for (let step = 1; step <= limit && after.length < limit; step += 1) {
     const next = buffer.getLine(row + step);
@@ -175,7 +183,7 @@ function textAroundCursor(terminal, text, limit = text.length) {
       sep = '\n';
       breaks -= 1;
     }
-    after += sep + next.translateToString(false);
+    after += sep + rowText(next, false);
   }
   return { before: before.slice(-limit), after: after.slice(0, limit) };
 }

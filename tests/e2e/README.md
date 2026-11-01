@@ -37,6 +37,8 @@ differently.
 - Hold-to-copy across wrapped lines and real newlines, partial rows, a
   wrap that falls on a space, blank lines and repeated spaces, and selection
   handles in the rows around a wrapped URL.
+- A prompt that ends in a no-break space, as Claude Code draws it: typing
+  adds no spaces, and Ctrl then c sends Ctrl+C.
 - A new tab and a new space from Browse, and a tab on screen closed by
   another client.
 - Tapping a link: OSC 8 links and URLs, also on a wrapped row, open without

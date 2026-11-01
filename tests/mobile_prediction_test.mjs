@@ -100,6 +100,20 @@ test('terminal shadow prefix excludes the owned editable suffix', () => {
   ), undefined);
 });
 
+test('a no-break space in the line reads as the space the box holds', () => {
+  // Claude Code draws its prompt as "❯" and a no-break space. The box reads
+  // its own value with plain spaces, so the line must read the same way.
+  assert.equal(terminalPredictionPrefix(
+    terminalWithRows(['\u276f\u00a0']), '', 0,
+  ), '\u276f ');
+  assert.equal(terminalPredictionPrefix(
+    terminalWithRows(['\u276f\u00a0/ex']), '/ex', 3, '\u276f ',
+  ), '\u276f ');
+  assert.deepEqual(terminalTextAtCursor(
+    terminalWithRows(['\u276f\u00a0hello\u00a0there'], 7),
+  ), { text: '\u276f hello there', cursor: 7 });
+});
+
 test('native input preserves unchanged text on both sides of the edit', () => {
   assert.deepEqual(checkEdit('th', 'they are being'), {
     data: 'ey are being', removed: 0, inserted: 'ey are being',
