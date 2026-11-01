@@ -3,6 +3,8 @@
 // (keyCode 229), which CDP Input.insertText reproduces.
 const { sleep } = require('./lib');
 
+const TYPE_GAP_MS = 10;
+
 async function keyboard(page, profile) {
   const cdp = await page.context().newCDPSession(page);
   const k = {
@@ -46,11 +48,12 @@ async function keyboard(page, profile) {
       await page.evaluate(() => document.activeElement?.blur());
       await sleep(300);
     },
+    // One key at a time, a little apart, as a person types.
     async type(text) {
-      if (profile === 'ios') return page.keyboard.type(text, { delay: 30 });
+      if (profile === 'ios') return page.keyboard.type(text, { delay: TYPE_GAP_MS });
       for (const character of text) {
         await cdp.send('Input.insertText', { text: character });
-        await sleep(30);
+        await sleep(TYPE_GAP_MS);
       }
     },
     // A predictive word, swipe word or dictation result: one input event.

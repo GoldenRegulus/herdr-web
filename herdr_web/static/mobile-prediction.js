@@ -4,12 +4,16 @@ const graphemeSegmenter = typeof Intl !== 'undefined' && typeof Intl.Segmenter =
   ? new Intl.Segmenter(undefined, { granularity: 'grapheme' })
   : undefined;
 
-// A row as the compose box reads its own value: a no-break space is a space.
-// Prompts draw one after their marker (Claude Code's "❯\u00a0"), and the box
-// stores typed spaces as plain ones; read differently, the prefix never
-// matches the box and every keystroke looks like an edit of the prompt.
+// Terminal text as the compose box and the clipboard read it: a no-break
+// space is a space. WebKit stores typed spaces as no-break ones, and prompts
+// draw one after their marker (Claude Code's "❯\u00a0"). Read differently,
+// the prompt never matches the box and every keystroke looks like an edit.
+export function plainSpaces(text) {
+  return text.replace(/\u00a0/g, ' ');
+}
+
 function rowText(line, trimRight, start, end) {
-  return line.translateToString(trimRight, start, end).replace(/\u00a0/g, ' ');
+  return plainSpaces(line.translateToString(trimRight, start, end));
 }
 
 function graphemes(text) {

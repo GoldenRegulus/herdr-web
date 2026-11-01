@@ -12,7 +12,7 @@ import {
   terminalDataForNavigationKey,
 } from './input-buffer.js';
 import {
-  MOBILE_PREDICTION_TEXT_LIMIT,
+  plainSpaces,
   terminalPredictionPrefix,
   terminalTextAtCursor,
   terminalTextInputDelta,
@@ -107,9 +107,6 @@ const { WebglAddon } = globalThis.WebglAddon;
   // The Return key arrives as a keydown and as a native line break. Send the
   // carriage return once and keep the native newline out of the helper.
   const MOBILE_RETURN_BEFORE_INPUT_SUPPRESSION_MS = 500;
-  // Some software keyboards start a composition and never end it. Commit the
-  // composed text when the keyboard goes quiet instead of dropping every edit.
-  const MOBILE_COMPOSITION_STALL_MS = 750;
   const MOBILE_MOUSE_DRAG_HOLD_MS = 180;
   const MOBILE_SCROLL_MAX_VELOCITY = 2.2;
   const MOBILE_SCROLL_DECAY_MS = 240;
@@ -180,9 +177,11 @@ const { WebglAddon } = globalThis.WebglAddon;
     inputLogView.textContent = [header, ...inputLogLines].join('\n');
   }
 
+  // `line` may be a function, so a hot caller formats nothing while the log
+  // is off.
   function inputLog(line) {
     if (!inputLogEnabled) return;
-    inputLogLines.push(line);
+    inputLogLines.push(typeof line === 'function' ? line() : line);
     if (inputLogLines.length > 16) inputLogLines.shift();
     renderInputLog();
   }
@@ -1176,29 +1175,33 @@ const { WebglAddon } = globalThis.WebglAddon;
     else mobileSheetCloseTimer = setTimeout(finish, MOBILE_SHEET_ANIMATION_MS);
   }
 
-  async function requestNavigationFocus(kind, targetId) {
+  function storeNavigationSnapshot(snapshot) {
+    navigationSnapshot = snapshot;
+    navigationFingerprint = JSON.stringify(snapshot);
+  }
+
+  // Changes to Herdr's navigation run one at a time, and the poll waits for
+  // them: a poll that started earlier never lands on top of their result.
+  // `apply` runs with the response while the change still holds the queue.
+  async function requestNavigationChange(path, body, failure, apply) {
     if (!currentBackend) return;
     const backend = currentBackend;
-    const previousFocus = navigationFocusRequest;
+    const previous = navigationFocusRequest;
     const operation = (async () => {
-      if (previousFocus) await previousFocus.catch(() => undefined);
+      if (previous) await previous.catch(() => undefined);
       if (navigationRequest) await navigationRequest;
       if (currentBackend?.id !== backend.id) return;
       const response = await fetchWithTimeout(
-        backendApiUrl(backend, 'focus'),
+        backendApiUrl(backend, path),
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ kind, target_id: targetId }),
+          body: JSON.stringify(body),
         },
       );
       const result = await response.json();
-      if (!response.ok) throw new Error(result.detail || `could not focus ${kind}`);
-      if (currentBackend?.id !== backend.id) return;
-      navigationSnapshot = result;
-      navigationFingerprint = JSON.stringify(result);
-      if (viewMode === 'panes') renderPaneNavigation();
-      renderMobileSheet();
+      if (!response.ok) throw new Error(result.detail || failure);
+      if (currentBackend?.id === backend.id) apply(result);
     })();
     navigationFocusRequest = operation;
     try {
@@ -1206,6 +1209,17 @@ const { WebglAddon } = globalThis.WebglAddon;
     } finally {
       if (navigationFocusRequest === operation) navigationFocusRequest = undefined;
     }
+  }
+
+  function requestNavigationFocus(kind, targetId) {
+    return requestNavigationChange(
+      'focus', { kind, target_id: targetId }, `could not focus ${kind}`,
+      (result) => {
+        storeNavigationSnapshot(result);
+        if (viewMode === 'panes') renderPaneNavigation();
+        renderMobileSheet();
+      },
+    );
   }
 
   async function focusNavigationTarget(kind, targetId, button) {
@@ -1221,39 +1235,26 @@ const { WebglAddon } = globalThis.WebglAddon;
 
   // A new tab in `workspaceId`, or a new space, starting in the selected
   // pane's directory. The view moves to it.
-  let paneCreateRequest;
+  let creatingPaneTarget = false;
   async function createPaneTarget(kind, workspaceId = selectedWorkspace) {
-    if (!currentBackend || paneCreateRequest) return;
-    const backend = currentBackend;
+    if (!currentBackend || creatingPaneTarget) return;
+    creatingPaneTarget = true;
     const name = kind === 'tab' ? 'tab' : 'space';
-    paneCreateRequest = (async () => {
-      if (navigationRequest) await navigationRequest.catch(() => undefined);
-      const response = await fetchWithTimeout(
-        backendApiUrl(backend, 'create'),
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            kind,
-            workspace_id: kind === 'tab' ? workspaceId : undefined,
-            pane_id: selectedPane,
-          }),
+    try {
+      await requestNavigationChange(
+        'create',
+        { kind, workspace_id: kind === 'tab' ? workspaceId : undefined, pane_id: selectedPane },
+        `could not create a ${name}`,
+        (result) => {
+          if (viewMode !== 'panes') return;
+          storeNavigationSnapshot(result.navigation);
+          selectPaneTab(result.created.tab_id);
         },
       );
-      const result = await response.json();
-      if (!response.ok) throw new Error(result.detail || `could not create a ${name}`);
-      if (currentBackend?.id !== backend.id || viewMode !== 'panes') return;
-      navigationSnapshot = result.navigation;
-      navigationFingerprint = JSON.stringify(result.navigation);
-      renderPaneNavigation();
-      selectPaneTab(result.created.tab_id);
-    })();
-    try {
-      await paneCreateRequest;
     } catch (error) {
       showBrowserToast(`New ${name} failed: ${error.message}`);
     } finally {
-      paneCreateRequest = undefined;
+      creatingPaneTarget = false;
     }
   }
 
@@ -2161,10 +2162,8 @@ const { WebglAddon } = globalThis.WebglAddon;
     return pane.compose.prefix + pane.compose.text;
   }
 
-  // WebKit can store a typed space as a no-break space, which a shell would
-  // read as part of a word. Read the box with plain spaces.
   function mobileBoxValue(helper) {
-    return helper.value.replace(/\u00a0/g, ' ');
+    return plainSpaces(helper.value);
   }
 
   function restoreComposeBox(pane) {
@@ -2565,10 +2564,10 @@ const { WebglAddon } = globalThis.WebglAddon;
     let end = rowTexts.length;
     while (end - start > 1 && rowTexts[start].trim() === '') start += 1;
     while (end - start > 1 && rowTexts[end - 1].trim() === '') end -= 1;
-    return rowTexts.slice(start, end).map((rowText, index, kept) => {
+    return plainSpaces(rowTexts.slice(start, end).map((rowText, index, kept) => {
       if (index === kept.length - 1) return rowText.trimEnd();
       return snapshotRowContinues(terminal, firstRow + start + index) ? rowText : `${rowText.trimEnd()}\n`;
-    }).join('');
+    }).join(''));
   }
 
   // The line through buffer row `row`, joined across the rows it wraps over
@@ -2580,12 +2579,18 @@ const { WebglAddon } = globalThis.WebglAddon;
     while (first > 0 && row - first < LINK_LINE_MAX_ROWS && snapshotRowContinues(terminal, first - 1)) first -= 1;
     let last = row;
     while (last < buffer.length - 1 && last - row < LINK_LINE_MAX_ROWS && snapshotRowContinues(terminal, last)) last += 1;
+    // Most lines hold no URL: a plain read rules that out before any cell is
+    // mapped. The hover and every tap ask.
+    let plain = '';
+    for (let y = first; y <= last; y += 1) plain += buffer.getLine(y)?.translateToString() ?? '';
+    if (!/https?:\/\//.test(plain)) return { text: '', cells: [] };
     let text = '';
     const cells = [];
+    let cell;
     for (let y = first; y <= last; y += 1) {
       const line = buffer.getLine(y);
       for (let x = 0; x < terminal.cols; x += 1) {
-        const cell = line?.getCell(x);
+        cell = line?.getCell(x, cell);
         // The second cell of a wide character has no text of its own.
         if (!cell || cell.getWidth() === 0) continue;
         const characters = cell.getChars() || ' ';
@@ -3496,7 +3501,6 @@ const { WebglAddon } = globalThis.WebglAddon;
         cancelTouchLongPress();
         if (!touchMoved && !mobileMouseMode) paneTerminal.clearSelection();
         touchMoved = true;
-        suppressKeyboardFocusUntil = performance.now() + MOBILE_TAP_MAX_MS;
         if (mobileMouseMode && touchMouseGesture === undefined) {
           const held = performance.now() - (touchStartTime || performance.now());
           const horizontal = Math.abs(touch.clientX - touchStartX);
@@ -4488,7 +4492,7 @@ const { WebglAddon } = globalThis.WebglAddon;
   }
 
   function sendInput(data) {
-    inputLog(`sent "${inputLogText(data)}"`);
+    inputLog(() => `sent "${inputLogText(data)}"`);
     try {
       if (viewMode === 'panes' && selectedPaneTerminal()?.snapshot) return;
       if (isDisposableMouseMotion(data)) {
@@ -5089,7 +5093,7 @@ const { WebglAddon } = globalThis.WebglAddon;
       part.selectNodeContents(first.rows.children[index]);
       if (index === first.index) part.setStart(first.node, first.offset);
       if (index === last.index) part.setEnd(last.node, last.offset);
-      rowTexts.push(part.toString().replace(/\u00a0/g, ' '));
+      rowTexts.push(part.toString());
     }
     // The snapshot has no scrollback: its row n is DOM row n.
     event.clipboardData?.setData('text/plain', snapshotCopyText(snapshot, first.index, rowTexts));
@@ -5098,11 +5102,11 @@ const { WebglAddon } = globalThis.WebglAddon;
   // Window listeners run before the document ones that stop these events.
   const inputLogBoxEnd = (target) => inputLogText(String(target?.value ?? '').slice(-12));
   window.addEventListener('keydown', (event) => {
-    inputLog(`key "${inputLogText(event.key)}" code=${event.keyCode}`);
+    inputLog(() => `key "${inputLogText(event.key)}" code=${event.keyCode}`);
   }, true);
   for (const type of ['beforeinput', 'input']) {
     window.addEventListener(type, (event) => {
-      inputLog(`${type} ${event.inputType} "${inputLogText(event.data)}" box="${inputLogBoxEnd(event.target)}"`);
+      inputLog(() => `${type} ${event.inputType} "${inputLogText(event.data)}" box="${inputLogBoxEnd(event.target)}"`);
     }, true);
   }
   renderInputLog();

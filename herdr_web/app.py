@@ -1467,20 +1467,9 @@ async def focus_backend_target(
         snapshot = await navigation_snapshot(backend, refresh=True)
         collection = "agents" if request.kind == "agent" else f"{request.kind}s"
         id_field = "pane_id" if request.kind == "agent" else f"{request.kind}_id"
-        records = snapshot.get(collection)
-        allowed_ids = (
-            {
-                record.get(id_field)
-                for record in records
-                if isinstance(record, dict) and isinstance(record.get(id_field), str)
-            }
-            if isinstance(records, list)
-            else set()
-        )
-        if request.target_id not in allowed_ids:
+        if request.target_id not in navigation_ids(snapshot, collection, id_field):
             raise HTTPException(status_code=404, detail=f"Herdr {request.kind} was not found")
         await run_herdr_api(backend, request.kind, "focus", request.target_id)
-        navigation_snapshot_cache.pop(backend.id, None)
         return await navigation_snapshot(backend, refresh=True)
     except HTTPException:
         raise
@@ -1520,7 +1509,8 @@ async def pane_working_directory(backend: Backend, pane_id: str) -> str | None:
 async def create_backend_target(
     backend_id: str, request: CreateRequest
 ) -> dict[str, object]:
-    """Create a tab or a space. The browser selects it; Herdr's focus stays."""
+    """Create a tab or a space without moving Herdr's focus; the browser then
+    selects the new tab, which focuses it like any other selection."""
     backend = discover_backends().get(backend_id)
     if backend is None:
         raise HTTPException(status_code=404, detail="Herdr backend is no longer available")
@@ -1544,7 +1534,6 @@ async def create_backend_target(
             isinstance(tab.get(field), str) for field in ("tab_id", "workspace_id")
         ):
             raise RuntimeError("Herdr did not report the new tab")
-        navigation_snapshot_cache.pop(backend.id, None)
         return {
             "created": {"workspace_id": tab["workspace_id"], "tab_id": tab["tab_id"]},
             "navigation": await navigation_snapshot(backend, refresh=True),

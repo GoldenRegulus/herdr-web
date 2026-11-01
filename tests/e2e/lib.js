@@ -122,6 +122,28 @@ function rowPointNow(page, text, column, rowOffset, index) {
   }, [text, column, rowOffset, index]);
 }
 
+// Poll until `predicate` returns something truthy, and return it; undefined
+// after `timeout`. Waiting on the condition beats a fixed sleep both ways.
+async function until(predicate, timeout = 5000) {
+  const end = Date.now() + timeout;
+  for (;;) {
+    const value = await predicate();
+    if (value || Date.now() >= end) return value || undefined;
+    await sleep(100);
+  }
+}
+
+const selectedTabLabel = (page) => page.$eval(
+  '#pane-tabs [aria-selected="true"]', (button) => button.textContent,
+).catch(() => undefined);
+
+// Reload the page and wait until Panes mode is connected again.
+async function reconnect(page) {
+  await page.reload();
+  await page.waitForSelector('#connection-indicator[data-state="connected"]', { state: 'attached', timeout: 15000 });
+  await panesMode(page);
+}
+
 // The session's tabs and spaces, so a test can remove what it created.
 const herdrList = (kind) => JSON.parse(herdr(kind, 'list')).result[`${kind}s`];
 function snapshotLayout() {
@@ -175,5 +197,5 @@ async function main(runs) {
 module.exports = {
   SESSION, SHOTS, VIEWPORTS, sleep, herdr, sendText, sendKeys, run,
   open, panesMode, paneTexts, shows, check, verdict, main, recordOpenedLinks, openedLinks, rowPoint,
-  herdrList, snapshotLayout, restoreLayout,
+  herdrList, snapshotLayout, restoreLayout, until, selectedTabLabel, reconnect,
 };

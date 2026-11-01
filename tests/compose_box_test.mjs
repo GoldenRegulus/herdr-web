@@ -188,6 +188,7 @@ test('a stale caret can never lock the box', () => {
 function copyTerminal(rows, cols) {
   const lines = rows.map(({ text, wrapped = false }) => ({
     isWrapped: wrapped,
+    translateToString: (trimRight = false) => (trimRight ? text.trimEnd() : text.padEnd(cols)),
     getCell: (column) => {
       const padded = text.padEnd(cols);
       return column < cols ? { getChars: () => padded[column], getWidth: () => 1 } : undefined;

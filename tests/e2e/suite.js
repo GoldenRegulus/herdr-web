@@ -210,26 +210,25 @@ async function desktop() {
       await sleep(500);
       await panes.nth(0).click();
       await page.locator('#pane-tabs .pane-tab-new').click();
-      await sleep(1500);
-      const tab = L.herdrList('tab').find((record) => !layout.tabs.has(record.tab_id));
+      const tab = await L.until(() => L.herdrList('tab').find((record) => !layout.tabs.has(record.tab_id)));
       check('desktop panes: + makes a tab in this space', tab?.workspace_id === 'w1', JSON.stringify(tab));
       check('desktop panes: the view moves to the new tab',
-        await page.$eval('#pane-tabs [aria-selected="true"]', (button) => button.textContent) === tab?.label);
+        await L.until(async () => await L.selectedTabLabel(page) === tab?.label));
+      await L.until(async () => ((await L.paneTexts(page))[0] || '').trim().length > 0);
       await page.keyboard.type('pwd\n', { delay: 10 });
       verdict('desktop panes: the new tab starts in the pane directory', await shows(page, '/tmp', 0));
       await page.locator('#pane-workspaces .pane-create').click();
-      await sleep(1500);
-      const space = L.herdrList('workspace').find((record) => !layout.workspaces.has(record.workspace_id));
+      const space = await L.until(() => L.herdrList('workspace').find(
+        (record) => !layout.workspaces.has(record.workspace_id),
+      ));
       check('desktop panes: New space makes a space', !!space);
-      check('desktop panes: the view moves to the new space', await page.$eval(
+      check('desktop panes: the view moves to the new space', await L.until(async () => await page.$eval(
         '#pane-workspaces [aria-current="true"] .pane-sidebar-item-label', (label) => label.textContent,
-      ) === space?.label);
+      ).catch(() => undefined) === space?.label));
     } finally {
       L.restoreLayout(layout);
     }
-    await page.reload();
-    await page.waitForSelector('#connection-indicator[data-state="connected"]', { state: 'attached', timeout: 15000 });
-    await L.panesMode(page);
+    await L.reconnect(page);
 
     await page.setViewportSize({ width: 600, height: 800 });
     await sleep(800);

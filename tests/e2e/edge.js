@@ -29,7 +29,8 @@ async function phone(profile) {
     await k.blur();
     L.sendKeys(PANE, 'ctrl+c');
     L.run(PANE, 'clear');
-    await sleep(500);
+    // Cleared: the pane shows only the prompt.
+    await L.until(async () => ((await L.paneTexts(page))[0] || '').trim() === '$', 3000);
     await k.tap();
   };
 
@@ -422,10 +423,9 @@ async function phone(profile) {
     }, [from, offset, to, length]);
     const want = typeof expected === 'function' ? await expected() : expected;
     check(p(name), copied === want, `got ${JSON.stringify(copied)} want ${JSON.stringify(want)}`);
+    // An emptied selection closes the snapshot by itself.
     await page.evaluate(() => document.getSelection().removeAllRanges());
-    await sleep(600);
-    await page.locator('.pane-snapshot-view').click({ force: true }).catch(() => {});
-    await sleep(500);
+    await page.waitForSelector('.pane-snapshot-view', { state: 'detached', timeout: 3000 });
   });
   const words = Array.from({ length: 16 }, (_, index) => `word${index}`).join(' ');
   copyCase('copy across a wrapped line and real newlines',
@@ -520,13 +520,15 @@ async function phone(profile) {
       await k.tapKey('#pane-browse');
       await sleep(500);
       await k.tapKey('.sheet-item-create:has-text("New tab")');
-      await sleep(1500);
-      const tab = L.herdrList('tab').find((record) => !layout.tabs.has(record.tab_id));
+      const tab = await L.until(() => L.herdrList('tab').find((record) => !layout.tabs.has(record.tab_id)));
       check(p('New tab makes a tab in this space'), tab?.workspace_id === 'w1', JSON.stringify(tab));
-      check(p('the view moves to the new tab'), await page.$eval(
-        '#pane-tabs [aria-selected="true"]', (button) => button.textContent,
-      ) === tab?.label);
-      await k.tap();
+      check(p('the view moves to the new tab'),
+        await L.until(async () => await L.selectedTabLabel(page) === tab?.label));
+      // Type once the new tab's pane takes the keyboard.
+      await L.until(async () => {
+        await k.tap();
+        return k.focused();
+      });
       await k.type('pwd');
       await k.enter();
       verdict(p('the new tab starts in the pane directory'), await shows(page, '/tmp'));
@@ -534,17 +536,16 @@ async function phone(profile) {
       await k.tapKey('#pane-browse');
       await sleep(500);
       await k.tapKey('.sheet-item-create:has-text("New space")');
-      await sleep(1500);
-      const space = L.herdrList('workspace').find((record) => !layout.workspaces.has(record.workspace_id));
+      const space = await L.until(() => L.herdrList('workspace').find(
+        (record) => !layout.workspaces.has(record.workspace_id),
+      ));
       check(p('New space makes a space'), !!space);
-      check(p('the view moves to the new space'),
-        (await L.paneTexts(page))[0] !== undefined && space?.active_tab_id !== undefined
-        && await page.$eval('#pane-tabs [aria-selected="true"]', (button) => button.textContent) === '1');
+      check(p('the view moves to the new space'), await L.until(async () => (
+        await page.$eval('#pane-grid .pane-title-label', (label) => label.textContent).catch(() => '')
+      ).startsWith(`${space?.label} · `)));
     } finally {
       L.restoreLayout(layout);
-      await page.reload();
-      await page.waitForSelector('#connection-indicator[data-state="connected"]', { state: 'attached', timeout: 15000 });
-      await L.panesMode(page);
+      await L.reconnect(page);
     }
   });
 
@@ -553,22 +554,23 @@ async function phone(profile) {
     try {
       await k.blur();
       const created = JSON.parse(L.herdr('tab', 'create', '--workspace', 'w1', '--no-focus')).result.tab;
-      await sleep(2500);
-      await page.evaluate((label) => [...document.querySelectorAll('#pane-tabs button')]
-        .find((button) => button.textContent === label).click(), created.label);
-      await sleep(1000);
-      check(p('the view shows a tab another client opened'), await page.$eval(
-        '#pane-tabs [aria-selected="true"]', (button) => button.textContent,
-      ) === created.label);
+      // The navigation poll shows the new tab within a couple of seconds.
+      const shown = await L.until(() => page.evaluate((label) => {
+        const button = [...document.querySelectorAll('#pane-tabs button')].find((b) => b.textContent === label);
+        button?.click();
+        return !!button;
+      }, created.label));
+      check(p('the view shows a tab another client opened'),
+        shown && await L.until(async () => await L.selectedTabLabel(page) === created.label));
+      // Selecting it focuses it in Herdr: close it only once that is done.
+      await L.until(() => L.herdrList('tab').find((tab) => tab.tab_id === created.tab_id)?.focused);
       L.herdr('tab', 'focus', 'w1:t1');
       L.herdr('tab', 'close', created.tab_id);
-      await sleep(3000);
-      check(p('the view moves off a closed tab'), await page.$eval(
-        '#pane-tabs [aria-selected="true"]', (button) => button.textContent,
-      ) === '1');
-      check(p('and stays connected'), await page.$eval(
-        '#connection-indicator', (indicator) => indicator.dataset.state,
-      ) === 'connected');
+      check(p('the view moves off a closed tab'),
+        await L.until(async () => await L.selectedTabLabel(page) === '1'));
+      check(p('and stays connected'), await L.until(() => page.$eval(
+        '#connection-indicator', (indicator) => indicator.dataset.state === 'connected',
+      )));
     } finally {
       L.restoreLayout(layout);
     }
