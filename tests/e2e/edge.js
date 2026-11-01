@@ -474,6 +474,42 @@ async function phone(profile) {
     check(p('a tap beside a link raises the keyboard'), await k.focused());
   });
 
+  // ---- a prompt that ends in a no-break space ----
+  // Claude Code draws its prompt as "❯" and a no-break space. The box holds
+  // plain spaces; read differently, every keystroke added a space and a
+  // modified key lost its modifier.
+  test('typing after a no-break-space prompt adds no spaces', async () => {
+    try {
+      await k.blur();
+      L.run(PANE, "PS1=$'\\u276f\\u00a0'");
+      L.run(PANE, 'clear');
+      await sleep(500);
+      await k.tap();
+      const t = token('nb');
+      await k.type(`echo ${t}`);
+      await sleep(400);
+      const line = L.herdr('pane', 'read', PANE, '--source', 'visible', '--lines', '5')
+        .split('\n').find((row) => row.includes(t)) || '';
+      check(p('the typed line has no added spaces'), line.trimEnd() === `\u276f\u00a0echo ${t}`, JSON.stringify(line));
+      await k.enter();
+      verdict(p('the typed command runs'), await shows(page, t));
+      await k.type('abc');
+      await k.tapKey('#pane-mobile-bar [data-modifier="control"]');
+      await k.type('c');
+      await sleep(400);
+      check(p('Ctrl then c clears the modifier'), await page.$eval(
+        '#pane-mobile-bar [data-modifier="control"]', (button) => button.dataset.mode,
+      ) === 'off');
+      const after = token('cc');
+      await k.type(`echo ${after}`);
+      await k.enter();
+      verdict(p('Ctrl then c sends Ctrl+C, not c'), await shows(page, after));
+    } finally {
+      L.run(PANE, "PS1='$ '");
+      await sleep(300);
+    }
+  });
+
   // ---- new tabs and spaces ----
   test('Browse makes a new tab and a new space', async () => {
     const layout = L.snapshotLayout();
