@@ -202,6 +202,35 @@ async function desktop() {
         want ? opened.length === 1 && opened[0] === want : opened.length === 0, JSON.stringify(opened));
     }
 
+    // + after the tabs makes a tab in this space, and New space a space; the
+    // view moves to each, in the directory of the pane it was made from.
+    const layout = L.snapshotLayout();
+    try {
+      L.run('w1:p1', 'cd /tmp && clear');
+      await sleep(500);
+      await panes.nth(0).click();
+      await page.locator('#pane-tabs .pane-tab-new').click();
+      await sleep(1500);
+      const tab = L.herdrList('tab').find((record) => !layout.tabs.has(record.tab_id));
+      check('desktop panes: + makes a tab in this space', tab?.workspace_id === 'w1', JSON.stringify(tab));
+      check('desktop panes: the view moves to the new tab',
+        await page.$eval('#pane-tabs [aria-selected="true"]', (button) => button.textContent) === tab?.label);
+      await page.keyboard.type('pwd\n', { delay: 10 });
+      verdict('desktop panes: the new tab starts in the pane directory', await shows(page, '/tmp', 0));
+      await page.locator('#pane-workspaces .pane-create').click();
+      await sleep(1500);
+      const space = L.herdrList('workspace').find((record) => !layout.workspaces.has(record.workspace_id));
+      check('desktop panes: New space makes a space', !!space);
+      check('desktop panes: the view moves to the new space', await page.$eval(
+        '#pane-workspaces [aria-current="true"] .pane-sidebar-item-label', (label) => label.textContent,
+      ) === space?.label);
+    } finally {
+      L.restoreLayout(layout);
+    }
+    await page.reload();
+    await page.waitForSelector('#connection-indicator[data-state="connected"]', { state: 'attached', timeout: 15000 });
+    await L.panesMode(page);
+
     await page.setViewportSize({ width: 600, height: 800 });
     await sleep(800);
     await page.locator('#pane-grid .xterm-screen').first().click();

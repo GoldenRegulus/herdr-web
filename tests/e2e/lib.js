@@ -122,6 +122,26 @@ function rowPointNow(page, text, column, rowOffset, index) {
   }, [text, column, rowOffset, index]);
 }
 
+// The session's tabs and spaces, so a test can remove what it created.
+const herdrList = (kind) => JSON.parse(herdr(kind, 'list')).result[`${kind}s`];
+function snapshotLayout() {
+  return {
+    tabs: new Set(herdrList('tab').map((tab) => tab.tab_id)),
+    workspaces: new Set(herdrList('workspace').map((space) => space.workspace_id)),
+  };
+}
+// Close the tabs and spaces made since `before`, and focus w1:t1 again: the
+// tests expect its panes.
+function restoreLayout(before) {
+  for (const space of herdrList('workspace')) {
+    if (!before.workspaces.has(space.workspace_id)) herdr('workspace', 'close', space.workspace_id);
+  }
+  for (const tab of herdrList('tab')) {
+    if (!before.tabs.has(tab.tab_id)) herdr('tab', 'close', tab.tab_id);
+  }
+  herdr('tab', 'focus', 'w1:t1');
+}
+
 const results = [];
 function check(name, ok, detail = '') {
   results.push({ name, ok });
@@ -155,4 +175,5 @@ async function main(runs) {
 module.exports = {
   SESSION, SHOTS, VIEWPORTS, sleep, herdr, sendText, sendKeys, run,
   open, panesMode, paneTexts, shows, check, verdict, main, recordOpenedLinks, openedLinks, rowPoint,
+  herdrList, snapshotLayout, restoreLayout,
 };

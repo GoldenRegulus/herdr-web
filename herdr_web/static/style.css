@@ -402,6 +402,12 @@ header {
   padding: 0 1.1rem;
 }
 #pane-tabs button:focus-visible { background: var(--theme-surface-0); }
+#pane-tabs button.pane-tab-new {
+  color: var(--theme-subtext);
+  min-width: 2.25rem;
+  padding: 0 .7rem;
+}
+.pane-sidebar-item.pane-create { color: var(--theme-subtext); }
 #pane-tabs button[aria-selected="true"] {
   background: transparent;
   border-bottom-color: var(--theme-accent);
@@ -878,6 +884,7 @@ header {
     width: 100%;
   }
   .sheet-item:focus-visible { background: var(--theme-surface-0); }
+  .sheet-item.sheet-item-create { color: var(--theme-subtext); }
   .sheet-item[aria-current="true"] {
     background: var(--theme-surface-0);
     box-shadow: inset 3px 0 var(--theme-accent);

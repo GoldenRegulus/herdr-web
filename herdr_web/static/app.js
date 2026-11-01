@@ -770,6 +770,11 @@ const { WebglAddon } = globalThis.WebglAddon;
       empty.textContent = 'No spaces';
       paneWorkspaces.append(empty);
     }
+    const newSpace = desktopPaneNavigationItem(
+      '+ New space', undefined, false, undefined, () => createPaneTarget('workspace'),
+    );
+    newSpace.classList.add('pane-create');
+    paneWorkspaces.append(newSpace);
 
     paneAgents.replaceChildren();
     for (const agent of maps.agents) {
@@ -809,6 +814,16 @@ const { WebglAddon } = globalThis.WebglAddon;
       button.setAttribute('aria-selected', String(tab.tab_id === selectedTab));
       button.addEventListener('click', () => selectPaneTab(tab.tab_id));
       paneTabs.append(button);
+    }
+    if (selectedWorkspace) {
+      const newTab = document.createElement('button');
+      newTab.type = 'button';
+      newTab.className = 'pane-tab-new';
+      newTab.textContent = '+';
+      newTab.title = 'New tab';
+      newTab.setAttribute('aria-label', 'New tab');
+      newTab.addEventListener('click', () => createPaneTarget('tab'));
+      paneTabs.append(newTab);
     }
     refreshPaneTitles();
   }
@@ -1054,6 +1069,14 @@ const { WebglAddon } = globalThis.WebglAddon;
           }
           tabList.append(tabNode);
         }
+        const newTabNode = document.createElement('li');
+        const newTab = sheetItem(
+          '+ New tab', undefined, false, undefined,
+          () => createPaneTarget('tab', workspace.workspace_id),
+        );
+        newTab.classList.add('sheet-tree-item', 'sheet-item-create');
+        newTabNode.append(newTab);
+        tabList.append(newTabNode);
         workspaceNode.append(tabList);
       }
       tree.append(workspaceNode);
@@ -1066,6 +1089,11 @@ const { WebglAddon } = globalThis.WebglAddon;
       empty.textContent = 'No spaces found.';
       sheetContent.append(empty);
     }
+    const newSpace = sheetItem(
+      '+ New space', undefined, false, undefined, () => createPaneTarget('workspace'),
+    );
+    newSpace.classList.add('sheet-item-create');
+    sheetContent.append(newSpace);
 
     const options = document.createElement('div');
     options.className = 'sheet-options';
@@ -1191,6 +1219,44 @@ const { WebglAddon } = globalThis.WebglAddon;
     }
   }
 
+  // A new tab in `workspaceId`, or a new space, starting in the selected
+  // pane's directory. The view moves to it.
+  let paneCreateRequest;
+  async function createPaneTarget(kind, workspaceId = selectedWorkspace) {
+    if (!currentBackend || paneCreateRequest) return;
+    const backend = currentBackend;
+    const name = kind === 'tab' ? 'tab' : 'space';
+    paneCreateRequest = (async () => {
+      if (navigationRequest) await navigationRequest.catch(() => undefined);
+      const response = await fetchWithTimeout(
+        backendApiUrl(backend, 'create'),
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            kind,
+            workspace_id: kind === 'tab' ? workspaceId : undefined,
+            pane_id: selectedPane,
+          }),
+        },
+      );
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.detail || `could not create a ${name}`);
+      if (currentBackend?.id !== backend.id || viewMode !== 'panes') return;
+      navigationSnapshot = result.navigation;
+      navigationFingerprint = JSON.stringify(result.navigation);
+      renderPaneNavigation();
+      selectPaneTab(result.created.tab_id);
+    })();
+    try {
+      await paneCreateRequest;
+    } catch (error) {
+      showBrowserToast(`New ${name} failed: ${error.message}`);
+    } finally {
+      paneCreateRequest = undefined;
+    }
+  }
+
   function markTabSeen(tabId) {
     if (!tabId) return;
     void requestNavigationFocus('tab', tabId).catch((error) => {
@@ -1300,6 +1366,15 @@ const { WebglAddon } = globalThis.WebglAddon;
         : undefined;
       navigationSnapshot = result;
       navigationFingerprint = fingerprint;
+      if (viewMode === 'panes' && !(result.tabs || []).some((tab) => tab.tab_id === selectedTab)) {
+        // The tab on screen is gone, closed here or by another client. Choose
+        // again as a fresh load does, which follows Herdr's focus.
+        initializePaneSelection();
+        renderPaneNavigation();
+        schedulePaneStructureRebuild();
+        renderMobileSheet();
+        return;
+      }
       if (viewMode === 'panes') {
         const structureChanged = previousStructure !== undefined
           && previousStructure !== paneStructureFingerprint(result, selectedTab);

@@ -474,6 +474,70 @@ async function phone(profile) {
     check(p('a tap beside a link raises the keyboard'), await k.focused());
   });
 
+  // ---- new tabs and spaces ----
+  test('Browse makes a new tab and a new space', async () => {
+    const layout = L.snapshotLayout();
+    try {
+      await k.blur();
+      L.run(PANE, 'cd /tmp && clear');
+      await sleep(500);
+      await k.tapKey('#pane-browse');
+      await sleep(500);
+      await k.tapKey('.sheet-item-create:has-text("New tab")');
+      await sleep(1500);
+      const tab = L.herdrList('tab').find((record) => !layout.tabs.has(record.tab_id));
+      check(p('New tab makes a tab in this space'), tab?.workspace_id === 'w1', JSON.stringify(tab));
+      check(p('the view moves to the new tab'), await page.$eval(
+        '#pane-tabs [aria-selected="true"]', (button) => button.textContent,
+      ) === tab?.label);
+      await k.tap();
+      await k.type('pwd');
+      await k.enter();
+      verdict(p('the new tab starts in the pane directory'), await shows(page, '/tmp'));
+      await k.blur();
+      await k.tapKey('#pane-browse');
+      await sleep(500);
+      await k.tapKey('.sheet-item-create:has-text("New space")');
+      await sleep(1500);
+      const space = L.herdrList('workspace').find((record) => !layout.workspaces.has(record.workspace_id));
+      check(p('New space makes a space'), !!space);
+      check(p('the view moves to the new space'),
+        (await L.paneTexts(page))[0] !== undefined && space?.active_tab_id !== undefined
+        && await page.$eval('#pane-tabs [aria-selected="true"]', (button) => button.textContent) === '1');
+    } finally {
+      L.restoreLayout(layout);
+      await page.reload();
+      await page.waitForSelector('#connection-indicator[data-state="connected"]', { state: 'attached', timeout: 15000 });
+      await L.panesMode(page);
+    }
+  });
+
+  test('a tab closed by another client gives way to the focused one', async () => {
+    const layout = L.snapshotLayout();
+    try {
+      await k.blur();
+      const created = JSON.parse(L.herdr('tab', 'create', '--workspace', 'w1', '--no-focus')).result.tab;
+      await sleep(2500);
+      await page.evaluate((label) => [...document.querySelectorAll('#pane-tabs button')]
+        .find((button) => button.textContent === label).click(), created.label);
+      await sleep(1000);
+      check(p('the view shows a tab another client opened'), await page.$eval(
+        '#pane-tabs [aria-selected="true"]', (button) => button.textContent,
+      ) === created.label);
+      L.herdr('tab', 'focus', 'w1:t1');
+      L.herdr('tab', 'close', created.tab_id);
+      await sleep(3000);
+      check(p('the view moves off a closed tab'), await page.$eval(
+        '#pane-tabs [aria-selected="true"]', (button) => button.textContent,
+      ) === '1');
+      check(p('and stays connected'), await page.$eval(
+        '#connection-indicator', (indicator) => indicator.dataset.state,
+      ) === 'connected');
+    } finally {
+      L.restoreLayout(layout);
+    }
+  });
+
   try {
     for (const { name, body, fresh: clean } of cases) {
       if (filter && !name.includes(filter)) continue;

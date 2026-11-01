@@ -15,7 +15,7 @@ differently.
 `suite.js`: core input.
 
 - Desktop: Full mode, Panes mode with two panes, narrow window, clicking
-  links.
+  links, a new tab and a new space.
 - Phones: tap versus swipe and fling for raising the keyboard, typing,
   predictive words (also right before Enter), backspace, caret moves,
   arrow and Tab keys, bracketed and plain paste, the iOS paste menu,
@@ -37,6 +37,8 @@ differently.
 - Hold-to-copy across wrapped lines and real newlines, partial rows, a
   wrap that falls on a space, blank lines and repeated spaces, and selection
   handles in the rows around a wrapped URL.
+- A new tab and a new space from Browse, and a tab on screen closed by
+  another client.
 - Tapping a link: OSC 8 links and URLs, also on a wrapped row, open without
   raising the keyboard; a tap beside one still raises it.
 
