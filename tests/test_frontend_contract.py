@@ -243,7 +243,8 @@ class FrontendContractTests(unittest.TestCase):
         stylesheet = (STATIC_DIRECTORY / "style.css").read_text(encoding="utf-8")
 
         self.assertIn("backendApiUrl(backend, 'navigation')", application)
-        self.assertIn("backendApiUrl(backend, 'focus')", application)
+        self.assertIn("backendApiUrl(backend, path)", application)
+        self.assertIn("'focus', { kind, target_id: targetId }", application)
         self.assertIn("function markTabSeen(tabId)", application)
         self.assertNotIn("if (!mobileQuery.matches || !tabId)", application)
         self.assertIn("requestNavigationFocus('tab', tabId)", application)
