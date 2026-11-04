@@ -3348,6 +3348,11 @@ const { WebglAddon } = globalThis.WebglAddon;
     let touchMoved = false;
     let touchLongPressFired = false;
     let touchStartTime;
+    // The touch this gesture follows. A browser can leave an earlier touch
+    // listed as down when its end never arrives, for instance after a redraw
+    // replaced the element under the finger; counting touches then mistakes
+    // the next tap for the same, long, gesture.
+    let touchIdentifier;
     let touchLongPressTimer;
     let touchScrollTime;
     let touchScrollAnimation;
@@ -3379,12 +3384,14 @@ const { WebglAddon } = globalThis.WebglAddon;
       touchScrollVelocity = 0;
       touchScrollTime = undefined;
       touchStartTime = undefined;
+      touchIdentifier = undefined;
       if (preserveClipboardFocusUntil === Number.POSITIVE_INFINITY) {
         preserveClipboardFocusUntil = performance.now()
           + MOBILE_NATIVE_MENU_CLICK_SUPPRESSION_MS;
       }
     };
     record.cancelTouchScroll = cancelTouchScroll;
+    const trackedTouch = (list) => [...(list || [])].find((touch) => touch.identifier === touchIdentifier);
 
     const applyTouchScrollDistance = (distance, clientX, clientY) => {
       touchScrollDistance += distance;
@@ -3442,8 +3449,12 @@ const { WebglAddon } = globalThis.WebglAddon;
     };
 
     host.addEventListener('touchstart', (event) => {
-      if (event.touches.length !== 1) return;
-      const touch = event.touches[0];
+      // Every new touch starts a gesture of its own.
+      if (event.changedTouches.length !== 1) {
+        cancelTouchScroll();
+        return;
+      }
+      const touch = event.changedTouches[0];
       // A new touch is a new gesture, unless it catches a scroll in flight:
       // that touch only stops the scroll.
       if (touchScrollAnimation === undefined) {
@@ -3463,6 +3474,7 @@ const { WebglAddon } = globalThis.WebglAddon;
         touchMoved = false;
         touchScrollTime = performance.now();
         touchStartTime = touchScrollTime;
+        touchIdentifier = touch.identifier;
         if (retainKeyboard) preserveClipboardFocusUntil = Number.POSITIVE_INFINITY;
         setActivePane(streamId);
         return;
@@ -3478,6 +3490,7 @@ const { WebglAddon } = globalThis.WebglAddon;
       touchMoved = false;
       touchScrollTime = performance.now();
       touchStartTime = touchScrollTime;
+      touchIdentifier = touch.identifier;
       setActivePane(streamId);
       touchLongPressTimer = setTimeout(() => {
         if (!touchScrollActive || touchPointerX === undefined || touchPointerY === undefined) return;
@@ -3493,11 +3506,8 @@ const { WebglAddon } = globalThis.WebglAddon;
     }, { passive: false, capture: true });
     host.addEventListener('touchmove', (event) => {
       if (!touchScrollActive || touchPointerY === undefined) return;
-      if (event.touches.length !== 1) {
-        cancelTouchScroll();
-        return;
-      }
-      const touch = event.touches[0];
+      const touch = trackedTouch(event.touches);
+      if (!touch) return;
       const moved = touchStartX !== undefined && touchStartY !== undefined
         && Math.hypot(touch.clientX - touchStartX, touch.clientY - touchStartY)
           > MOBILE_LONG_PRESS_MOVE_PX;
@@ -3547,6 +3557,7 @@ const { WebglAddon } = globalThis.WebglAddon;
       if (!applyTouchScrollDistance(distance, touch.clientX, touch.clientY)) cancelTouchScroll();
     }, { passive: false, capture: true });
     host.addEventListener('touchend', (event) => {
+      if (!trackedTouch(event.changedTouches)) return;
       cancelTouchLongPress();
       if (!touchScrollActive || touchPointerY === undefined) return;
       if (touchLongPressFired) {
@@ -3582,7 +3593,7 @@ const { WebglAddon } = globalThis.WebglAddon;
         startTouchMomentum();
         return;
       }
-      const endTouch = event.changedTouches?.[0];
+      const endTouch = trackedTouch(event.changedTouches);
       const tapLike = isMobileTapGesture(
         (endTouch?.clientX ?? touchPointerX) - (touchStartX ?? touchPointerX),
         (endTouch?.clientY ?? touchPointerY) - (touchStartY ?? touchPointerY),
@@ -4999,12 +5010,14 @@ const { WebglAddon } = globalThis.WebglAddon;
   // move it toward nearby targets, such as the compose box on the cursor row.
   let tapStart;
   document.addEventListener('touchstart', (event) => {
-    const touch = event.touches.length === 1 ? event.touches[0] : undefined;
-    tapStart = touch && { x: touch.clientX, y: touch.clientY, at: performance.now() };
+    const touch = event.changedTouches.length === 1 ? event.changedTouches[0] : undefined;
+    tapStart = touch && {
+      id: touch.identifier, x: touch.clientX, y: touch.clientY, at: performance.now(),
+    };
   }, true);
   const openLinkFromTap = (event) => {
     if (!mobileQuery.matches || mobileMouseMode || !tapStart) return;
-    const touch = event.changedTouches?.[0];
+    const touch = [...event.changedTouches].find((candidate) => candidate.identifier === tapStart.id);
     const pane = [...paneTerminals.values()].find((candidate) => candidate.host.contains(event.target));
     if (!touch || !pane || pane.snapshot) return;
     // A tap on the compose box, the cursor row, is the iOS paste-menu

@@ -389,6 +389,47 @@ async function phone(profile) {
     await sleep(800);
   }, { fresh: false });
 
+  // ---- selection mode opens only on a long press ----
+  // A browser can leave a touch listed as down when its end never arrives,
+  // for instance after a redraw replaced the element under the finger. The
+  // next quick tap was then timed from that old touch, and opened selection
+  // mode however far apart the two taps were.
+  test('a quick tap never opens selection mode, even with a stuck touch', async () => {
+    await k.blur();
+    const box = await page.locator('#pane-grid .xterm-screen').first().boundingBox();
+    const at = { x: box.x + 100, y: box.y + 200 };
+    const touch = (type, points) => k.cdp.send('Input.dispatchTouchEvent', { type, touchPoints: points });
+    const open = () => page.evaluate(() => !!document.querySelector('.pane-snapshot-view'));
+    // A tap on the snapshot closes it, once it has been open a moment.
+    const closeSnapshot = async () => {
+      await sleep(800);
+      await page.evaluate(() => {
+        document.getSelection().removeAllRanges();
+        document.querySelector('.pane-snapshot-view')?.click();
+      });
+      await page.waitForSelector('.pane-snapshot-view', { state: 'detached', timeout: 3000 });
+    };
+    // Touch 1 goes down and its end never arrives. (CDP's touchEnd lists the
+    // touch it releases.)
+    await touch('touchStart', [{ ...at, id: 1 }]);
+    await sleep(700);
+    const other = { x: at.x + 40, y: at.y + 40 };
+    await touch('touchStart', [{ ...at, id: 1 }, { ...other, id: 2 }]);
+    await sleep(80);
+    await touch('touchEnd', [{ ...other, id: 2 }]);
+    await sleep(600);
+    check(p('a quick tap with a stuck touch does not open selection mode'), !(await open()));
+    await touch('touchStart', [{ ...at, id: 1 }, { ...other, id: 3 }]);
+    await sleep(700);
+    await touch('touchEnd', [{ ...other, id: 3 }]);
+    check(p('a long press with a stuck touch still opens it'), await L.until(open, 2000));
+    await touch('touchEnd', [{ ...at, id: 1 }]);
+    await closeSnapshot();
+    await k.longPress({ x: at.x, y: at.y }, 700);
+    check(p('an ordinary long press opens it'), await L.until(open, 2000));
+    await closeSnapshot();
+  });
+
   // ---- hold-to-copy ----
   // Long-press to open the snapshot, select from `offset` in the row starting
   // with `from` to `length` characters into the row starting with `to`, and
