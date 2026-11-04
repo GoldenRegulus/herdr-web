@@ -197,58 +197,52 @@ function copyTerminal(rows, cols) {
   return { cols, buffer: { active: { length: lines.length, getLine: (row) => lines[row] } } };
 }
 
-test('copy joins a wrapped row without a break and a newline with one', () => {
+// Copy takes Herdr's answer for which rows the terminal wrapped (see
+// pane_text_test.mjs); `continues[row]` is that answer.
+test('copy joins the rows Herdr wrapped and breaks the others', () => {
   const h = harness('', 0);
-  const terminal = copyTerminal([
-    { text: 'prompt> one' }, { text: 'two', wrapped: true }, { text: 'next' },
-  ], 20);
   assert.equal(
-    h.context.snapshotCopyText(terminal, 0, ['prompt> one', 'two', 'next']),
-    'prompt> onetwo\nnext',
-  );
-});
-
-test('copy joins a full row that Herdr drew without a wrap marker', () => {
-  const h = harness('', 0);
-  // Herdr positions every row itself and pads each one with spaces.
-  const terminal = copyTerminal([
-    { text: 'word0 word1 word' }, { text: '7 word8' }, { text: 'hard one' }, { text: 'hard two' },
-  ], 16);
-  assert.equal(
-    h.context.snapshotCopyText(terminal, 0, [
-      'word0 word1 word', '7 word8         ', 'hard one        ', 'hard two        ',
+    h.context.snapshotCopyText([false, true, false], 0, [
+      'prompt> one     ', 'word0 word1 word', '7 word8         ', 'hard two',
     ]),
-    'word0 word1 word7 word8\nhard one\nhard two',
-    'no break inside a wrapped word, and no padding before a newline',
+    'prompt> one\nword0 word1 word7 word8\nhard two',
+    'no break inside a wrapped word, and no padding before a break',
+  );
+  assert.equal(
+    h.context.snapshotCopyText([true, false], 0, ['aaaa bbbb ', 'cccc      ', 'end']),
+    'aaaa bbbb cccc\nend',
+    'a wrap that fell on a space keeps the space',
+  );
+  assert.equal(
+    h.context.snapshotCopyText([false], 0, [' https://e.com/a/very/lo ', ' ng/path ok']),
+    ' https://e.com/a/very/lo\n ng/path ok',
+    'rows a program broke itself keep their break: no spaces are made up',
   );
 });
 
-test('copy keeps the space of a wrap that fell on a word break', () => {
+test('copy without an answer from Herdr breaks every row', () => {
   const h = harness('', 0);
-  const terminal = copyTerminal([{ text: 'aaaa bbbb ' }, { text: 'cccc' }, { text: 'short' }, { text: 'end' }], 10);
   assert.equal(
-    h.context.snapshotCopyText(terminal, 0, ['aaaa bbbb ', 'cccc      ', 'short     ', 'end']),
-    'aaaa bbbb cccc\nshort\nend',
+    h.context.snapshotCopyText(undefined, 0, ['word0 word1 word', '7 word8         ']),
+    'word0 word1 word\n7 word8',
   );
 });
 
 test('copy adds no break for a row the selection only touches', () => {
   const h = harness('', 0);
-  const terminal = copyTerminal([
-    { text: 'see:' }, { text: 'https://e.com/a/' }, { text: 'b/c' }, { text: 'next' },
-  ], 16);
+  const continues = [false, true, false, false];
   // Phones put selection handles in the padding of the row above, or at the
   // start of the row below.
   assert.equal(
-    h.context.snapshotCopyText(terminal, 0, ['            ', 'https://e.com/a/', 'b/c             ', '']),
+    h.context.snapshotCopyText(continues, 0, ['            ', 'https://e.com/a/', 'b/c             ', '']),
     'https://e.com/a/b/c',
   );
   assert.equal(
-    h.context.snapshotCopyText(terminal, 0, ['see:        ', 'https://e.com/a/', 'b/c             ', 'next']),
+    h.context.snapshotCopyText(continues, 0, ['see:        ', 'https://e.com/a/', 'b/c             ', 'next']),
     'see:\nhttps://e.com/a/b/c\nnext',
     'rows with selected text keep their breaks',
   );
-  assert.equal(h.context.snapshotCopyText(terminal, 2, ['   ']), '', 'a blank selection stays blank');
+  assert.equal(h.context.snapshotCopyText(continues, 2, ['   ']), '', 'a blank selection stays blank');
 });
 
 test('a link runs across the rows a URL wraps over', () => {

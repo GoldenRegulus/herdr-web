@@ -30,7 +30,7 @@ from urllib.parse import urlsplit
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from herdr_web.output_flow import (
     FullOutputWindow,
@@ -337,6 +337,13 @@ class TerminalResize(BaseModel):
 class FocusRequest(BaseModel):
     kind: Literal["workspace", "tab", "agent"]
     target_id: str
+
+
+class PaneTextRequest(BaseModel):
+    pane_id: str
+    # The pane's width as the browser shows it. Herdr reads only columns
+    # inside the pane, and does not report its width.
+    cols: int = Field(ge=1, le=MAX_TERMINAL_DIMENSION)
 
 
 class CreateRequest(BaseModel):
@@ -1541,6 +1548,52 @@ async def create_backend_target(
     except HTTPException:
         raise
     except (OSError, RuntimeError) as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+
+
+def _integer(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+@app.post("/api/backends/{backend_id}/pane-text")
+async def read_pane_text(backend_id: str, request: PaneTextRequest) -> dict[str, object]:
+    """The pane's visible rows as Herdr copies them: rows the terminal wrapped
+    join, and only real line breaks separate lines."""
+    backend = discover_backends().get(backend_id)
+    if backend is None:
+        raise HTTPException(status_code=404, detail="Herdr backend is no longer available")
+    try:
+        snapshot = await navigation_snapshot(backend)
+        if request.pane_id not in navigation_ids(snapshot, "panes", "pane_id"):
+            raise HTTPException(status_code=404, detail="Herdr pane was not found")
+        info = await run_herdr_socket_api(backend, "pane.get", {"pane_id": request.pane_id})
+        result = info.get("result")
+        pane = result.get("pane") if isinstance(result, dict) else None
+        scroll = pane.get("scroll") if isinstance(pane, dict) else None
+        rows = _integer(scroll.get("viewport_rows")) if isinstance(scroll, dict) else None
+        newest = _integer(scroll.get("max_offset_from_bottom")) if isinstance(scroll, dict) else None
+        offset = _integer(scroll.get("offset_from_bottom")) if isinstance(scroll, dict) else None
+        if rows is None or newest is None or offset is None or rows < 1:
+            raise RuntimeError("Herdr did not report the pane's viewport")
+        # Herdr counts rows from the oldest line it keeps.
+        top = max(0, newest - offset)
+        document = await run_herdr_socket_api(
+            backend,
+            "pane.selection.read",
+            {
+                "pane_id": request.pane_id,
+                "anchor": {"row": top, "col": 0},
+                "cursor": {"row": top + rows - 1, "col": request.cols - 1},
+            },
+        )
+        result = document.get("result")
+        text = result.get("text") if isinstance(result, dict) else None
+        if not isinstance(text, str):
+            raise RuntimeError("Herdr did not return the pane's text")
+        return {"text": text, "rows": rows}
+    except HTTPException:
+        raise
+    except (OSError, RuntimeError, ValueError) as error:
         raise HTTPException(status_code=503, detail=str(error)) from error
 
 

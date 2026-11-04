@@ -14,8 +14,8 @@ differently.
 
 `suite.js`: core input.
 
-- Desktop: Full mode, Panes mode with two panes, narrow window, clicking
-  links, a new tab and a new space.
+- Desktop: Full mode, Panes mode with two panes, narrow window, copying a
+  selection, clicking links, a new tab and a new space.
 - Phones: tap versus swipe and fling for raising the keyboard, typing,
   predictive words (also right before Enter), backspace, caret moves,
   arrow and Tab keys, bracketed and plain paste, the iOS paste menu,
@@ -35,8 +35,10 @@ differently.
 - A multi-line prompt like an agent's (`ml.py`): newlines, joining lines,
   moving up a line, multi-line paste, a long wrapped line.
 - Hold-to-copy across wrapped lines and real newlines, partial rows, a
-  wrap that falls on a space, blank lines and repeated spaces, and selection
-  handles in the rows around a wrapped URL.
+  wrap that falls on a space, blank lines and repeated spaces, selection
+  handles in the rows around a wrapped URL, and a row that stops one cell
+  short of the edge before a real break. Copy joins rows as Herdr says.
+- Selection mode opens only on a long press, also with a stuck touch.
 - A prompt that ends in a no-break space, as Claude Code draws it: typing
   adds no spaces, and Ctrl then c sends Ctrl+C.
 - A new tab and a new space from Browse, and a tab on screen closed by
