@@ -200,6 +200,41 @@ class CreateTargetTests(unittest.TestCase):
             self.assertEqual(raised.exception.status_code, 404)
 
 
+class PaneTextTests(unittest.TestCase):
+    def read(self, request):
+        calls = []
+
+        async def run_herdr_socket_api(_backend, method, params):
+            calls.append((method, params))
+            if method == "pane.get":
+                return {"result": {"pane": {"scroll": {
+                    "viewport_rows": 30, "max_offset_from_bottom": 120, "offset_from_bottom": 20,
+                }}}}
+            return {"result": {"text": "wrapped line\nnext"}}
+
+        async def navigation_snapshot(_backend, refresh=False):
+            return {"panes": [{"pane_id": "w1:p1"}]}
+
+        with mock.patch.object(application, "discover_backends", return_value={"b": mock.Mock(id="b")}), \
+                mock.patch.object(application, "run_herdr_socket_api", run_herdr_socket_api), \
+                mock.patch.object(application, "navigation_snapshot", navigation_snapshot):
+            result = asyncio.run(application.read_pane_text("b", request))
+        return result, calls
+
+    def test_the_visible_rows_are_read_as_herdr_copies_them(self) -> None:
+        result, calls = self.read(application.PaneTextRequest(pane_id="w1:p1", cols=46))
+        # Scrolled up 20 rows from the newest: the screen starts at row 100.
+        self.assertEqual(calls[1], ("pane.selection.read", {
+            "pane_id": "w1:p1", "anchor": {"row": 100, "col": 0}, "cursor": {"row": 129, "col": 45},
+        }))
+        self.assertEqual(result, {"text": "wrapped line\nnext", "rows": 30})
+
+    def test_only_known_panes_are_read(self) -> None:
+        with self.assertRaises(HTTPException) as raised:
+            self.read(application.PaneTextRequest(pane_id="w9:p1", cols=46))
+        self.assertEqual(raised.exception.status_code, 404)
+
+
 class TransportSecurityTests(unittest.TestCase):
     def test_server_does_not_trust_forwarded_source_addresses(self) -> None:
         self.assertIn("proxy_headers=False", inspect.getsource(application.main))

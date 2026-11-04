@@ -17,6 +17,7 @@ import {
   terminalTextAtCursor,
   terminalTextInputDelta,
 } from './mobile-prediction.js';
+import { rowContinuations } from './pane-text.js';
 import { openableTerminalUrl, terminalUrls } from './terminal-links.js';
 import './vendor/xterm.js';
 import './vendor/xterm-addon-fit.js';
@@ -1940,6 +1941,7 @@ const { WebglAddon } = globalThis.WebglAddon;
     paneKeyboardHelper(pane)?.blur();
 
     const capture = captureTerminalSnapshot(pane.terminal);
+    const captureRows = paneScreenRows(pane.terminal);
     const view = document.createElement('div');
     view.className = 'pane-snapshot-view';
     view.setAttribute('role', 'region');
@@ -1967,10 +1969,16 @@ const { WebglAddon } = globalThis.WebglAddon;
       scrollback: 0,
       theme: terminalTheme,
     });
-    pane.snapshot = {
+    const snapshot = {
       auto, openedAt: performance.now(), selected: false, closeTimer: undefined,
-      terminal: snapshotTerminal, view,
+      terminal: snapshotTerminal, view, continues: undefined,
     };
+    pane.snapshot = snapshot;
+    // Herdr says which of the frozen rows the terminal wrapped, for copy. The
+    // selection takes the user longer than the question takes Herdr.
+    void readPaneContinuations(pane, captureRows).then((continues) => {
+      snapshot.continues = continues;
+    });
     view.addEventListener('click', () => {
       if (!pane.snapshot?.auto || pane.snapshot.selected) return;
       // The tap that ends the long press must not close the new snapshot.
@@ -2568,11 +2576,12 @@ const { WebglAddon } = globalThis.WebglAddon;
       && elapsedMs <= MOBILE_TAP_MAX_MS;
   }
 
-  // Herdr draws every row at an explicit position, so xterm rarely marks a
-  // row as wrapped. A row whose last cell holds text continues on the next
-  // row; Herdr clears unused cells with spaces. A wrap that falls on a word
-  // break leaves its space in the last cell, after text in the one before.
-  function snapshotRowContinues(terminal, row) {
+  // Links only, to find a plain URL a shell wrapped over rows; copy asks
+  // Herdr instead. Herdr draws every row at an explicit position, so xterm
+  // rarely marks a row as wrapped. A row whose last cell holds text likely
+  // continues on the next row; Herdr clears unused cells with spaces. A wrap
+  // that falls on a word break leaves its space in the last cell.
+  function linkRowContinues(terminal, row) {
     const buffer = terminal.buffer.active;
     if (buffer.getLine(row + 1)?.isWrapped === true) return true;
     const line = buffer.getLine(row);
@@ -2581,20 +2590,54 @@ const { WebglAddon } = globalThis.WebglAddon;
     return filled(last) || (last?.getChars() === ' ' && filled(line.getCell(terminal.cols - 2)));
   }
 
-  // Hold-to-copy joins rows by their meaning: a wrapped row continues the
-  // same line and joins with nothing, a hard break joins with a line break.
-  // The padding before a hard break is not text. A selection that starts in
-  // the padding of the row above, or ends at the start of the row below, has
-  // nothing selected on that row, so the row adds no break.
-  function snapshotCopyText(terminal, firstRow, rowTexts) {
+  // Copy joins rows the way Herdr does, which keeps the terminal state: a row
+  // the terminal wrapped goes on with no break, every other row ends its
+  // line. `continues[row]` is Herdr's answer for each screen row; without one
+  // every row ends its line, which is what the screen shows. The padding
+  // before a break is not text. A selection that starts in the padding of the
+  // row above, or ends at the start of the row below, has nothing selected on
+  // that row, so the row adds no break.
+  function snapshotCopyText(continues, firstRow, rowTexts) {
     let start = 0;
     let end = rowTexts.length;
     while (end - start > 1 && rowTexts[start].trim() === '') start += 1;
     while (end - start > 1 && rowTexts[end - 1].trim() === '') end -= 1;
     return plainSpaces(rowTexts.slice(start, end).map((rowText, index, kept) => {
       if (index === kept.length - 1) return rowText.trimEnd();
-      return snapshotRowContinues(terminal, firstRow + start + index) ? rowText : `${rowText.trimEnd()}\n`;
+      return continues?.[firstRow + start + index] === true ? rowText : `${rowText.trimEnd()}\n`;
     }).join(''));
+  }
+
+  // The rows a pane shows, padded to its width.
+  function paneScreenRows(terminal) {
+    const buffer = terminal.buffer.active;
+    return Array.from(
+      { length: terminal.rows },
+      (_, row) => buffer.getLine(buffer.viewportY + row)?.translateToString(false) ?? '',
+    );
+  }
+
+  // Which of `rows` go on in the next, as Herdr copies the pane's screen.
+  // Undefined when Herdr cannot say or the screen has changed since.
+  async function readPaneContinuations(pane, rows) {
+    const backend = currentBackend;
+    if (!backend) return undefined;
+    try {
+      const response = await fetchWithTimeout(
+        backendApiUrl(backend, 'pane-text'),
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pane_id: pane.paneId, cols: pane.terminal.cols }),
+        },
+        3_000,
+      );
+      if (!response.ok) return undefined;
+      const { text } = await response.json();
+      return typeof text === 'string' ? rowContinuations(rows.map(plainSpaces), plainSpaces(text)) : undefined;
+    } catch (_) {
+      return undefined;
+    }
   }
 
   // The line through buffer row `row`, joined across the rows it wraps over
@@ -2603,9 +2646,9 @@ const { WebglAddon } = globalThis.WebglAddon;
   function terminalLineAround(terminal, row) {
     const buffer = terminal.buffer.active;
     let first = row;
-    while (first > 0 && row - first < LINK_LINE_MAX_ROWS && snapshotRowContinues(terminal, first - 1)) first -= 1;
+    while (first > 0 && row - first < LINK_LINE_MAX_ROWS && linkRowContinues(terminal, first - 1)) first -= 1;
     let last = row;
-    while (last < buffer.length - 1 && last - row < LINK_LINE_MAX_ROWS && snapshotRowContinues(terminal, last)) last += 1;
+    while (last < buffer.length - 1 && last - row < LINK_LINE_MAX_ROWS && linkRowContinues(terminal, last)) last += 1;
     // Most lines hold no URL: a plain read rules that out before any cell is
     // mapped. The hover and every tap ask.
     let plain = '';
@@ -2707,7 +2750,8 @@ const { WebglAddon } = globalThis.WebglAddon;
   }
 
   // A pane's own selection copies by line meaning too.
-  function paneSelectionCopyText(terminal) {
+  function paneSelectionCopyText(pane) {
+    const terminal = pane.terminal;
     const range = terminal.getSelectionPosition();
     if (!range) return undefined;
     const buffer = terminal.buffer.active;
@@ -2719,7 +2763,13 @@ const { WebglAddon } = globalThis.WebglAddon;
         row === range.end.y ? range.end.x : terminal.cols,
       ) ?? '');
     }
-    return snapshotCopyText(terminal, range.start.y, rowTexts);
+    // Herdr's answer counts while the screen still shows the rows it was
+    // read for.
+    const read = pane.selectionRows;
+    const screen = paneScreenRows(terminal);
+    const current = read && read.rows.length === screen.length
+      && read.rows.every((row, index) => row === screen[index]);
+    return snapshotCopyText(current ? read.continues : undefined, range.start.y - buffer.viewportY, rowTexts);
   }
 
   // When the box holds nothing before the caret, the native delete has no
@@ -3720,6 +3770,19 @@ const { WebglAddon } = globalThis.WebglAddon;
       }, true);
     }
     paneTerminal.onData((data) => sendPaneTerminalInput(record, paneTerminal, data));
+    // Ask Herdr which rows wrap once a selection settles, so a copy has the
+    // answer at hand.
+    let selectionRowsTimer;
+    paneTerminal.onSelectionChange(() => {
+      clearTimeout(selectionRowsTimer);
+      if (!paneTerminal.hasSelection()) return;
+      selectionRowsTimer = setTimeout(() => {
+        const rows = paneScreenRows(paneTerminal);
+        void readPaneContinuations(record, rows).then((continues) => {
+          record.selectionRows = { rows, continues };
+        });
+      }, 150);
+    });
     paneTerminal.element.addEventListener('focusin', () => setActivePane(streamId));
     tile.addEventListener('pointerdown', () => setActivePane(streamId));
     fitPaneTerminal(record);
@@ -5116,14 +5179,13 @@ const { WebglAddon } = globalThis.WebglAddon;
   document.addEventListener('copy', (event) => {
     const selected = [...paneTerminals.values()].find((candidate) => candidate.terminal.hasSelection());
     if (selected) {
-      event.clipboardData?.setData('text/plain', paneSelectionCopyText(selected.terminal));
+      event.clipboardData?.setData('text/plain', paneSelectionCopyText(selected));
       event.preventDefault();
       event.stopImmediatePropagation();
       return;
     }
     const pane = selectedPaneTerminal();
-    const snapshot = pane?.snapshot?.terminal;
-    if (!snapshot) return;
+    if (!pane?.snapshot) return;
     const selection = document.getSelection();
     if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return;
     const range = selection.getRangeAt(0);
@@ -5140,7 +5202,7 @@ const { WebglAddon } = globalThis.WebglAddon;
       rowTexts.push(part.toString());
     }
     // The snapshot has no scrollback: its row n is DOM row n.
-    event.clipboardData?.setData('text/plain', snapshotCopyText(snapshot, first.index, rowTexts));
+    event.clipboardData?.setData('text/plain', snapshotCopyText(pane.snapshot.continues, first.index, rowTexts));
     event.preventDefault();
   }, true);
   // Window listeners run before the document ones that stop these events.

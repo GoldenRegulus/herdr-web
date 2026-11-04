@@ -485,6 +485,13 @@ async function phone(profile) {
   const url = `https://example.com/${'a'.repeat(70)}/end`;
   copyCase('copy of a wrapped URL adds no break for rows the handles touch',
     `printf 'above\\n%s\\nbelow\\n' '${url}'`, ['above', 8, 'below', 0], url);
+  // Like an agent's output: a one-column margin, and a row that stops one
+  // cell short of the edge, then a real line break. Guessing joined these
+  // with two made-up spaces; Herdr says the line ended.
+  copyCase('copy keeps a real break after a row that stops short of the edge',
+    `printf ' %s\\n %s\\n' "$(printf 'u%.0s' $(seq $(($(tput cols) - 2))))" 'tail ok'`, [' uuuu', 1, ' tail ok', 8],
+    async () => `${'u'.repeat(await page.evaluate(() => [...document.querySelectorAll('.pane-snapshot-view .xterm-rows > div')]
+      .find((row) => row.textContent.includes('uuuu')).textContent.trim().length))}\n tail ok`);
   copyCase('copy keeps spaces inside a line and blank lines',
     "printf 'a  b   c\\n\\nlast\\n'", ['a  b', 0, 'last', 4],
     'a  b   c\n\nlast');

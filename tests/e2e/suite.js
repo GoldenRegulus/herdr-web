@@ -181,6 +181,25 @@ async function desktop() {
     await page.keyboard.press('Control+C');
     await sleep(200);
 
+    // Copy joins the rows the terminal wrapped, as Herdr says, and keeps real
+    // line breaks.
+    const words = Array.from({ length: 16 }, (_, index) => `word${index}`).join(' ');
+    L.run('w1:p1', `clear; printf '%s\\nhard one\\n' '${words}'`);
+    const from = await L.rowPoint(page, 'word0', 0);
+    const to = await L.rowPoint(page, 'hard one', 7);
+    await page.mouse.move(from.x - 3, from.y);
+    await page.mouse.down();
+    await page.mouse.move(to.x + 3, to.y, { steps: 5 });
+    await page.mouse.up();
+    await sleep(600);
+    const copied = await page.evaluate(() => {
+      const data = new DataTransfer();
+      document.dispatchEvent(new ClipboardEvent('copy', { clipboardData: data, bubbles: true, cancelable: true }));
+      return data.getData('text/plain');
+    });
+    check('desktop panes: copy joins a wrapped line and keeps real breaks',
+      copied === `${words}\nhard one`, JSON.stringify(copied));
+
     // Links open on click: an OSC 8 link, and a URL, also from a wrapped row.
     await L.recordOpenedLinks(page);
     const long = `https://wrap.example/${'a'.repeat(100)}/end`;
