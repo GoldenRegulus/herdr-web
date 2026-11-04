@@ -174,6 +174,23 @@ header {
   padding: .65rem .8rem;
 }
 .clipboard-retry { pointer-events: auto; text-align: left; }
+.input-log {
+  background: color-mix(in srgb, var(--theme-background) 88%, transparent);
+  border: 1px solid var(--theme-accent);
+  color: var(--theme-text);
+  font: 11px/1.35 "Herdr MesloLGS NF", monospace;
+  left: .5rem;
+  margin: 0;
+  max-width: calc(100vw - 1rem);
+  overflow: hidden;
+  padding: .4rem .5rem;
+  pointer-events: none;
+  position: fixed;
+  top: calc(var(--visual-viewport-top) + 3rem);
+  white-space: pre-wrap;
+  word-break: break-all;
+  z-index: 20;
+}
 @keyframes toast-in { from { opacity: 0; transform: translateY(6px); } }
 #telemetry {
   align-items: center;
@@ -385,6 +402,12 @@ header {
   padding: 0 1.1rem;
 }
 #pane-tabs button:focus-visible { background: var(--theme-surface-0); }
+#pane-tabs button.pane-tab-new {
+  color: var(--theme-subtext);
+  min-width: 2.25rem;
+  padding: 0 .7rem;
+}
+.pane-sidebar-item.pane-create { color: var(--theme-subtext); }
 #pane-tabs button[aria-selected="true"] {
   background: transparent;
   border-bottom-color: var(--theme-accent);
@@ -500,6 +523,9 @@ header {
 .pane-snapshot-view .xterm-helper-textarea { pointer-events: none !important; }
 .pane-terminal .xterm-viewport { overflow-y: hidden; }
 .xterm-helper-textarea.mobile-keyboard-target {
+  /* xterm's nowrap collapses spaces, and WebKit then types a trailing space
+     as a no-break space. pre keeps the line unwrapped and spaces as typed. */
+  white-space: pre;
   -webkit-appearance: none;
   -webkit-touch-callout: default;
   appearance: none;
@@ -858,6 +884,7 @@ header {
     width: 100%;
   }
   .sheet-item:focus-visible { background: var(--theme-surface-0); }
+  .sheet-item.sheet-item-create { color: var(--theme-subtext); }
   .sheet-item[aria-current="true"] {
     background: var(--theme-surface-0);
     box-shadow: inset 3px 0 var(--theme-accent);

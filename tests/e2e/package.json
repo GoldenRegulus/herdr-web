@@ -1,0 +1,11 @@
+{
+  "private": true,
+  "description": "Browser tests for herdr-web against a real Herdr session",
+  "scripts": {
+    "suite": "node suite.js",
+    "edge": "node edge.js"
+  },
+  "devDependencies": {
+    "playwright": "1.63.0"
+  }
+}

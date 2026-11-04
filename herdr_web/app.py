@@ -339,6 +339,14 @@ class FocusRequest(BaseModel):
     target_id: str
 
 
+class CreateRequest(BaseModel):
+    kind: Literal["workspace", "tab"]
+    # The space a new tab joins.
+    workspace_id: str | None = None
+    # The pane whose working directory the new tab or space starts in.
+    pane_id: str | None = None
+
+
 @dataclass(frozen=True)
 class PaneStreamRequest:
     stream_id: int
@@ -1459,21 +1467,77 @@ async def focus_backend_target(
         snapshot = await navigation_snapshot(backend, refresh=True)
         collection = "agents" if request.kind == "agent" else f"{request.kind}s"
         id_field = "pane_id" if request.kind == "agent" else f"{request.kind}_id"
-        records = snapshot.get(collection)
-        allowed_ids = (
-            {
-                record.get(id_field)
-                for record in records
-                if isinstance(record, dict) and isinstance(record.get(id_field), str)
-            }
-            if isinstance(records, list)
-            else set()
-        )
-        if request.target_id not in allowed_ids:
+        if request.target_id not in navigation_ids(snapshot, collection, id_field):
             raise HTTPException(status_code=404, detail=f"Herdr {request.kind} was not found")
         await run_herdr_api(backend, request.kind, "focus", request.target_id)
-        navigation_snapshot_cache.pop(backend.id, None)
         return await navigation_snapshot(backend, refresh=True)
+    except HTTPException:
+        raise
+    except (OSError, RuntimeError) as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+
+
+def navigation_ids(snapshot: dict[str, object], collection: str, field: str) -> set[str]:
+    records = snapshot.get(collection)
+    if not isinstance(records, list):
+        return set()
+    return {
+        record[field]
+        for record in records
+        if isinstance(record, dict) and isinstance(record.get(field), str)
+    }
+
+
+async def pane_working_directory(backend: Backend, pane_id: str) -> str | None:
+    """The directory a pane's program is in, or None when Herdr cannot say."""
+    try:
+        document = await run_herdr_api(backend, "pane", "get", pane_id)
+    except (OSError, RuntimeError):
+        return None
+    result = document.get("result")
+    pane = result.get("pane") if isinstance(result, dict) else None
+    if not isinstance(pane, dict):
+        return None
+    for field in ("foreground_cwd", "cwd"):
+        value = pane.get(field)
+        if isinstance(value, str) and value.startswith("/"):
+            return value
+    return None
+
+
+@app.post("/api/backends/{backend_id}/create")
+async def create_backend_target(
+    backend_id: str, request: CreateRequest
+) -> dict[str, object]:
+    """Create a tab or a space without moving Herdr's focus; the browser then
+    selects the new tab, which focuses it like any other selection."""
+    backend = discover_backends().get(backend_id)
+    if backend is None:
+        raise HTTPException(status_code=404, detail="Herdr backend is no longer available")
+    try:
+        snapshot = await navigation_snapshot(backend, refresh=True)
+        arguments = [request.kind, "create", "--no-focus"]
+        if request.kind == "tab":
+            if request.workspace_id not in navigation_ids(snapshot, "workspaces", "workspace_id"):
+                raise HTTPException(status_code=404, detail="Herdr workspace was not found")
+            arguments += ["--workspace", request.workspace_id]
+        if request.pane_id is not None:
+            if request.pane_id not in navigation_ids(snapshot, "panes", "pane_id"):
+                raise HTTPException(status_code=404, detail="Herdr pane was not found")
+            directory = await pane_working_directory(backend, request.pane_id)
+            if directory is not None:
+                arguments += ["--cwd", directory]
+        document = await run_herdr_api(backend, *arguments)
+        result = document.get("result")
+        tab = result.get("tab") if isinstance(result, dict) else None
+        if not isinstance(tab, dict) or not all(
+            isinstance(tab.get(field), str) for field in ("tab_id", "workspace_id")
+        ):
+            raise RuntimeError("Herdr did not report the new tab")
+        return {
+            "created": {"workspace_id": tab["workspace_id"], "tab_id": tab["tab_id"]},
+            "navigation": await navigation_snapshot(backend, refresh=True),
+        }
     except HTTPException:
         raise
     except (OSError, RuntimeError) as error:

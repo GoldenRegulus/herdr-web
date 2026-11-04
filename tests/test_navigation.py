@@ -1,6 +1,10 @@
+import asyncio
 import inspect
 import json
 import unittest
+from unittest import mock
+
+from fastapi import HTTPException
 
 from starlette.websockets import WebSocket
 
@@ -139,6 +143,61 @@ class NavigationTests(unittest.TestCase):
                 },
                 snapshot,
             )
+
+
+class CreateTargetTests(unittest.TestCase):
+    snapshot = {
+        "workspaces": [{"workspace_id": "w1"}],
+        "tabs": [{"tab_id": "w1:t1", "workspace_id": "w1"}],
+        "panes": [{"pane_id": "w1:p1", "tab_id": "w1:t1", "workspace_id": "w1"}],
+    }
+
+    def create(self, request, pane=None):
+        calls = []
+
+        async def run_herdr_api(_backend, *arguments):
+            calls.append(arguments)
+            if arguments[:2] == ("pane", "get"):
+                return {"result": {"pane": pane or {}}}
+            return {"result": {"tab": {"tab_id": "w1:t2", "workspace_id": "w1"}}}
+
+        async def navigation_snapshot(_backend, refresh=False):
+            return self.snapshot
+
+        with mock.patch.object(application, "discover_backends", return_value={"b": mock.Mock(id="b")}), \
+                mock.patch.object(application, "run_herdr_api", run_herdr_api), \
+                mock.patch.object(application, "navigation_snapshot", navigation_snapshot):
+            result = asyncio.run(application.create_backend_target("b", request))
+        return result, calls
+
+    def test_a_new_tab_joins_the_space_in_the_pane_directory(self) -> None:
+        result, calls = self.create(
+            application.CreateRequest(kind="tab", workspace_id="w1", pane_id="w1:p1"),
+            pane={"cwd": "/home/me", "foreground_cwd": "/home/me/project"},
+        )
+        self.assertEqual(calls[0], ("pane", "get", "w1:p1"))
+        self.assertEqual(
+            calls[1],
+            ("tab", "create", "--no-focus", "--workspace", "w1", "--cwd", "/home/me/project"),
+        )
+        self.assertEqual(result["created"], {"workspace_id": "w1", "tab_id": "w1:t2"})
+        self.assertIs(result["navigation"], self.snapshot)
+
+    def test_a_new_space_without_a_known_directory_uses_herdrs_default(self) -> None:
+        _result, calls = self.create(
+            application.CreateRequest(kind="workspace", pane_id="w1:p1"), pane={"cwd": "relative"},
+        )
+        self.assertEqual(calls[-1], ("workspace", "create", "--no-focus"))
+
+    def test_only_known_spaces_and_panes_are_accepted(self) -> None:
+        for request in (
+            application.CreateRequest(kind="tab", workspace_id="w9"),
+            application.CreateRequest(kind="tab"),
+            application.CreateRequest(kind="workspace", pane_id="w9:p1"),
+        ):
+            with self.assertRaises(HTTPException) as raised:
+                self.create(request)
+            self.assertEqual(raised.exception.status_code, 404)
 
 
 class TransportSecurityTests(unittest.TestCase):
